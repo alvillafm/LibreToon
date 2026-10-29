@@ -1,0 +1,14 @@
+[package]
+name = "libretoon"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+eframe = "=0.37.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.17"
+xml-rs = "=0.8.29"
+flate2 = "1"
+crc32fast = "1"
+
