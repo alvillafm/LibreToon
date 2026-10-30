@@ -60,8 +60,16 @@ impl Editor {
         self.finish_pending_pen();
         self.checkpoint();
         for layer in &mut self.doc.layers {
+            layer.init_keys();
             layer.frames.resize(count, Default::default());
+            layer.options.keys.resize(count, true);
+            layer.options.tweens.retain(|t| t.start < count - 1);
+            for t in &mut layer.options.tweens {
+                t.end = t.end.min(count - 1);
+                layer.options.keys[t.end] = true;
+            }
         }
+        self.fit_camera_duration();
         self.frame = self.frame.min(count - 1);
         self.playing = false;
         self.recover();
@@ -73,7 +81,7 @@ impl Editor {
         let mut open = true;
         let mut apply = false;
         let mut cancel = false;
-        egui::Window::new("Ajustes de documento")
+        egui::Window::new(crate::i18n::tr("Ajustes de documento"))
             .id(egui::Id::unique("document-settings"))
             .open(&mut open)
             .collapsible(false)
@@ -113,7 +121,7 @@ impl Editor {
                 egui::Grid::new("document-size")
                     .spacing([18., 10.])
                     .show(ui, |ui| {
-                        ui.label("Ancho");
+                        ui.label(crate::i18n::tr("Ancho"));
                         ui.add(
                             egui::DragValue::new(&mut settings.width)
                                 .range(1..=16384)
@@ -121,7 +129,7 @@ impl Editor {
                                 .update_while_editing(false),
                         );
                         ui.end_row();
-                        ui.label("Alto");
+                        ui.label(crate::i18n::tr("Alto"));
                         ui.add(
                             egui::DragValue::new(&mut settings.height)
                                 .range(1..=16384)
@@ -129,7 +137,7 @@ impl Editor {
                                 .update_while_editing(false),
                         );
                         ui.end_row();
-                        ui.label("Velocidad");
+                        ui.label(crate::i18n::tr("Velocidad"));
                         ui.add(
                             egui::DragValue::new(&mut settings.fps)
                                 .range(1..=240)
@@ -140,10 +148,10 @@ impl Editor {
                     });
                 ui.add_space(12.);
                 ui.horizontal(|ui| {
-                    if ui.button("Aplicar").clicked() {
+                    if ui.button(crate::i18n::tr("Aplicar")).clicked() {
                         apply = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(crate::i18n::tr("Cancelar")).clicked() {
                         cancel = true;
                     }
                 });
@@ -161,29 +169,39 @@ impl Editor {
     pub fn color_swatches(&mut self, ui: &mut egui::Ui) {
         let old_fill = self.fill_color;
         let old_stroke = self.color;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.;
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Relleno").size(8.).color(MUTED));
-                if ui.color_edit_button_srgba(&mut self.fill_color).clicked() {
-                    self.active_fill = true;
-                }
-            });
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Contorno").size(8.).color(MUTED));
-                // Hollow frame makes the stroke control distinct from the fill.
-                let response = ui.color_edit_button_srgba(&mut self.color);
-                ui.painter().rect_stroke(
-                    response.rect.shrink(3.),
-                    0.,
-                    Stroke::new(2., Color32::BLACK),
-                    egui::StrokeKind::Inside,
-                );
+        let (r, _) = ui.allocate_exact_size(Vec2::new(65., 58.), Sense::hover());
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(Rect::from_min_size(
+                r.min + Vec2::new(24., 20.),
+                Vec2::splat(30.),
+            )),
+            |ui| {
+                ui.spacing_mut().interact_size = Vec2::splat(32.);
+                let response = ui
+                    .color_edit_button_srgba(&mut self.color)
+                    .on_hover_text(crate::i18n::tr("Contorno"));
+                ui.painter()
+                    .rect_filled(response.rect.shrink(5.), 0., design::PANEL);
                 if response.clicked() {
                     self.active_fill = false;
                 }
-            });
-        });
+            },
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(Rect::from_min_size(r.min, Vec2::splat(30.))),
+            |ui| {
+                ui.spacing_mut().interact_size = Vec2::splat(32.);
+                if ui
+                    .color_edit_button_srgba(&mut self.fill_color)
+                    .on_hover_text(crate::i18n::tr("Relleno"))
+                    .clicked()
+                {
+                    self.active_fill = true;
+                }
+            },
+        );
+        ui.advance_cursor_after_rect(r);
+        ui.add_space(4.);
         if old_fill != self.fill_color {
             self.fill_enabled = true;
             self.change_selected_style(true, false, false, false);
@@ -193,17 +211,20 @@ impl Editor {
             self.change_selected_style(false, true, false, false);
         }
         ui.horizontal(|ui| {
-            if ui
-                .small_button("⇄")
-                .on_hover_text("Intercambiar colores · X")
-                .clicked()
+            if design::button(
+                ui,
+                Icon::SwapColors,
+                "",
+                "Intercambiar colores · X",
+                false,
+                true,
+            )
+            .clicked()
             {
                 self.swap_colors();
                 self.change_selected_style(true, true, false, false);
             }
-            if ui
-                .small_button("◩")
-                .on_hover_text("Blanco y negro · D")
+            if design::button(ui, Icon::ResetColors, "", "Blanco y negro · D", false, true)
                 .clicked()
             {
                 self.color = Color32::BLACK;
@@ -213,28 +234,20 @@ impl Editor {
                 self.change_selected_style(true, true, false, false);
             }
         });
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.fill_enabled, egui::RichText::new("R").size(9.))
-                .on_hover_text("Dibujar relleno");
-            ui.checkbox(&mut self.stroke_enabled, egui::RichText::new("C").size(9.))
-                .on_hover_text("Dibujar contorno");
-        });
     }
     pub fn properties_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            design::draw(
-                ui.painter(),
-                Rect::from_min_size(ui.cursor().min, Vec2::splat(20.)),
-                Icon::Settings,
-                MUTED,
-            );
-            ui.add_space(25.);
-            ui.strong("Propiedades");
-        });
-        ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);
             self.tool_options_ui(ui);
+            self.advanced_properties(ui);
+            if self.canvas.selected.first().is_some_and(|&(l, m)| {
+                self.doc.layers[l].frames[self.frame][m]
+                    .style
+                    .instance
+                    .is_some()
+            }) {
+                return;
+            }
             if !self.canvas.selected.is_empty()
                 && matches!(
                     self.tool,
@@ -279,11 +292,11 @@ impl Editor {
                 Tool::Rectangle | Tool::Pen | Tool::Ellipse | Tool::Polygon
             ) {
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.fill_enabled, "Relleno");
+                    ui.checkbox(&mut self.fill_enabled, crate::i18n::tr("Relleno"));
                     ui.color_edit_button_srgba(&mut self.fill_color);
                 });
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.stroke_enabled, "Contorno");
+                    ui.checkbox(&mut self.stroke_enabled, crate::i18n::tr("Contorno"));
                     ui.color_edit_button_srgba(&mut self.color);
                 });
                 ui.add_space(8.);
@@ -291,6 +304,9 @@ impl Editor {
             if matches!(
                 self.tool,
                 Tool::Brush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
                     | Tool::VectorBrush
                     | Tool::Rectangle
                     | Tool::Pen
@@ -300,7 +316,7 @@ impl Editor {
                     | Tool::Polygon
                     | Tool::Eraser
             ) {
-                ui.label("Grosor");
+                ui.label(crate::i18n::tr("Grosor"));
                 let response = ui.add(egui::Slider::new(&mut self.width, 1.0..=80.).suffix(" px"));
                 if response.changed() && self.tool == Tool::Width {
                     let ids = self.canvas.selected.clone();
@@ -312,16 +328,23 @@ impl Editor {
                     self.recover();
                 }
             }
-            if matches!(self.tool, Tool::Brush | Tool::VectorBrush) {
+            if matches!(
+                self.tool,
+                Tool::Brush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
+                    | Tool::VectorBrush
+            ) {
                 ui.add_space(10.);
-                ui.label("Suavizado");
+                ui.label(crate::i18n::tr("Suavizado"));
                 ui.add(
                     egui::Slider::new(&mut self.smoothing, 0.0..=1.)
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.)),
                 );
             }
             if self.tool == Tool::Bucket {
-                ui.label("Cierre de huecos");
+                ui.label(crate::i18n::tr("Cierre de huecos"));
                 egui::ComboBox::from_id_salt("bucket-gap")
                     .selected_text(self.gap.label())
                     .show_ui(ui, |ui| {
@@ -347,7 +370,7 @@ impl Editor {
                 if ui
                     .add_enabled(
                         self.fill_enabled || self.stroke_enabled,
-                        egui::Button::new("Aplicar estilo a la selección"),
+                        egui::Button::new(crate::i18n::tr("Aplicar estilo a la selección")),
                     )
                     .clicked()
                 {
@@ -357,7 +380,7 @@ impl Editor {
         });
     }
     pub(crate) fn width_profile_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Perfil del contorno");
+        ui.label(crate::i18n::tr("Perfil del contorno"));
         let previous = self.width_preset;
         let mut changed = false;
         let mut dragging = false;
@@ -473,9 +496,17 @@ impl Editor {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Inicio").size(10.).color(MUTED));
+            ui.label(
+                egui::RichText::new(crate::i18n::tr("Inicio"))
+                    .size(10.)
+                    .color(MUTED),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("Final").size(10.).color(MUTED));
+                ui.label(
+                    egui::RichText::new(crate::i18n::tr("Final"))
+                        .size(10.)
+                        .color(MUTED),
+                );
             });
         });
         if let Some(index) = self.profile_point.filter(|i| *i < self.width_profile.len()) {
@@ -496,7 +527,10 @@ impl Editor {
         }
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(self.width_profile.len() < 128, egui::Button::new("+ Punto"))
+                .add_enabled(
+                    self.width_profile.len() < 128,
+                    egui::Button::new(crate::i18n::tr("+ Punto")),
+                )
                 .clicked()
             {
                 if self.width_profile.is_empty() {
@@ -517,7 +551,7 @@ impl Editor {
                 .profile_point
                 .is_some_and(|i| i > 0 && i + 1 < self.width_profile.len());
             if ui
-                .add_enabled(removable, egui::Button::new("− Punto"))
+                .add_enabled(removable, egui::Button::new(crate::i18n::tr("− Punto")))
                 .clicked()
             {
                 self.width_profile
@@ -548,7 +582,7 @@ impl Editor {
         } else if ui
             .add_enabled(
                 !self.canvas.selected.is_empty(),
-                egui::Button::new("Aplicar perfil a la selección"),
+                egui::Button::new(crate::i18n::tr("Aplicar perfil a la selección")),
             )
             .clicked()
         {

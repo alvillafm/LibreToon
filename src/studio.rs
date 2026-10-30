@@ -1,0 +1,1330 @@
+use crate::{
+    Editor,
+    canvas::{Tool, View},
+    document::Mark,
+    i18n::tr,
+};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use serde::{Deserialize, Serialize};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+pub const TOOLS: &[Tool] = &[
+    Tool::Select,
+    Tool::Object,
+    Tool::Lasso,
+    Tool::PolygonSelect,
+    Tool::Wand,
+    Tool::Transform,
+    Tool::Mirror,
+    Tool::Brush,
+    Tool::FillBrush,
+    Tool::ShadeBrush,
+    Tool::LightBrush,
+    Tool::Eraser,
+    Tool::Bucket,
+    Tool::Eyedropper,
+    Tool::VectorBrush,
+    Tool::Pen,
+    Tool::Node,
+    Tool::Width,
+    Tool::Line,
+    Tool::Rectangle,
+    Tool::Ellipse,
+    Tool::Polygon,
+    Tool::Pan,
+    Tool::Zoom,
+    Tool::RotateView,
+    Tool::Ruler,
+    Tool::Symmetry,
+    Tool::Perspective,
+    Tool::Camera,
+];
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct Binding {
+    pub key: String,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+impl Binding {
+    fn new(key: &str) -> Self {
+        Self {
+            key: key.into(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
+    }
+    fn label(&self) -> String {
+        format!(
+            "{}{}{}{}",
+            if self.ctrl { "Ctrl+" } else { "" },
+            if self.shift { "Shift+" } else { "" },
+            if self.alt { "Alt+" } else { "" },
+            self.key
+        )
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preferences {
+    pub spanish: bool,
+    pub bindings: Vec<Binding>,
+    pub dpi: f32,
+    pub ffmpeg: String,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        let defaults = [
+            "V", "", "L", "", "", "Q", "M", "B", "", "", "", "E", "K", "I", "Y", "P", "A", "W",
+            "N", "R", "O", "", "H", "Z", "", "", "S", "", "",
+        ];
+        Self {
+            spanish: false,
+            bindings: defaults.into_iter().map(Binding::new).collect(),
+            dpi: 96.,
+            ffmpeg: String::new(),
+        }
+    }
+}
+pub struct Studio {
+    pub prefs: Preferences,
+    pub preferences_open: bool,
+    preference_category: usize,
+    pub stage_only: bool,
+    pub onion_before: usize,
+    pub onion_after: usize,
+    pub clipboard: Vec<Mark>,
+    pub horizontal: bool,
+    pub vertical: bool,
+    pub rulers: bool,
+    unit: usize,
+    guides: Vec<(bool, f32)>,
+    guide_drag: Option<usize>,
+    pub strength: f32,
+    pub tone_mode: usize,
+    capture: Option<usize>,
+    held: Option<Instant>,
+    brush_menu: bool,
+    pub brush: Tool,
+    pub export: Option<crate::exporter::ExportSettings>,
+    pub export_job: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    pub export_progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub export_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    notice: String,
+    last_status: String,
+    notice_time: Option<Instant>,
+}
+fn preferences_path() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("LibreToon/preferences.json")
+}
+impl Studio {
+    pub fn load() -> Self {
+        let mut prefs: Preferences = std::fs::read(preferences_path())
+            .ok()
+            .and_then(|s| serde_json::from_slice(&s).ok())
+            .unwrap_or_default();
+        if prefs.bindings.len() != TOOLS.len() {
+            let mut bindings = Preferences::default().bindings;
+            for (i, b) in prefs.bindings.into_iter().enumerate().take(TOOLS.len()) {
+                bindings[i] = b;
+            }
+            prefs.bindings = bindings;
+        }
+        if !prefs.dpi.is_finite() {
+            prefs.dpi = 96.;
+        }
+        prefs.dpi = prefs.dpi.clamp(1., 2400.);
+        Self {
+            prefs,
+            preferences_open: false,
+            preference_category: 0,
+            stage_only: false,
+            onion_before: 1,
+            onion_after: 1,
+            clipboard: vec![],
+            horizontal: false,
+            vertical: false,
+            rulers: false,
+            unit: 0,
+            guides: vec![],
+            guide_drag: None,
+            strength: 0.2,
+            tone_mode: 0,
+            capture: None,
+            held: None,
+            brush_menu: false,
+            brush: Tool::Brush,
+            export: None,
+            export_job: None,
+            export_progress: Default::default(),
+            export_cancel: Default::default(),
+            notice: String::new(),
+            last_status: String::new(),
+            notice_time: None,
+        }
+    }
+    pub(crate) fn save(&self) -> Result<(), String> {
+        let p = preferences_path();
+        std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec_pretty(&self.prefs).map_err(|e| e.to_string())?;
+        std::fs::write(p, bytes).map_err(|e| e.to_string())
+    }
+    fn units_per_pixel(&self) -> f32 {
+        match self.unit {
+            1 => 2.54 / self.prefs.dpi,
+            2 => 25.4 / self.prefs.dpi,
+            3 => 1. / self.prefs.dpi,
+            _ => 1.,
+        }
+    }
+}
+impl Editor {
+    pub fn tool_button(&mut self, ui: &mut egui::Ui, slot: Tool) {
+        let tool = if slot == Tool::Brush {
+            self.studio.brush
+        } else {
+            slot
+        };
+        let response = crate::design::button(
+            ui,
+            tool.icon(),
+            "",
+            tr(tool.name()),
+            self.tool == tool,
+            true,
+        );
+        if slot == Tool::Brush {
+            if response.is_pointer_button_down_on() {
+                let start = self.studio.held.get_or_insert_with(Instant::now);
+                if start.elapsed() > Duration::from_millis(400) {
+                    self.studio.brush_menu = true;
+                }
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
+            } else {
+                self.studio.held = None;
+            }
+            if response.secondary_clicked() {
+                self.studio.brush_menu = true;
+            }
+            let tip = response.rect.right_bottom() - Vec2::splat(4.);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip, tip - Vec2::new(5., 0.), tip - Vec2::new(0., 5.)],
+                crate::design::MUTED,
+                Stroke::NONE,
+            ));
+            if response.clicked()
+                && response.interact_pointer_pos().is_some_and(|p| {
+                    p.x > response.rect.right() - 12. && p.y > response.rect.bottom() - 12.
+                })
+            {
+                self.studio.brush_menu = true;
+            }
+            let mut open = self.studio.brush_menu;
+            egui::Popup::from_response(&response)
+                .at_position(Pos2::new(ui.clip_rect().right() + 6., response.rect.top()))
+                .align(egui::emath::RectAlign::RIGHT_START)
+                .width(232.)
+                .open_bool(&mut open)
+                .show(|ui| {
+                    ui.set_width(220.);
+                    ui.label(
+                        egui::RichText::new(tr("Pinceles"))
+                            .small()
+                            .color(crate::design::MUTED),
+                    );
+                    ui.separator();
+                    for t in [
+                        Tool::Brush,
+                        Tool::FillBrush,
+                        Tool::ShadeBrush,
+                        Tool::LightBrush,
+                    ] {
+                        let (r, row) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 34.),
+                            Sense::click(),
+                        );
+                        if self.tool == t || row.hovered() {
+                            ui.painter().rect_filled(
+                                r,
+                                3.,
+                                if self.tool == t {
+                                    Color32::from_rgb(47, 73, 104)
+                                } else {
+                                    Color32::from_gray(58)
+                                },
+                            );
+                        }
+                        crate::design::draw(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(r.left() + 18., r.center().y),
+                                Vec2::splat(20.),
+                            ),
+                            t.icon(),
+                            crate::design::MUTED,
+                        );
+                        ui.painter().text(
+                            Pos2::new(r.left() + 38., r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            tr(t.name()),
+                            egui::FontId::proportional(12.),
+                            Color32::from_gray(220),
+                        );
+                        if row.clicked() {
+                            self.studio.brush = t;
+                            self.activate_tool(t);
+                            ui.close();
+                        }
+                    }
+                });
+            self.studio.brush_menu = open;
+        }
+        if response.clicked() && !self.studio.brush_menu {
+            self.activate_tool(tool);
+        }
+    }
+    pub fn window_controls(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        for (icon, tip, command) in [
+            (
+                crate::design::Icon::Close,
+                "Cerrar",
+                egui::ViewportCommand::Close,
+            ),
+            (
+                crate::design::Icon::Maximize,
+                "Maximizar / restaurar",
+                egui::ViewportCommand::Maximized(
+                    !ctx.input(|i| i.viewport().maximized.unwrap_or(false)),
+                ),
+            ),
+            (
+                crate::design::Icon::Minimize,
+                "Minimizar",
+                egui::ViewportCommand::Minimized(true),
+            ),
+        ] {
+            let (r, response) = ui.allocate_exact_size(Vec2::new(44., 32.), Sense::click());
+            if response.hovered() {
+                ui.painter().rect_filled(
+                    r,
+                    2.,
+                    if matches!(icon, crate::design::Icon::Close) {
+                        Color32::from_rgb(185, 55, 65)
+                    } else {
+                        Color32::from_gray(65)
+                    },
+                );
+            }
+            crate::design::draw(ui.painter(), r, icon, Color32::from_gray(210));
+            if response.on_hover_text(tr(tip)).clicked() {
+                if matches!(command, egui::ViewportCommand::Close) {
+                    self.finish_pending_pen();
+                }
+                ctx.send_viewport_cmd(command);
+            }
+        }
+    }
+    pub fn tool_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.studio.preferences_open || self.studio.export.is_some() {
+            return;
+        }
+        let found = TOOLS
+            .iter()
+            .zip(&self.studio.prefs.bindings)
+            .find_map(|(&tool, b)| {
+                let key = egui::Key::from_name(&b.key)?;
+                let modifiers = egui::Modifiers {
+                    ctrl: b.ctrl,
+                    command: b.ctrl,
+                    shift: b.shift,
+                    alt: b.alt,
+                    ..Default::default()
+                };
+                ctx.input_mut(|i| i.consume_key(modifiers, key))
+                    .then_some(tool)
+            });
+        if let Some(tool) = found {
+            self.activate_tool(tool);
+            if matches!(
+                tool,
+                Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
+            ) {
+                self.studio.brush = tool;
+            }
+        }
+    }
+    pub fn clipboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input()
+            || self.animation.scenes_open
+            || self.animation.picker.is_some()
+            || self.studio.preferences_open
+            || self.studio.export.is_some()
+        {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)) {
+            self.copy_selection(false);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X)) {
+            self.copy_selection(true);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)) {
+            self.paste_selection();
+        }
+    }
+    pub fn copy_selection(&mut self, cut: bool) {
+        let mut ids = self.canvas.selected.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return;
+        }
+        self.studio.clipboard = ids
+            .iter()
+            .filter_map(|&(l, m)| {
+                self.doc
+                    .layers
+                    .get(l)?
+                    .frames
+                    .get(self.frame)?
+                    .get(m)
+                    .cloned()
+            })
+            .collect();
+        if cut {
+            self.checkpoint();
+            for (l, m) in ids.into_iter().rev() {
+                self.doc.layers[l].frames[self.frame].remove(m);
+            }
+            self.recover();
+        }
+    }
+    pub fn paste_selection(&mut self) {
+        if self.studio.clipboard.is_empty() || !self.doc.layers[self.layer].visible {
+            return;
+        }
+        self.finish_pending_pen();
+        self.checkpoint();
+        let frame = &mut self.doc.layers[self.layer].frames[self.frame];
+        let start = frame.len();
+        for mark in &self.studio.clipboard {
+            frame.push(mark.clone());
+        }
+        self.canvas.selected = (start..frame.len()).map(|m| (self.layer, m)).collect();
+        self.activate_tool(Tool::Select);
+        self.recover();
+    }
+    pub fn mirror_selection(&mut self, horizontal: bool) {
+        let ids = self.canvas.selected.clone();
+        if ids.is_empty() {
+            return;
+        }
+        let mut bounds = Rect::NOTHING;
+        for &(l, m) in &ids {
+            bounds = bounds.union(crate::vector::control_bounds(
+                &self.doc.layers[l].frames[self.frame][m],
+            ));
+        }
+        self.checkpoint();
+        let center = bounds.center();
+        for &(l, m) in &ids {
+            let mark = &self.doc.layers[l].frames[self.frame][m];
+            self.doc.layers[l].frames[self.frame][m] = crate::vector::transform(mark, |p| {
+                if horizontal {
+                    Pos2::new(2. * center.x - p.x, p.y)
+                } else {
+                    Pos2::new(p.x, 2. * center.y - p.y)
+                }
+            });
+        }
+        self.canvas.selected = ids;
+        self.recover();
+    }
+    pub fn symmetry_marks(&self, marks: Vec<Mark>) -> Vec<Mark> {
+        let mut result = marks;
+        if self.studio.horizontal {
+            let reflected: Vec<_> = result
+                .iter()
+                .map(|m| {
+                    crate::vector::transform(m, |p| Pos2::new(p.x, self.doc.height as f32 - p.y))
+                })
+                .collect();
+            result.extend(reflected);
+        }
+        if self.studio.vertical {
+            let reflected: Vec<_> = result
+                .iter()
+                .map(|m| {
+                    crate::vector::transform(m, |p| Pos2::new(self.doc.width as f32 - p.x, p.y))
+                })
+                .collect();
+            result.extend(reflected);
+        }
+        result
+    }
+    pub fn fill_brush(&mut self, brush: Vec<Mark>) {
+        let fills: Vec<_> = self.doc.layers[self.layer].frames[self.frame]
+            .iter()
+            .filter(|m| m.fill.is_some())
+            .cloned()
+            .collect();
+        let mask = crate::features::ink(
+            &fills
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    m.stroke = false;
+                    m
+                })
+                .collect::<Vec<_>>(),
+        );
+        let parts = brush
+            .iter()
+            .flat_map(|m| crate::features::clip_to(m, &mask))
+            .collect();
+        let parts = self.prepare_style(parts);
+        self.commit_paint(self.layer, self.frame, parts);
+    }
+    pub fn tone_paint(&mut self, brush: Vec<Mark>, light: bool) {
+        use geo::BooleanOps;
+        let areas: Vec<_> = brush.iter().map(crate::vector::polygon).collect();
+        let region = geo::algorithm::bool_ops::unary_union(&areas);
+        let originals = self.doc.layers[self.layer].frames[self.frame].clone();
+        let mut result = vec![];
+        for mark in &originals {
+            if mark.style.instance.is_some() {
+                result.push(mark.clone());
+                continue;
+            }
+            let Some(color) = mark.fill else {
+                result.push(mark.clone());
+                continue;
+            };
+            let level = if light {
+                mark.style.light
+            } else {
+                mark.style.shade
+            };
+            if level >= self.feature.toon_levels {
+                result.push(mark.clone());
+                continue;
+            }
+            let poly = geo::MultiPolygon(vec![crate::vector::polygon(mark)]);
+            if !crate::vector::control_bounds(mark).intersects(
+                brush.iter().fold(Rect::NOTHING, |b, m| {
+                    b.union(crate::vector::control_bounds(m))
+                }),
+            ) {
+                result.push(mark.clone());
+                continue;
+            }
+            let inside = poly.intersection(&region);
+            if inside.0.is_empty() {
+                result.push(mark.clone());
+                continue;
+            }
+            result.extend(crate::features::styled(
+                poly.difference(&region),
+                color,
+                &mark.style,
+            ));
+            let mut style = mark.style.clone();
+            if light {
+                style.light += 1;
+            } else {
+                style.shade += 1;
+            }
+            if let Some(g) = style.gradient.as_mut() {
+                for stop in &mut g.stops {
+                    stop.color = tone(
+                        stop.color,
+                        self.studio.strength,
+                        light,
+                        self.studio.tone_mode,
+                    );
+                }
+            }
+            result.extend(crate::features::styled(
+                inside,
+                tone(color, self.studio.strength, light, self.studio.tone_mode),
+                &style,
+            ));
+            if mark.stroke {
+                let mut contour = mark.clone();
+                contour.fill = None;
+                result.push(contour);
+            }
+        }
+        self.doc.layers[self.layer].frames[self.frame] = result.into();
+    }
+    pub fn studio_tool_options(&mut self, ui: &mut egui::Ui) {
+        match self.tool {
+            Tool::Ruler => {
+                ui.checkbox(&mut self.studio.rulers, tr("Mostrar reglas"));
+                let units = ["px", "cm", "mm", "in"];
+                egui::ComboBox::from_id_salt("ruler-unit")
+                    .selected_text(units[self.studio.unit])
+                    .show_ui(ui, |ui| {
+                        for (i, u) in units.iter().enumerate() {
+                            ui.selectable_value(&mut self.studio.unit, i, *u);
+                        }
+                    });
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut self.studio.prefs.dpi)
+                            .range(1. ..=2400.)
+                            .suffix(" ppi"),
+                    )
+                    .changed()
+                {
+                    if let Err(e) = self.studio.save() {
+                        self.status = e;
+                    }
+                }
+                ui.label(tr("Arrastra desde las reglas para crear guías. Arrastra una guía fuera para eliminarla."));
+                if ui.button(tr("Borrar guías")).clicked() {
+                    self.studio.guides.clear();
+                }
+            }
+            Tool::Symmetry => {
+                ui.checkbox(&mut self.studio.horizontal, tr("Horizontal"));
+                ui.checkbox(&mut self.studio.vertical, tr("Vertical"));
+                ui.label(tr(
+                    "Ejes en el centro del escenario. Se aplica a pinceles y formas.",
+                ));
+            }
+            Tool::Mirror => {
+                ui.add_enabled_ui(!self.canvas.selected.is_empty(), |ui| {
+                    if ui.button(tr("Voltear horizontalmente")).clicked() {
+                        self.mirror_selection(true);
+                    }
+                    if ui.button(tr("Voltear verticalmente")).clicked() {
+                        self.mirror_selection(false);
+                    }
+                });
+            }
+            Tool::ShadeBrush | Tool::LightBrush => {
+                ui.add(
+                    egui::DragValue::new(&mut self.feature.toon_levels)
+                        .range(1..=16)
+                        .prefix(tr("Niveles de Cartoon: ")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.studio.strength, 0.01..=1.).text(tr("Intensidad")),
+                );
+                egui::ComboBox::from_id_salt("tone-mode")
+                    .selected_text(tr(
+                        ["Mezcla", "Exposición", "Contraste"][self.studio.tone_mode]
+                    ))
+                    .show_ui(ui, |ui| {
+                        for (i, s) in ["Mezcla", "Exposición", "Contraste"].iter().enumerate() {
+                            ui.selectable_value(&mut self.studio.tone_mode, i, tr(s));
+                        }
+                    });
+            }
+            _ => {}
+        }
+    }
+    pub fn rulers_ui(&mut self, ui: &egui::Ui, _p: &egui::Painter, area: Rect, view: View) -> bool {
+        let mut consumed = false;
+        let ctx = ui.ctx();
+        if self.studio.rulers {
+            let top = Rect::from_min_max(area.min, Pos2::new(area.right(), area.top() + 22.));
+            let left = Rect::from_min_max(area.min, Pos2::new(area.left() + 22., area.bottom()));
+            for (vertical, r) in [(false, top), (true, left)] {
+                let response =
+                    ui.interact(r, ui.scope_id().with(("ruler", vertical)), Sense::drag());
+                if response.drag_started() {
+                    let pos = response.interact_pointer_pos().unwrap();
+                    let world = view.world(pos);
+                    self.studio
+                        .guides
+                        .push((!vertical, if vertical { world.x } else { world.y }));
+                    self.studio.guide_drag = Some(self.studio.guides.len() - 1);
+                }
+                consumed |= response.is_pointer_button_down_on() || response.hovered();
+            }
+        }
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if self.tool == Tool::Ruler
+                && self.studio.guide_drag.is_none()
+                && ctx.input(|i| i.pointer.primary_pressed())
+                && area.contains(pos)
+            {
+                let world = view.world(pos);
+                self.studio.guide_drag = self.studio.guides.iter().position(|&(h, v)| {
+                    ((if h { world.y } else { world.x }) - v).abs() * view.scale < 6.
+                });
+            }
+            if let Some(index) = self.studio.guide_drag {
+                consumed = true;
+                let world = view.world(pos);
+                let (h, v) = &mut self.studio.guides[index];
+                *v = if *h { world.y } else { world.x };
+                if !ctx.input(|i| i.pointer.primary_down()) {
+                    if !area.contains(pos) {
+                        self.studio.guides.remove(index);
+                    }
+                    self.studio.guide_drag = None;
+                }
+            }
+        }
+        consumed
+    }
+    pub fn cancel_guide_drag(&mut self) {
+        self.studio.guide_drag = None;
+    }
+    pub fn clear_guides(&mut self) {
+        self.studio.guides.clear();
+        self.studio.guide_drag = None;
+    }
+    pub fn paint_rulers(&self, p: &egui::Painter, area: Rect, view: View) {
+        if !self.studio.rulers {
+            return;
+        }
+        let factor = self.studio.units_per_pixel();
+        for vertical in [false, true] {
+            let rect = if vertical {
+                Rect::from_min_max(area.min, Pos2::new(area.left() + 22., area.bottom()))
+            } else {
+                Rect::from_min_max(area.min, Pos2::new(area.right(), area.top() + 22.))
+            };
+            p.rect_filled(rect, 0., crate::design::PANEL);
+            let start = if vertical {
+                Pos2::new(rect.right(), rect.top())
+            } else {
+                Pos2::new(rect.left(), rect.bottom())
+            };
+            let end = rect.right_bottom();
+            let world_a = view.world(start);
+            let world_b = view.world(end);
+            let a = (if vertical { world_a.y } else { world_a.x }) * factor;
+            let b = (if vertical { world_b.y } else { world_b.x }) * factor;
+            let length = if vertical {
+                rect.height()
+            } else {
+                rect.width()
+            };
+            let range = (b - a).abs();
+            if range < 0.00001 {
+                continue;
+            }
+            let target = range * 70. / length.max(1.);
+            let power = 10f32.powf(target.log10().floor());
+            let step = if target / power <= 1. {
+                power
+            } else if target / power <= 2. {
+                2. * power
+            } else if target / power <= 5. {
+                5. * power
+            } else {
+                10. * power
+            };
+            let minor = step / 5.;
+            let low = (a.min(b) / minor).floor() as i64;
+            let high = (a.max(b) / minor).ceil() as i64;
+            for i in low..=high.min(low + 2000) {
+                let value = i as f32 * minor;
+                let t = (value - a) / (b - a);
+                if !(0. ..=1.).contains(&t) {
+                    continue;
+                }
+                let point = start + (end - start) * t;
+                let major = i % 5 == 0;
+                let delta = if vertical {
+                    Vec2::new(if major { -8. } else { -4. }, 0.)
+                } else {
+                    Vec2::new(0., if major { -8. } else { -4. })
+                };
+                p.line_segment(
+                    [point, point + delta],
+                    Stroke::new(1., crate::design::MUTED),
+                );
+                if major {
+                    let label = if step >= 1. {
+                        format!("{value:.0}")
+                    } else if step >= 0.1 {
+                        format!("{value:.1}")
+                    } else {
+                        format!("{value:.2}")
+                    };
+                    let ruler = p.with_clip_rect(rect);
+                    let galley = ruler.layout_no_wrap(
+                        label,
+                        egui::FontId::monospace(8.),
+                        crate::design::MUTED,
+                    );
+                    if vertical {
+                        ruler.add(
+                            egui::epaint::TextShape::new(
+                                Pos2::new(rect.left() + 2., point.y - 3.),
+                                galley,
+                                crate::design::MUTED,
+                            )
+                            .with_angle(-std::f32::consts::FRAC_PI_2),
+                        );
+                    } else {
+                        ruler.galley(
+                            Pos2::new(point.x + 3., rect.top() + 2.),
+                            galley,
+                            crate::design::MUTED,
+                        );
+                    }
+                }
+            }
+        }
+        p.rect_filled(
+            Rect::from_min_size(area.min, Vec2::splat(22.)),
+            0.,
+            crate::design::PANEL,
+        );
+    }
+    pub fn paint_guides(&self, p: &egui::Painter, area: Rect, view: View) {
+        let span = area.size().length() / view.scale;
+        for &(horizontal, value) in &self.studio.guides {
+            let point = if horizontal {
+                Pos2::new(view.world(area.center()).x, value)
+            } else {
+                Pos2::new(value, view.world(area.center()).y)
+            };
+            let d = if horizontal {
+                Vec2::new(span, 0.)
+            } else {
+                Vec2::new(0., span)
+            };
+            p.line_segment(
+                [view.screen(point - d), view.screen(point + d)],
+                Stroke::new(1., Color32::from_rgb(60, 205, 230)),
+            );
+        }
+        if self.studio.horizontal || self.studio.vertical {
+            let c = Pos2::new(self.doc.width as f32 / 2., self.doc.height as f32 / 2.);
+            for (yes, d) in [
+                (self.studio.horizontal, Vec2::new(span, 0.)),
+                (self.studio.vertical, Vec2::new(0., span)),
+            ] {
+                if yes {
+                    p.line_segment(
+                        [view.screen(c - d), view.screen(c + d)],
+                        Stroke::new(1., Color32::from_rgba_unmultiplied(220, 120, 240, 140)),
+                    );
+                }
+            }
+        }
+    }
+    pub fn stage_mask(&self, p: &egui::Painter, area: Rect, view: View) {
+        if !self.studio.stage_only {
+            return;
+        }
+        let corners = [
+            Pos2::ZERO,
+            Pos2::new(self.doc.width as f32, 0.),
+            Pos2::new(self.doc.width as f32, self.doc.height as f32),
+            Pos2::new(0., self.doc.height as f32),
+        ];
+        // Each exterior half-plane covers all pixels outside a rotated rectangle.
+        for i in 0..4 {
+            let a = view.screen(corners[i]);
+            let b = view.screen(corners[(i + 1) % 4]);
+            let edge = b - a;
+            let distance = |p: Pos2| edge.x * (p.y - a.y) - edge.y * (p.x - a.x);
+            let viewport = [
+                area.left_top(),
+                area.right_top(),
+                area.right_bottom(),
+                area.left_bottom(),
+            ];
+            let mut mask = vec![];
+            for j in 0..4 {
+                let previous = viewport[(j + 3) % 4];
+                let current = viewport[j];
+                let before = distance(previous);
+                let after = distance(current);
+                if (before <= 0.) != (after <= 0.) {
+                    mask.push(previous + (current - previous) * (before / (before - after)));
+                }
+                if after <= 0. {
+                    mask.push(current);
+                }
+            }
+            if mask.len() < 3 {
+                continue;
+            }
+            p.add(egui::Shape::convex_polygon(
+                mask,
+                Color32::from_rgb(29, 30, 34),
+                Stroke::NONE,
+            ));
+        }
+    }
+    pub fn preferences_ui(&mut self, ctx: &egui::Context) {
+        if !self.studio.preferences_open {
+            return;
+        }
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new(tr("Preferencias del programa…"))
+            .id(egui::Id::unique("preferences")).open(&mut open).default_size([700.,500.])
+            .anchor(egui::Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui| {
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(Vec2::new(160.,460.),egui::Layout::top_down(egui::Align::Min),|ui|{
+                        ui.add_space(8.);
+                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node)] {
+                            if crate::design::button(ui,icon,label,label,self.studio.preference_category==index,true).clicked(){self.studio.preference_category=index;self.studio.capture=None;}
+                        }
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_min_width(430.);ui.add_space(8.);
+                        if self.studio.preference_category==0 {
+                            ui.heading(tr("Interfaz"));ui.add_space(16.);
+                            egui::Grid::new("interface-options").spacing([24.,16.]).show(ui,|ui|{
+                                ui.label(tr("Tema"));egui::ComboBox::from_id_salt("theme").selected_text(tr("Negro")).show_ui(ui,|ui|{let _=ui.selectable_label(true,tr("Negro"));});ui.end_row();
+                                ui.label(tr("Idioma"));egui::ComboBox::from_id_salt("language").selected_text(if self.studio.prefs.spanish{"Español"}else{"English"}).show_ui(ui,|ui|{save|=ui.selectable_value(&mut self.studio.prefs.spanish,false,"English").changed();save|=ui.selectable_value(&mut self.studio.prefs.spanish,true,"Español").changed();});ui.end_row();
+                            });
+                        } else {
+                            ui.heading(tr("Atajos de teclado"));ui.add_space(8.);
+                            ui.label(tr("Pulsa un atajo y después la combinación nueva. Escape cancela; Supr lo elimina."));ui.add_space(12.);
+                            egui::ScrollArea::vertical().max_height(340.).show(ui,|ui|{
+                                egui::Grid::new("shortcut-options").spacing([24.,7.]).striped(true).show(ui,|ui|{
+                                    for (index,tool) in TOOLS.iter().enumerate(){
+                                        ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,tool.icon(),crate::design::MUTED);ui.label(tr(tool.name()));});
+                                        let binding=&self.studio.prefs.bindings[index];
+                                        let label=if self.studio.capture==Some(index){"…".into()}else{let s=binding.label();if s.is_empty(){"—".into()}else{s}};
+                                        if ui.add_sized([110.,24.],egui::Button::new(label)).clicked(){self.studio.capture=Some(index);}ui.end_row();
+                                    }
+                                });
+                            });
+                            ui.add_space(12.);
+                            if ui.button(tr("Restablecer atajos")).clicked(){self.studio.prefs.bindings=Preferences::default().bindings;save=true;}
+                        }
+                    });
+                });
+            });
+        if self.studio.preference_category == 1 {
+            if let Some(index) = self.studio.capture {
+                let event = ctx.input(|i| {
+                    i.events.iter().find_map(|e| {
+                        if let egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } = e
+                        {
+                            Some((*key, *modifiers))
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some((key, m)) = event {
+                    if key != egui::Key::Escape {
+                        let binding = if key == egui::Key::Delete {
+                            Binding::new("")
+                        } else {
+                            Binding {
+                                key: key.name().into(),
+                                ctrl: m.ctrl || m.command,
+                                shift: m.shift,
+                                alt: m.alt,
+                            }
+                        };
+                        if !binding.key.is_empty() && reserved(&binding) {
+                            self.status = tr("Atajo reservado para una acción del programa").into();
+                        } else {
+                            for (j, b) in self.studio.prefs.bindings.iter_mut().enumerate() {
+                                if j != index && *b == binding {
+                                    b.key.clear();
+                                }
+                            }
+                            self.studio.prefs.bindings[index] = binding;
+                            save = true;
+                        }
+                    }
+                    self.studio.capture = None;
+                }
+            }
+        }
+        if save {
+            if let Err(e) = self.studio.save() {
+                self.status = e;
+            }
+            crate::i18n::set_language(self.studio.prefs.spanish);
+        }
+        self.studio.preferences_open = open;
+    }
+    pub fn notice_ui(&mut self, ctx: &egui::Context) {
+        if self.studio.last_status.is_empty() {
+            self.studio.last_status = self.status.clone();
+            return;
+        }
+        if self.status != self.studio.last_status {
+            self.studio.last_status = self.status.clone();
+            self.studio.notice = self.status.clone();
+            self.studio.notice_time = Some(Instant::now());
+        }
+        if self
+            .studio
+            .notice_time
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(6))
+        {
+            egui::Area::new(egui::Id::unique("notice"))
+                .anchor(egui::Align2::CENTER_BOTTOM, [0., -14.])
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(tr(&self.studio.notice));
+                    });
+                });
+            ctx.request_repaint_after(Duration::from_secs(6));
+        }
+    }
+}
+fn reserved(b: &Binding) -> bool {
+    b.key == "Space"
+        || b.key == "Escape"
+        || b.key == "Delete"
+        || (!b.ctrl && !b.shift && !b.alt && ["F8", "Comma", "Period"].contains(&b.key.as_str()))
+        || (b.ctrl && ["A", "C", "X", "V", "S", "Z", "Y", "D"].contains(&b.key.as_str()))
+        || (!b.ctrl && !b.alt && !b.shift && ["X", "D"].contains(&b.key.as_str()))
+}
+pub fn tone(mut c: [u8; 4], strength: f32, light: bool, mode: usize) -> [u8; 4] {
+    for channel in &mut c[..3] {
+        let v = *channel as f32 / 255.;
+        let s = strength.clamp(0., 1.);
+        let out = match mode {
+            1 => v * 2f32.powf(if light { s } else { -s }),
+            2 => {
+                if light {
+                    1. - (1. - v).powf(1. + s * 2.)
+                } else {
+                    v.powf(1. + s * 2.)
+                }
+            }
+            _ => {
+                if light {
+                    v + (1. - v) * s
+                } else {
+                    v * (1. - s)
+                }
+            }
+        };
+        *channel = (out.clamp(0., 1.) * 255.).round() as u8;
+    }
+    c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn editor() -> Editor {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut e = Editor::new(&cc);
+        e.doc = crate::Document::default();
+        e.recovery = std::env::temp_dir().join(format!(
+            "libretoon-studio-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        e
+    }
+    #[test]
+    fn symmetry_preserves_nodes_and_width_profile() {
+        let mut e = editor();
+        e.studio.horizontal = true;
+        e.studio.vertical = true;
+        let m = Mark {
+            points: vec![[10., 20.], [30., 40.]].into(),
+            nodes: vec![crate::document::Node::corner([10., 20.])].into(),
+            width_profile: vec![crate::width::WidthStop { t: 0., width: 0.2 }].into(),
+            ..Default::default()
+        };
+        let marks = e.symmetry_marks(vec![m]);
+        assert_eq!(marks.len(), 4);
+        assert_eq!(
+            marks[3].nodes[0].position,
+            [e.doc.width as f32 - 10., e.doc.height as f32 - 20.]
+        );
+        assert_eq!(marks[3].width_profile[0].width, 0.2);
+    }
+    #[test]
+    fn clipboard_and_mirror_are_undoable() {
+        let mut e = editor();
+        e.doc.layers[0].frames[0].push(Mark {
+            points: vec![[10., 20.], [40., 60.]].into(),
+            ..Default::default()
+        });
+        e.canvas.selected = vec![(0, 0)];
+        e.copy_selection(true);
+        assert!(e.doc.layers[0].frames[0].is_empty());
+        e.paste_selection();
+        assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+        e.mirror_selection(true);
+        assert_eq!(e.doc.layers[0].frames[0][0].points[0], [40., 20.]);
+        e.history(false);
+        assert_eq!(e.doc.layers[0].frames[0][0].points[0], [10., 20.]);
+    }
+    #[test]
+    fn tone_preserves_alpha_and_direction() {
+        for mode in 0..3 {
+            let c = [90, 120, 180, 123];
+            let light = tone(c, 0.3, true, mode);
+            let dark = tone(c, 0.3, false, mode);
+            for i in 0..3 {
+                assert!(light[i] > c[i]);
+                assert!(dark[i] < c[i]);
+            }
+            assert_eq!(light[3], 123);
+            assert_eq!(dark[3], 123);
+        }
+    }
+    #[test]
+    fn shading_clips_to_fills_preserves_contours_and_undo() {
+        use geo::Area;
+        let mut e = editor();
+        let shape = Mark {
+            points: vec![[0., 0.], [100., 100.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([180, 100, 60, 200]),
+            stroke: true,
+            color: [10, 20, 30, 255],
+            ..Default::default()
+        };
+        let nodes = shape.points.clone();
+        e.doc.layers[0].frames[0].push(shape);
+        let brush = Mark {
+            points: vec![[50., -20.], [150., 120.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([0, 0, 0, 255]),
+            stroke: false,
+            ..Default::default()
+        };
+        e.checkpoint();
+        e.tone_paint(vec![brush], false);
+        let marks = &e.doc.layers[0].frames[0];
+        let contour = marks.iter().find(|m| m.stroke).unwrap();
+        assert_eq!(contour.points.as_slice(), nodes.as_slice());
+        assert_eq!(contour.color, [10, 20, 30, 255]);
+        let area: f64 = marks
+            .iter()
+            .filter(|m| m.fill.is_some())
+            .map(|m| crate::vector::polygon(m).unsigned_area())
+            .sum();
+        assert!((area - 10000.).abs() < 0.1);
+        assert!(
+            marks
+                .iter()
+                .filter_map(|m| m.fill)
+                .any(|c| c[0] < 180 && c[3] == 200)
+        );
+        assert!(
+            marks
+                .iter()
+                .all(|m| crate::vector::control_bounds(m).right() <= 100.01)
+        );
+        let restored = crate::fla::decode(&crate::fla::encode(&e.doc).unwrap()).unwrap();
+        assert!(restored.validate().is_ok());
+        e.history(false);
+        assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+        assert_eq!(e.doc.layers[0].frames[0][0].fill, Some([180, 100, 60, 200]));
+    }
+    #[test]
+    fn guides_drag_from_rulers_and_can_be_removed_without_drawing() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut e = Editor::new(&cc);
+        e.doc = crate::Document::default();
+        e.activate_tool(Tool::Ruler);
+        let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| e.canvas_ui(ui),
+            );
+            out.textures_delta.clear();
+        };
+        let button = |p: Pos2, pressed| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        tick(&mut e, vec![]);
+        tick(
+            &mut e,
+            vec![
+                egui::Event::PointerMoved(Pos2::new(300., 15.)),
+                button(Pos2::new(300., 15.), true),
+            ],
+        );
+        tick(
+            &mut e,
+            vec![egui::Event::PointerMoved(Pos2::new(300., 200.))],
+        );
+        tick(&mut e, vec![button(Pos2::new(300., 200.), false)]);
+        assert_eq!(e.studio.guides.len(), 1);
+        assert!(e.studio.guides[0].0);
+        assert!(e.doc.layers[0].frames[0].is_empty());
+        tick(&mut e, vec![button(Pos2::new(300., 200.), true)]);
+        tick(
+            &mut e,
+            vec![egui::Event::PointerMoved(Pos2::new(300., -20.))],
+        );
+        tick(&mut e, vec![button(Pos2::new(300., -20.), false)]);
+        assert!(e.studio.guides.is_empty());
+        assert!(e.undo.is_empty());
+    }
+    #[test]
+    fn stage_mask_respects_rotation_and_does_not_change_the_document() {
+        let mut e = editor();
+        e.studio.stage_only = true;
+        let ctx = egui::Context::default();
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.));
+        for angle in [0., 0.4, 1.5] {
+            let view = View {
+                center: Pos2::new(400., 400.),
+                stage_center: Pos2::new(e.doc.width as f32 / 2., e.doc.height as f32 / 2.),
+                scale: 0.5,
+                angle,
+            };
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(area),
+                    ..Default::default()
+                },
+                |ui| e.stage_mask(ui.painter(), area, view),
+            );
+            out.textures_delta.clear();
+            let meshes = ctx.tessellate(out.shapes, out.pixels_per_point);
+            let contains = |p: Pos2| {
+                meshes.iter().any(|primitive| {
+                    let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive else {
+                        return false;
+                    };
+                    mesh.indices.chunks_exact(3).any(|t| {
+                        let a = mesh.vertices[t[0] as usize].pos;
+                        let b = mesh.vertices[t[1] as usize].pos;
+                        let c = mesh.vertices[t[2] as usize].pos;
+                        let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
+                        let signs = [
+                            cross(b - a, p - a),
+                            cross(c - b, p - b),
+                            cross(a - c, p - c),
+                        ];
+                        signs.iter().all(|v| *v >= 0.) || signs.iter().all(|v| *v <= 0.)
+                    })
+                })
+            };
+            assert!(!contains(view.center));
+            assert!(contains(view.screen(Pos2::new(-100., 100.))));
+            assert!(contains(view.screen(Pos2::new(-100., -100.))));
+        }
+        assert!(e.doc.layers[0].frames[0].is_empty());
+        assert!(e.undo.is_empty());
+    }
+    #[test]
+    fn custom_tool_shortcuts_keep_modifiers_and_defaults_are_english() {
+        assert!(!Preferences::default().spanish);
+        let mut e = editor();
+        e.studio.prefs.bindings[25] = Binding {
+            key: "G".into(),
+            ctrl: false,
+            shift: true,
+            alt: true,
+        };
+        let serialized = serde_json::to_vec(&e.studio.prefs).unwrap();
+        let restored: Preferences = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored.bindings[25].label(), "Shift+Alt+G");
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::G,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        shift: true,
+                        alt: true,
+                        ..Default::default()
+                    },
+                }],
+                ..Default::default()
+            },
+            |_| e.tool_shortcuts(&ctx),
+        );
+        out.textures_delta.clear();
+        assert!(e.tool == Tool::Ruler);
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+    #[test]
+    fn custom_caption_buttons_send_native_window_commands() {
+        for (index, x) in [370., 320., 270.].into_iter().enumerate() {
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut e = Editor::new(&cc);
+            let mut commands = vec![];
+            for phase in 0..3 {
+                let p = Pos2::new(x, 20.);
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400., 100.))),
+                        events: if phase == 0 {
+                            vec![]
+                        } else {
+                            vec![
+                                egui::Event::PointerMoved(p),
+                                egui::Event::PointerButton {
+                                    pos: p,
+                                    button: egui::PointerButton::Primary,
+                                    pressed: phase == 1,
+                                    modifiers: Default::default(),
+                                },
+                            ]
+                        },
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), 32.),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| e.window_controls(ui),
+                        );
+                    },
+                );
+                out.textures_delta.clear();
+                for viewport in out.viewport_output.values() {
+                    commands.extend(viewport.commands.clone());
+                }
+            }
+            assert!(
+                commands.iter().any(|command| match index {
+                    0 => matches!(command, egui::ViewportCommand::Close),
+                    1 => matches!(command, egui::ViewportCommand::Maximized(true)),
+                    _ => matches!(command, egui::ViewportCommand::Minimized(true)),
+                }),
+                "button {index}: {commands:?}"
+            );
+        }
+    }
+}

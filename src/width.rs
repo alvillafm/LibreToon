@@ -32,7 +32,7 @@ impl Preset {
         Self::Custom,
     ];
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::tr(match self {
             Self::Uniform => "Uniforme",
             Self::Tapered => "Puntas finas",
             Self::Start => "De fino a grueso",
@@ -40,7 +40,7 @@ impl Preset {
             Self::Bulge => "Centro ancho",
             Self::Wave => "Ondulado",
             Self::Custom => "Personalizado",
-        }
+        })
     }
     pub fn stops(self) -> SharedVec<WidthStop> {
         let values: &[(f32, f32)] = match self {
@@ -316,21 +316,51 @@ pub fn outline(mark: &Mark) -> MultiPolygon<f64> {
         let last = n - 1;
         let end_dir = (points[last] - points[last - 1]).normalized();
         let end_normal = Vec2::new(-end_dir.y, end_dir.x);
-        arc(
-            &mut ring,
-            points[last],
-            end_normal.y.atan2(end_normal.x),
-            mark.width * sample(&mark.width_profile, 1.) * 0.5,
-        );
+        let end_radius = mark.width * sample(&mark.width_profile, 1.) * 0.5;
+        match mark.style.end_cap {
+            crate::features::Cap::Round => arc(
+                &mut ring,
+                points[last],
+                end_normal.y.atan2(end_normal.x),
+                end_radius,
+            ),
+            crate::features::Cap::Flat => {
+                ring.push(points[last] - end_normal * end_radius);
+            }
+            crate::features::Cap::Square => {
+                ring.push(points[last] + end_normal * end_radius + end_dir * end_radius);
+                ring.push(points[last] - end_normal * end_radius + end_dir * end_radius);
+                ring.push(points[last] - end_normal * end_radius);
+            }
+            crate::features::Cap::Triangle => {
+                ring.push(points[last] + end_dir * end_radius * 1.5);
+                ring.push(points[last] - end_normal * end_radius);
+            }
+        }
         ring.extend(right.into_iter().rev().skip(1));
         let start_dir = (points[1] - points[0]).normalized();
         let start_normal = Vec2::new(-start_dir.y, start_dir.x);
-        arc(
-            &mut ring,
-            points[0],
-            (-start_normal.y).atan2(-start_normal.x),
-            mark.width * sample(&mark.width_profile, 0.) * 0.5,
-        );
+        let start_radius = mark.width * sample(&mark.width_profile, 0.) * 0.5;
+        match mark.style.start_cap {
+            crate::features::Cap::Round => arc(
+                &mut ring,
+                points[0],
+                (-start_normal.y).atan2(-start_normal.x),
+                start_radius,
+            ),
+            crate::features::Cap::Flat => {
+                ring.push(points[0] + start_normal * start_radius);
+            }
+            crate::features::Cap::Square => {
+                ring.push(points[0] - start_normal * start_radius - start_dir * start_radius);
+                ring.push(points[0] + start_normal * start_radius - start_dir * start_radius);
+                ring.push(points[0] + start_normal * start_radius);
+            }
+            crate::features::Cap::Triangle => {
+                ring.push(points[0] - start_dir * start_radius * 1.5);
+                ring.push(points[0] + start_normal * start_radius);
+            }
+        }
         if ring.first() != ring.last() {
             ring.push(ring[0]);
         }
@@ -342,7 +372,11 @@ pub fn outline(mark: &Mark) -> MultiPolygon<f64> {
     )
 }
 pub fn export_marks(mark: &Mark) -> Vec<Mark> {
-    if !mark.stroke || mark.width_profile.is_empty() {
+    if !mark.stroke
+        || (mark.width_profile.is_empty()
+            && mark.style.start_cap == crate::features::Cap::Round
+            && mark.style.end_cap == crate::features::Cap::Round)
+    {
         return vec![mark.clone()];
     }
     let mut output = vec![];

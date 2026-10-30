@@ -111,3 +111,48 @@ Los rellenos y contornos variables ahora usan una franja de antialiasing explíc
 Medición del borde sobre una silueta Bézier obtenida de 2.000 muestras y perfil de puntas finas, con geometría ya preparada: promedio de 200 cuadros en release. Incluye preparar las formas de borde y su teselación, sin dibujar el cuerpo ni enviar datos a la GPU. El borde anterior tardó 62,613 µs por cuadro y el limitado 77,342 µs: unos 14,729 µs adicionales por contorno en este escenario. La prioridad de esta corrección es eliminar las uniones sin límite; no se afirma una mejora de rendimiento.
 
 Las tres regresiones nuevas pasan junto a la batería anterior. Cubren la malla final, distintas escalas y rotación, puntas casi nulas, ceros interiores, rellenos exportados, huecos y varias densidades de píxeles. Los trazos guardados no se reescriben: la corrección se aplica al volver a renderizarlos.
+
+## Herramientas de estudio y exportación
+
+La vista de solo escenario añade cuatro semiplanos de máscara, incluidos los giros de vista. No recorta los datos del documento. Las reglas generan marcas solo para el intervalo visible, con un límite adicional de 2.001 marcas por regla. Las guías son estado de vista de la sesión.
+
+La simetría duplica únicamente la geometría de la pincelada, forma o trazado afectado. Con ambos ejes activos puede generar cuatro versiones. Los pinceles tonales ejecutan las intersecciones al soltar el gesto, sobre los rellenos del fotograma de la capa activa. Conservan los contornos, pero su coste depende de los polígonos y sus intersecciones; no tienen índice espacial ni un límite de latencia demostrado para dibujos complejos.
+
+La exportación toma una instantánea compartida y renderiza en un trabajador. Usa la teselación del editor y rasterización de triángulos en CPU; mantiene un búfer RGB del fotograma actual y envía fotogramas a FFmpeg por una tubería. No materializa la película completa en memoria. El GIF usa paleta por fotograma. La resolución máxima es 4.096 × 4.096; ese búfer RGB ocupa aproximadamente 48 MiB, además de la geometría, el contexto y la memoria del proceso FFmpeg. Esto no constituye un límite global de RAM. La caché geométrica conserva el límite previo.
+
+Las regresiones verifican máscara con rotación, guías arrastrables, simetría con anclas y perfil, portapapeles/espejo con deshacer, edición tonal acotada al relleno con conservación de área/contornos, atajos con modificadores y renderizado sin capas ocultas. La prueba manual `export_all_containers_with_ffmpeg` codifica MP4/SVG/MKV/AVI/MOV/GIF y decodifica los formatos raster para comprobar el número, orden y color de los fotogramas. No mide rendimiento global ni compara con Animate.
+
+La revisión visual no se completó: el control de aplicaciones se detuvo al recibirse Escape. Las comprobaciones automáticas no sustituyen esa revisión.
+
+### Ajustes posteriores de interfaz
+
+La cabecera unificada envía los comandos nativos de mover, maximizar/restaurar, minimizar y cerrar. Se ha añadido una regresión de los tres botones de ventana. Las reglas ocupan los bordes del área central; su franja se reserva fuera del área de dibujo, con etiquetas enteras cuando procede y texto vertical girado. El trabajo de las marcas sigue acotado al intervalo visible.
+
+Se revisaron renderizados sin ventana de la interfaz principal, las categorías de preferencias, el desplegable de pinceles y la exportación. Estos permiten comprobar colocación, textos y superposiciones, pero no sustituyen una prueba manual de movimiento y redimensionado en Windows. La batería actual supera 83 pruebas automáticas; las seis pruebas manuales permanecen excluidas por defecto.
+
+## Rellenos toon, composición y recursos
+
+Fill Brush recorta la pincelada a los rellenos existentes del fotograma de la capa activa. Los pinceles tonales guardan contadores independientes de sombra y luz en cada fragmento vectorial. La vista previa excluye zonas que ya han alcanzado el nivel permitido. El recorte de la vista previa hace operaciones booleanas durante el gesto: esta ruta necesita perfiles con dibujos complejos y no se afirma una latencia constante. El cierre modifica únicamente los rellenos afectados y mantiene sus contornos.
+
+Las exposiciones conservan los fotogramas físicos compatibles con el formato anterior, con una lista adicional de claves. Al confirmar una edición se comparten las referencias de la exposición afectada; el coste depende de su duración. Los proyectos anteriores siguen cargando como fotogramas independientes cuando no contienen metadatos de claves. Las filas/columnas de la interfaz siguen virtualizadas; la regresión con 100 capas y 10.000 fotogramas mantiene el trabajo gráfico acotado a la ventana.
+
+La composición resuelve únicamente el fotograma solicitado: visibilidad, opacidad, máscaras de silueta, instancias de símbolos y cámara activa. Las máscaras y las instancias transformadas pueden crear geometría temporal y reducir la reutilización de caché. La caché de teselación mantiene su límite previo; no se introduce un límite global de memoria para recursos o historial. Los símbolos y sus capas usan los contenedores compartidos existentes, con ciclos rechazados y profundidad máxima de ocho símbolos. La recuperación durante la edición de símbolos genera una instantánea del proyecto completo con las definiciones actualizadas.
+
+Los degradados lineales subdividen las mallas en los límites de los colores; los radiales usan hasta 32 subdivisiones por lado de cada triángulo. SVG conserva definiciones de degradado. El XFL de interoperabilidad proyecta la escena y aproxima cada relleno degradado con una cuadrícula de 24 por 24 recortes. La información nativa conserva los recursos editables; el límite de 64 MiB del contenedor sigue vigente. El guardado manual FLA continúa en el hilo de interfaz y puede resultar costoso con escenas grandes.
+
+Medición sintética local en perfil release predeterminado, una ejecución secuencial: resolver 200 rectángulos planos tardó de media 95,923 microsegundos por fotograma (200 iteraciones). Aplicar una pincelada toon sobre 200 rellenos rectangulares superpuestos tardó 1,30868 ms por operación (20 iteraciones, restaurando la instantánea entre ellas). No incluye la previsualización, teselación, envío a GPU, latencia global ni una comparación con Animate.
+
+La validación añade regresiones del gesto real de Fill Brush y del bloqueo de capa, límites toon y recortes posteriores, degradados radiales rasterizados, claves/exposiciones, máscaras/opacidad, persistencia de recursos, cortes de cámara contiguos/reordenables y modos de reproducción de símbolos. Se revisaron renderizados sin ventana del timeline, las propiedades, la biblioteca, perspectiva y cámaras; no sustituyen una sesión manual de edición completa en Windows.
+
+
+## Escenas, interpolación y miniaturas (30/10/2026)
+
+Los contenidos de las escenas y sus capas siguen usando SharedVec. Cambiar de escena intercambia referencias; la recuperación integra la escena activa en la instantánea COW y serializa fuera del hilo de interfaz. Los símbolos son recursos compartidos del proyecto. Reproducción, SVG y raster de vídeo/GIF usan el mismo resolvedor de escenas ordenadas, interpolaciones y cámaras.
+
+Solo se interpolan las claves vecinas del fotograma actual. Los identificadores de objeto se indexan una vez por capa/fotograma para evitar búsquedas cuadráticas. Se conservan anclas, tiradores, huecos, degradados y matrices de símbolos; la interpolación genera geometría temporal, no reescribe todos los fotogramas del documento. Las transformaciones directas materializan una clave al iniciar la modificación. Las miniaturas solo resuelven los elementos visibles y el selector de fotogramas virtualiza sus filas; la caché de teselación tiene el mismo límite de 32 MiB y caducidad por fotograma que el lienzo.
+
+Las pruebas cubren posición/giro/escala, fotograma de símbolo, aceleración, trayectoria, claves de cámara, arrastre real, selección y cuentagotas de degradados, persistencia FLA, orden de escenas y píxeles del raster exportado. La revisión visual usa renderizados sin ventana de ocho estados de interfaz; no equivale a una sesión de edición completa en Windows.
+
+Benchmark reproducible: `cargo test --release --locked benchmark_motion_resolution -- --ignored --nocapture`. Resuelve 200 rectángulos animados durante 200 iteraciones, sin teselación, GPU ni interfaz. El guardado FLA conserva las escenas editables en metadatos y concatena una proyección XFL de sus fotogramas; continúa siendo síncrono y puede ser costoso con películas grandes.
+
+Resultado local de una ejecución secuencial en perfil release predeterminado: **281,083 microsegundos por fotograma resuelto**. Este dato no mide FPS de la aplicación ni es comparable por sí solo con otros editores.

@@ -14,6 +14,7 @@ struct Key {
     nodes: usize,
     holes: usize,
     profile: usize,
+    caps: (crate::features::Cap, crate::features::Cap),
     width: u32,
     stroke: bool,
     rectangle: bool,
@@ -65,7 +66,11 @@ impl Prepared {
         let mut stroke_mesh = VertexBuffers::new();
         let mut stroke_rings = vec![];
         let mut stroke_holes = vec![];
-        if mark.stroke && !mark.width_profile.is_empty() {
+        if mark.stroke
+            && (!mark.width_profile.is_empty()
+                || mark.style.start_cap != crate::features::Cap::Round
+                || mark.style.end_cap != crate::features::Cap::Round)
+        {
             let outlines = crate::width::outline(mark);
             for polygon in &outlines.0 {
                 stroke_holes.push(false);
@@ -149,7 +154,11 @@ impl RenderCache {
             nodes: mark.nodes.identity(),
             holes: mark.holes.identity(),
             profile: mark.width_profile.identity(),
-            width: if mark.width_profile.is_empty() {
+            caps: (mark.style.start_cap, mark.style.end_cap),
+            width: if mark.width_profile.is_empty()
+                && mark.style.start_cap == crate::features::Cap::Round
+                && mark.style.end_cap == crate::features::Cap::Round
+            {
                 0
             } else {
                 mark.width.to_bits()
@@ -225,23 +234,50 @@ pub fn draw(
             fill = fill.lerp_to_gamma(Color32::WHITE, 0.18);
         }
         if prepared.valid {
-            p.add(egui::Shape::mesh(mesh(&prepared.fill, view, fill)));
+            if let Some(g) = mark.style.gradient.as_ref().filter(|_| !ghost) {
+                p.add(egui::Shape::mesh(gradient_mesh(
+                    &prepared.fill,
+                    view,
+                    g,
+                    selected,
+                )));
+            } else {
+                p.add(egui::Shape::mesh(mesh(&prepared.fill, view, fill)));
+            }
         }
         let feather = p.ctx().pixels_per_point().max(0.1).recip();
         for (index, ring) in prepared.rings.iter().enumerate() {
-            let edge = boundary_fringe(
+            let mut edge = boundary_fringe(
                 ring,
                 index > 0,
                 view,
                 if prepared.valid { fill } else { Color32::RED },
                 feather,
             );
+            if !ghost {
+                if let Some(g) = &mark.style.gradient {
+                    for vertex in &mut edge.vertices {
+                        let alpha = vertex.color.a() as f32 / fill.a().max(1) as f32;
+                        let c = g.color(view.world(vertex.pos));
+                        vertex.color = Color32::from_rgba_unmultiplied(
+                            c[0],
+                            c[1],
+                            c[2],
+                            (c[3] as f32 * alpha.clamp(0., 1.)).round() as u8,
+                        );
+                    }
+                }
+            }
             if !edge.indices.is_empty() {
                 p.add(egui::Shape::mesh(edge));
             }
         }
     }
-    if mark.stroke && !mark.width_profile.is_empty() {
+    if mark.stroke
+        && (!mark.width_profile.is_empty()
+            || mark.style.start_cap != crate::features::Cap::Round
+            || mark.style.end_cap != crate::features::Cap::Round)
+    {
         let ink = color(mark.color);
         p.add(egui::Shape::mesh(mesh(&prepared.stroke_mesh, view, ink)));
         let feather = p.ctx().pixels_per_point().max(0.1).recip();
@@ -254,7 +290,11 @@ pub fn draw(
     }
     for ring in &prepared.rings {
         let points: Vec<_> = ring.iter().map(|p| view.screen(*p)).collect();
-        if mark.stroke && mark.width_profile.is_empty() {
+        if mark.stroke
+            && mark.width_profile.is_empty()
+            && mark.style.start_cap == crate::features::Cap::Round
+            && mark.style.end_cap == crate::features::Cap::Round
+        {
             let ink = color(mark.color);
             let width = mark.width * view.scale;
             if points.len() == 1 {
@@ -291,6 +331,96 @@ pub fn draw(
         }
     }
     prepared.valid
+}
+
+fn gradient_mesh(
+    data: &VertexBuffers<[f32; 2], u32>,
+    view: View,
+    g: &crate::features::Gradient,
+    selected: bool,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    let mut triangle = |points: [Pos2; 3]| {
+        let first = mesh.vertices.len() as u32;
+        for p in points {
+            let c = g.color(p);
+            let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+            if selected {
+                color = color.lerp_to_gamma(Color32::WHITE, 0.18);
+            }
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: view.screen(p),
+                uv: egui::epaint::WHITE_UV,
+                color,
+            });
+        }
+        mesh.indices.extend([first, first + 1, first + 2]);
+    };
+    for indices in data.indices.chunks_exact(3) {
+        let points = [
+            vector::pos(data.vertices[indices[0] as usize]),
+            vector::pos(data.vertices[indices[1] as usize]),
+            vector::pos(data.vertices[indices[2] as usize]),
+        ];
+        if g.radial {
+            let n = ((points[0]
+                .distance(points[1])
+                .max(points[1].distance(points[2]))
+                .max(points[2].distance(points[0]))
+                * view.scale
+                / 12.)
+                .ceil() as usize)
+                .clamp(1, 32);
+            let at = |i: usize, j: usize| {
+                points[0]
+                    + (points[1] - points[0]) * (i as f32 / n as f32)
+                    + (points[2] - points[0]) * (j as f32 / n as f32)
+            };
+            for i in 0..n {
+                for j in 0..n - i {
+                    triangle([at(i, j), at(i + 1, j), at(i, j + 1)]);
+                    if i + j + 1 < n {
+                        triangle([at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]);
+                    }
+                }
+            }
+        } else {
+            let origin = vector::pos(g.start);
+            let direction = vector::pos(g.end) - origin;
+            let project =
+                |p: Pos2| (p - origin).dot(direction) / direction.length_sq().max(0.00001);
+            let mut cuts = vec![-f32::MAX];
+            cuts.extend(g.stops.iter().map(|s| s.t));
+            cuts.push(f32::MAX);
+            for band in cuts.windows(2) {
+                let mut polygon = points.to_vec();
+                for (lower, limit) in [(true, band[0]), (false, band[1])] {
+                    if polygon.is_empty() {
+                        break;
+                    }
+                    let mut clipped = vec![];
+                    for i in 0..polygon.len() {
+                        let a = polygon[(i + polygon.len() - 1) % polygon.len()];
+                        let b = polygon[i];
+                        let da = project(a) - limit;
+                        let db = project(b) - limit;
+                        let inside = |d: f32| if lower { d >= 0. } else { d <= 0. };
+                        if inside(da) != inside(db) {
+                            clipped.push(a + (b - a) * (da / (da - db)));
+                        }
+                        if inside(db) {
+                            clipped.push(b);
+                        }
+                    }
+                    polygon = clipped;
+                }
+                for i in 1..polygon.len().saturating_sub(1) {
+                    triangle([polygon[0], polygon[i], polygon[i + 1]]);
+                }
+            }
+        }
+    }
+    mesh
 }
 
 #[cfg(test)]

@@ -5,6 +5,12 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Loop,
+    Tween,
+    CapRound,
+    CapFlat,
+    CapSquare,
+    CapTriangle,
     New,
     Open,
     Save,
@@ -14,6 +20,20 @@ pub enum Icon {
     Redo,
     Brush,
     VectorBrush,
+    FillBrush,
+    ShadeBrush,
+    LightBrush,
+    Ruler,
+    Symmetry,
+    Perspective,
+    Camera,
+    Lock,
+    Folder,
+    Mask,
+    Last,
+    Symbol,
+    Library,
+    Mirror,
     Bucket,
     Width,
     Pen,
@@ -22,6 +42,14 @@ pub enum Icon {
     Trash,
     Plus,
     Copy,
+    SwapColors,
+    ResetColors,
+    Cut,
+    Paste,
+    Stage,
+    Minimize,
+    Maximize,
+    Close,
     Play,
     Pause,
     First,
@@ -30,8 +58,6 @@ pub enum Icon {
     Onion,
     Eye,
     EyeOff,
-    Up,
-    Down,
     Layers,
     Film,
     Settings,
@@ -111,6 +137,157 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::Loop => {
+            path(&[(16., 5.), (12., 2.), (5., 2.), (2., 6.), (2., 12.)]);
+            path(&[(4., 15.), (8., 18.), (15., 18.), (18., 14.), (18., 8.)]);
+            path(&[(12., 5.), (17., 5.), (17., 0.)]);
+            path(&[(8., 15.), (3., 15.), (3., 20.)]);
+        }
+        Icon::Tween => {
+            path(&[(2., 16.), (5., 8.), (11., 6.), (18., 3.)]);
+            p.circle_filled(pt(2., 16.), 2.5, c);
+            path(&[(13., 2.), (18., 3.), (17., 8.)]);
+        }
+        Icon::CapRound | Icon::CapFlat | Icon::CapSquare | Icon::CapTriangle => {
+            p.line_segment([pt(2., 10.), pt(12., 10.)], Stroke::new(5., c));
+            match icon {
+                Icon::CapRound => {
+                    p.circle_filled(pt(12., 10.), 4., c);
+                }
+                Icon::CapSquare => {
+                    p.rect_filled(Rect::from_min_size(pt(11., 6.), Vec2::splat(8.)), 0., c);
+                }
+                Icon::CapTriangle => {
+                    p.add(egui::Shape::convex_polygon(
+                        vec![pt(11., 5.), pt(19., 10.), pt(11., 15.)],
+                        c,
+                        Stroke::NONE,
+                    ));
+                }
+                _ => {
+                    line((13., 5.), (13., 15.));
+                }
+            }
+        }
+        Icon::Perspective => {
+            line((1., 7.), (19., 7.));
+            for x in [1., 6., 14., 19.] {
+                line((10., 7.), (x, 19.));
+            }
+            p.circle_stroke(pt(10., 7.), 2., s);
+        }
+        Icon::Camera => {
+            rect(2., 5., 13., 11.);
+            path(&[(15., 8.), (19., 5.), (19., 16.), (15., 13.)]);
+        }
+        Icon::Lock => {
+            rect(4., 9., 12., 10.);
+            path(&[(6., 9.), (6., 4.), (10., 1.), (14., 4.), (14., 9.)]);
+        }
+        Icon::Folder => {
+            path(&[
+                (1., 5.),
+                (1., 17.),
+                (19., 17.),
+                (19., 7.),
+                (10., 7.),
+                (8., 3.),
+                (1., 3.),
+                (1., 5.),
+            ]);
+        }
+        Icon::Mask => {
+            rect(1., 3., 13., 13.);
+            p.circle_filled(pt(13., 12.), 5., c);
+        }
+        Icon::Last => {
+            path(&[(4., 3.), (14., 10.), (4., 17.), (4., 3.)]);
+            line((17., 3.), (17., 17.));
+        }
+        Icon::Symbol => {
+            path(&[(10., 1.), (19., 10.), (10., 19.), (1., 10.), (10., 1.)]);
+        }
+        Icon::Library => {
+            rect(2., 2., 4., 16.);
+            rect(8., 2., 4., 16.);
+            path(&[(14., 3.), (18., 2.), (20., 17.), (16., 18.), (14., 3.)]);
+        }
+
+        Icon::SwapColors => {
+            path(&[(2., 7.), (17., 7.), (13., 3.)]);
+            path(&[(18., 13.), (3., 13.), (7., 17.)]);
+        }
+        Icon::ResetColors => {
+            p.rect_filled(
+                Rect::from_min_size(pt(3., 3.), Vec2::splat(10.)),
+                0.,
+                Color32::WHITE,
+            );
+            p.rect_filled(
+                Rect::from_min_size(pt(7., 7.), Vec2::splat(10.)),
+                0.,
+                Color32::BLACK,
+            );
+            rect(7., 7., 10., 10.);
+        }
+        Icon::Cut => {
+            p.circle_stroke(pt(5., 15.), 3., s);
+            p.circle_stroke(pt(15., 15.), 3., s);
+            line((7., 13.), (16., 2.));
+            line((13., 13.), (4., 2.));
+        }
+        Icon::Paste => {
+            rect(4., 4., 12., 15.);
+            p.rect_filled(Rect::from_min_size(pt(7., 2.), Vec2::new(6., 4.)), 1., c);
+            line((7., 10.), (13., 10.));
+            line((7., 14.), (13., 14.));
+        }
+        Icon::Stage => {
+            rect(2., 3., 16., 14.);
+            rect(6., 7., 8., 6.);
+        }
+        Icon::Minimize => {
+            line((4., 14.), (16., 14.));
+        }
+        Icon::Maximize => {
+            rect(4., 4., 12., 12.);
+        }
+        Icon::Close => {
+            line((5., 5.), (15., 15.));
+            line((15., 5.), (5., 15.));
+        }
+
+        Icon::Ruler => {
+            rect(1., 5., 18., 10.);
+            for x in [4., 7., 10., 13., 16.] {
+                line((x, 5.), (x, if x == 10. { 12. } else { 9. }));
+            }
+        }
+        Icon::Symmetry | Icon::Mirror => {
+            line((10., 1.), (10., 19.));
+            path(&[(7., 4.), (2., 16.), (7., 16.), (7., 4.)]);
+            path(&[(13., 4.), (18., 16.), (13., 16.), (13., 4.)]);
+        }
+        Icon::FillBrush => {
+            rect(3., 8., 14., 10.);
+            line((4., 6.), (15., 2.));
+        }
+        Icon::ShadeBrush => {
+            p.circle_filled(pt(10., 10.), 7., c);
+            p.circle_filled(pt(13., 7.), 5., PANEL);
+        }
+        Icon::LightBrush => {
+            p.circle_stroke(pt(10., 10.), 4., s);
+            for (a, b) in [
+                ((10., 0.), (10., 3.)),
+                ((10., 17.), (10., 20.)),
+                ((0., 10.), (3., 10.)),
+                ((17., 10.), (20., 10.)),
+            ] {
+                line(a, b);
+            }
+        }
+
         Icon::Lasso => {
             path(&[
                 (5., 15.),
@@ -370,8 +547,23 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             }
         }
         Icon::Onion => {
-            p.circle_stroke(pt(7., 10.), 5., s);
-            p.circle_stroke(pt(13., 10.), 5., s);
+            path(&[
+                (10., 1.),
+                (8., 5.),
+                (4., 9.),
+                (3., 13.),
+                (5., 17.),
+                (10., 19.),
+                (15., 17.),
+                (17., 13.),
+                (16., 9.),
+                (12., 5.),
+                (10., 1.),
+            ]);
+            path(&[(10., 5.), (7., 10.), (7., 15.), (10., 18.)]);
+            path(&[(10., 5.), (13., 10.), (13., 15.), (10., 18.)]);
+            line((8., 1.), (10., 4.));
+            line((13., 1.), (10., 4.));
         }
         Icon::Eye | Icon::EyeOff => {
             path(&[
@@ -389,12 +581,6 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             if matches!(icon, Icon::EyeOff) {
                 line((3., 2.), (17., 18.));
             }
-        }
-        Icon::Up => {
-            path(&[(4., 12.), (10., 6.), (16., 12.)]);
-        }
-        Icon::Down => {
-            path(&[(4., 8.), (10., 14.), (16., 8.)]);
         }
         Icon::Layers => {
             path(&[(2., 7.), (10., 3.), (18., 7.), (10., 11.), (2., 7.)]);
@@ -465,6 +651,8 @@ pub fn button(
     selected: bool,
     enabled: bool,
 ) -> Response {
+    let label = crate::i18n::tr(label);
+    let tip = crate::i18n::tr(tip);
     let text = ui.painter().layout_no_wrap(
         label.into(),
         egui::FontId::proportional(12.),
@@ -521,17 +709,47 @@ pub fn button(
 }
 /// The supplied app artwork, uploaded once and reused by the header.
 pub fn logo(p: &egui::Painter, r: Rect) {
-    let id = egui::Id::unique("libretoon-app-icon");
+    let id = egui::Id::unique((
+        "libretoon-app-icon",
+        (r.width() * p.ctx().pixels_per_point()).round() as u32,
+    ));
     let cached = p
         .ctx()
         .data_mut(|data| data.get_temp::<egui::TextureHandle>(id));
     // Loading a texture reads Context input; never do this while holding data_mut.
     let texture = cached.unwrap_or_else(|| {
-        let icon = window_icon();
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [icon.width as usize, icon.height as usize],
-            &icon.rgba,
-        );
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/libretoon.png"))
+            .expect("header PNG");
+        let side = (r.width() * p.ctx().pixels_per_point())
+            .round()
+            .clamp(16., 128.) as usize;
+        let mut rgba = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                let x0 = x * icon.width as usize / side;
+                let x1 = ((x + 1) * icon.width as usize / side).max(x0 + 1);
+                let y0 = y * icon.height as usize / side;
+                let y1 = ((y + 1) * icon.height as usize / side).max(y0 + 1);
+                let mut sums = [0u64; 4];
+                let mut count = 0u64;
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let pixel = &icon.rgba[(sy * icon.width as usize + sx) * 4..][..4];
+                        for c in 0..3 {
+                            sums[c] += pixel[c] as u64 * pixel[3] as u64;
+                        }
+                        sums[3] += pixel[3] as u64;
+                        count += 1;
+                    }
+                }
+                let offset = (y * side + x) * 4;
+                for c in 0..3 {
+                    rgba[offset + c] = (sums[c] / sums[3].max(1)) as u8;
+                }
+                rgba[offset + 3] = (sums[3] / count.max(1)) as u8;
+            }
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([side, side], &rgba);
         let texture = p
             .ctx()
             .load_texture("LibreToon", image, egui::TextureOptions::LINEAR);

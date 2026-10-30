@@ -54,6 +54,8 @@ fn solid(color: [u8; 4]) -> String {
     )
 }
 fn document_xml(doc: &Document) -> String {
+    let baked = crate::features::baked(doc);
+    let doc = &baked;
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?><DOMDocument xmlns=\"http://ns.adobe.com/xfl/2008/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" width=\"{}\" height=\"{}\" frameRate=\"{}\" backgroundColor=\"#FFFFFF\" xflVersion=\"2.97\" creatorInfo=\"LibreToon\" currentTimeline=\"1\"><timelines><DOMTimeline name=\"Escena 1\" currentFrame=\"0\"><layers>",
         doc.width, doc.height, doc.fps
@@ -65,8 +67,13 @@ fn document_xml(doc: &Document) -> String {
             layer.visible
         );
         for (index, marks) in layer.frames.iter().enumerate() {
-            xml +=
-                &format!("<DOMFrame index=\"{index}\" duration=\"1\" keyMode=\"9728\"><elements>");
+            if !layer.key(index) {
+                continue;
+            }
+            let duration = layer.exposure(index).end - index;
+            xml += &format!(
+                "<DOMFrame index=\"{index}\" duration=\"{duration}\" keyMode=\"9728\"><elements>"
+            );
             let export_marks: Vec<_> = marks.iter().flat_map(crate::width::export_marks).collect();
             for mark in &export_marks {
                 let mut rings = vec![crate::vector::flatten(mark, 0.04)];
@@ -188,6 +195,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         }
     }
     let mut doc = Document {
+        extras: Default::default(),
         version: 1,
         fps: 12,
         width: 960,
@@ -258,6 +266,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                         return Err(unsupported("máscaras, guías o carpetas de capas"));
                     }
                     doc.layers.push(Layer {
+                        options: Default::default(),
                         name: attr(&a, "name").unwrap_or("Capa").into(),
                         visible: attr(&a, "visible") != Some("false"),
                         frames: Default::default(),
@@ -447,6 +456,9 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                         .frames
                         .resize(frame_index + duration, Default::default());
                     let drawing: crate::shared::SharedVec<Mark> = marks.clone().into();
+                    layer.options.keys.resize(layer.frames.len(), false);
+                    layer.options.keys[0] = true;
+                    layer.options.keys[frame_index] = true;
                     for f in frame_index..frame_index + duration {
                         layer.frames[f] = drawing.clone();
                     }
@@ -468,6 +480,8 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         .max(1);
     for l in &mut doc.layers {
         l.frames.resize(count, Default::default());
+        l.options.keys.resize(count, false);
+        l.options.keys[0] = true;
     }
     doc.layers.reverse();
     doc.validate()?;

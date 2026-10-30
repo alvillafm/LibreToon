@@ -10,6 +10,14 @@ pub enum Tool {
     #[default]
     Brush,
     VectorBrush,
+    FillBrush,
+    ShadeBrush,
+    LightBrush,
+    Ruler,
+    Symmetry,
+    Perspective,
+    Camera,
+    Mirror,
     Pen,
     Node,
     Bucket,
@@ -32,9 +40,17 @@ pub enum Tool {
 }
 impl Tool {
     pub fn name(self) -> &'static str {
-        match self {
+        crate::i18n::tr(match self {
             Self::Brush => "Pincel Estándar",
             Self::VectorBrush => "Pincel Vectorial",
+            Self::FillBrush => "Pincel de relleno",
+            Self::ShadeBrush => "Pincel de sombreado",
+            Self::LightBrush => "Pincel de iluminación",
+            Self::Ruler => "Regla",
+            Self::Symmetry => "Simetría",
+            Self::Perspective => "Perspectiva",
+            Self::Camera => "Cámara",
+            Self::Mirror => "Espejo",
             Self::Pen => "Pluma",
             Self::Node => "Editar nodos",
             Self::Bucket => "Bote de pintura",
@@ -54,12 +70,20 @@ impl Tool {
             Self::Polygon => "Polígono / estrella",
             Self::Pan => "Mano",
             Self::Zoom => "Lupa",
-        }
+        })
     }
     pub fn icon(self) -> Icon {
         match self {
             Self::Brush => Icon::Brush,
             Self::VectorBrush => Icon::VectorBrush,
+            Self::FillBrush => Icon::FillBrush,
+            Self::ShadeBrush => Icon::ShadeBrush,
+            Self::LightBrush => Icon::LightBrush,
+            Self::Ruler => Icon::Ruler,
+            Self::Symmetry => Icon::Symmetry,
+            Self::Perspective => Icon::Perspective,
+            Self::Camera => Icon::Camera,
+            Self::Mirror => Icon::Mirror,
             Self::Pen => Icon::Pen,
             Self::Node => Icon::Node,
             Self::Bucket => Icon::Bucket,
@@ -210,8 +234,12 @@ impl Canvas {
     }
     fn bounds(&self, e: &Editor) -> Option<SelectionBox> {
         let mut r = Rect::NOTHING;
+        let mut evaluated = std::collections::HashMap::new();
         for &(l, m) in &self.selected {
-            for p in vertices(&e.doc.layers[l].frames[e.frame][m]) {
+            let marks = evaluated
+                .entry(l)
+                .or_insert_with(|| crate::animation::marks(&e.doc.layers[l], e.frame));
+            for p in vertices(&marks[m]) {
                 r.extend_with(Pos2::ZERO + rotate(p.to_vec2(), -self.orientation));
             }
         }
@@ -338,14 +366,26 @@ impl Editor {
             self.doc
                 .layers
                 .get(l)
-                .is_some_and(|l| l.visible && m < l.frames[self.frame].len())
+                .is_some_and(|l| l.visible && !l.options.locked && m < l.frames[self.frame].len())
         });
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-        let area = response.rect;
+        let ruler_area = response.rect;
+        let area = if self.studio.rulers {
+            Rect::from_min_max(ruler_area.min + Vec2::splat(22.), ruler_area.max)
+        } else {
+            ruler_area
+        };
+        let ruler_painter = painter.clone();
+        let painter = painter.with_clip_rect(area);
         let fit = fit_scale(area, state.stage_size);
-        let mut view = state.view(area);
+        let stage_view = state.view(area);
+        let mut view = self.camera_view(stage_view);
         let ctx = ui.ctx().clone();
-        let wants_keyboard = ctx.egui_wants_keyboard_input();
+        let wants_keyboard = ctx.egui_wants_keyboard_input()
+            || self.animation.scenes_open
+            || self.animation.picker.is_some()
+            || self.studio.preferences_open
+            || self.studio.export.is_some();
         let (
             pointer,
             pressed,
@@ -383,6 +423,57 @@ impl Editor {
                 _ => None,
             })
         });
+        let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
+        let guide_handled = visual_handled
+            | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
+            | self.advanced_canvas_input(ui, area, view);
+        let mut convert = false;
+        response.context_menu(|ui| {
+            if crate::design::button(
+                ui,
+                Icon::Symbol,
+                "Convertir a símbolo · F8",
+                "Convertir a símbolo",
+                false,
+                !state.selected.is_empty(),
+            )
+            .clicked()
+            {
+                convert = true;
+                ui.close();
+            }
+        });
+        if convert {
+            self.canvas = state;
+            self.convert_symbol();
+            return;
+        }
+        if response.double_clicked()
+            && matches!(self.tool, Tool::Select | Tool::Object | Tool::Transform)
+        {
+            if let Some(screen) = pointer {
+                let world = view.world(screen);
+                let symbol = self
+                    .doc
+                    .layers
+                    .iter()
+                    .rev()
+                    .filter(|l| l.visible && !l.options.locked)
+                    .flat_map(|l| l.frames[self.frame].iter().rev())
+                    .find_map(|m| {
+                        m.style
+                            .instance
+                            .as_ref()
+                            .filter(|_| crate::vector::contains_fill(m, world))
+                            .map(|i| i.symbol)
+                    });
+                if let Some(id) = symbol {
+                    self.canvas = state;
+                    self.enter_symbol(id);
+                    return;
+                }
+            }
+        }
         let alt = ctx.input(|i| i.modifiers.alt);
         let command = ctx.input(|i| i.modifiers.command);
         let mut handled_delete = false;
@@ -420,6 +511,7 @@ impl Editor {
             view.center = area.center() + state.pan;
         }
         if escape {
+            self.cancel_guide_drag();
             let canceled = state.drag.take();
             if let Some(Drag::Width(d)) = &canceled {
                 self.doc.layers[d.id.0].frames[self.frame][d.id.1] = d.original.clone();
@@ -449,7 +541,7 @@ impl Editor {
                     .layers
                     .iter()
                     .enumerate()
-                    .filter(|(_, l)| l.visible)
+                    .filter(|(_, l)| l.visible && !l.options.locked)
                 {
                     for m in 0..layer.frames[self.frame].len() {
                         state.selected.push((l, m));
@@ -492,9 +584,15 @@ impl Editor {
                 self.recover();
             }
         }
-        if (press_position
-            .or(pointer)
-            .is_some_and(|p| area.contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())))
+        if !guide_handled
+            && (!matches!(
+                self.tool,
+                Tool::Ruler | Tool::Symmetry | Tool::Mirror | Tool::Perspective | Tool::Camera
+            ) || space
+                || middle_pressed)
+            && (press_position
+                .or(pointer)
+                .is_some_and(|p| area.contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())))
             && state.drag.is_none()
             && (pressed || middle_pressed)
         {
@@ -506,11 +604,11 @@ impl Editor {
                 let old = view.world(screen);
                 state.zoom =
                     (state.zoom * if self.zoom_out ^ alt { 0.8 } else { 1.25 }).clamp(0.05, 32.);
-                view = state.view(area);
+                view = self.camera_view(state.view(area));
                 state.pan += screen - view.screen(old);
-                view = state.view(area);
+                view = self.camera_view(state.view(area));
             } else if !self.playing && self.tool == Tool::Eyedropper {
-                self.sample_at(world, 3. / view.scale);
+                self.sample_apply_at(&state.selected, world, 3. / view.scale);
             } else if !self.playing && self.tool == Tool::Wand {
                 self.wand_select(&mut state, world, shift);
             } else if !self.playing && self.tool == Tool::Lasso {
@@ -534,6 +632,7 @@ impl Editor {
             } else if !self.playing
                 && self.tool == Tool::Eraser
                 && self.doc.layers[self.layer].visible
+                && !self.doc.layers[self.layer].options.locked
             {
                 state.clear_selection();
                 state.drag = Some(Drag::Erase {
@@ -551,12 +650,16 @@ impl Editor {
                     start: delta.y.atan2(delta.x),
                     angle: state.angle,
                 });
-            } else if !self.playing && self.tool == Tool::Pen && self.doc.layers[self.layer].visible
+            } else if !self.playing
+                && self.tool == Tool::Pen
+                && self.doc.layers[self.layer].visible
+                && !self.doc.layers[self.layer].options.locked
             {
                 self.begin_pen(&mut state, world, view);
             } else if !self.playing
                 && self.tool == Tool::Bucket
                 && self.doc.layers[self.layer].visible
+                && !self.doc.layers[self.layer].options.locked
             {
                 self.bucket_at(&mut state, world);
             } else if !self.playing && self.tool == Tool::Width {
@@ -567,6 +670,9 @@ impl Editor {
                 && matches!(
                     self.tool,
                     Tool::Brush
+                        | Tool::FillBrush
+                        | Tool::ShadeBrush
+                        | Tool::LightBrush
                         | Tool::VectorBrush
                         | Tool::Rectangle
                         | Tool::Line
@@ -574,8 +680,9 @@ impl Editor {
                         | Tool::Polygon
                 )
                 && self.doc.layers[self.layer].visible
+                && !self.doc.layers[self.layer].options.locked
                 && match self.tool {
-                    Tool::Brush => self.fill_enabled,
+                    Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush => true,
                     Tool::VectorBrush | Tool::Line => self.stroke_enabled,
                     _ => self.fill_enabled || self.stroke_enabled,
                 }
@@ -591,7 +698,10 @@ impl Editor {
                     } else {
                         Default::default()
                     },
-                    color: if self.tool == Tool::Brush {
+                    color: if matches!(
+                        self.tool,
+                        Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
+                    ) {
                         self.fill_color.to_array()
                     } else {
                         self.color.to_array()
@@ -650,7 +760,7 @@ impl Editor {
                         && (self.tool == Tool::Transform
                             || state.selected.iter().any(|&(l, m)| {
                                 hit(
-                                    &self.doc.layers[l].frames[self.frame][m],
+                                    &crate::animation::marks(&self.doc.layers[l], self.frame)[m],
                                     world,
                                     4. / view.scale,
                                 )
@@ -667,9 +777,13 @@ impl Editor {
                         .iter()
                         .enumerate()
                         .rev()
-                        .filter(|(_, l)| l.visible)
+                        .filter(|(_, l)| l.visible && !l.options.locked)
                     {
-                        for (m, mark) in layer.frames[self.frame].iter().enumerate().rev() {
+                        for (m, mark) in crate::animation::marks(layer, self.frame)
+                            .iter()
+                            .enumerate()
+                            .rev()
+                        {
                             if !force_marquee && hit(mark, world, 6. / view.scale) {
                                 found = Some((l, m));
                                 break 'layers;
@@ -723,7 +837,12 @@ impl Editor {
                     let originals = state
                         .selected
                         .iter()
-                        .map(|&(l, m)| ((l, m), self.doc.layers[l].frames[self.frame][m].clone()))
+                        .map(|&(l, m)| {
+                            (
+                                (l, m),
+                                crate::animation::marks(&self.doc.layers[l], self.frame)[m].clone(),
+                            )
+                        })
                         .collect();
                     state.drag = Some(Drag::Transform(TransformDrag {
                         operation,
@@ -1018,7 +1137,13 @@ impl Editor {
                                 if !curves.is_empty() {
                                     m = crate::vector::from_cubics(&curves, &m);
                                 }
-                                if *tool == Tool::Brush {
+                                if matches!(
+                                    *tool,
+                                    Tool::Brush
+                                        | Tool::FillBrush
+                                        | Tool::ShadeBrush
+                                        | Tool::LightBrush
+                                ) {
                                     parts = crate::vector::brush_fill(&m, m.color);
                                 } else {
                                     parts.push(m);
@@ -1032,7 +1157,15 @@ impl Editor {
                             });
                             if !parts.is_empty() {
                                 self.checkpoint();
-                                self.commit_paint(self.layer, self.frame, parts);
+                                let parts = self.symmetry_marks(parts);
+                                if matches!(*tool, Tool::ShadeBrush | Tool::LightBrush) {
+                                    self.tone_paint(parts, *tool == Tool::LightBrush);
+                                } else if *tool == Tool::FillBrush {
+                                    self.fill_brush(parts);
+                                } else {
+                                    let parts = self.prepare_style(parts);
+                                    self.commit_paint(self.layer, self.frame, parts);
+                                }
                                 self.recover();
                             }
                         }
@@ -1055,7 +1188,7 @@ impl Editor {
                                 .layers
                                 .iter()
                                 .enumerate()
-                                .filter(|(_, l)| l.visible)
+                                .filter(|(_, l)| l.visible && !l.options.locked)
                                 .flat_map(|(l, layer)| {
                                     layer.frames[self.frame].iter().enumerate().filter_map(
                                         move |(m, mark)| {
@@ -1082,6 +1215,7 @@ impl Editor {
                         d.last_input = Some((world, shift));
                         if !d.changed && !matches!(d.operation, Operation::Pivot) {
                             self.checkpoint();
+                            self.autokey_motion(&state.selected);
                         }
                         d.changed = true;
                         match d.operation {
@@ -1131,15 +1265,18 @@ impl Editor {
                                 }
                                 state.orientation = d.bounds.angle + angle;
                                 for ((l, m), original) in &d.originals {
-                                    self.doc.layers[*l].frames[self.frame][*m] =
-                                        transformed_in_basis(
-                                            original,
-                                            d.pivot,
-                                            scale,
-                                            angle,
-                                            translation,
-                                            d.bounds.angle,
-                                        );
+                                    let track =
+                                        self.doc.layers[*l].frames[self.frame][*m].style.track;
+                                    let mut moved = transformed_in_basis(
+                                        original,
+                                        d.pivot,
+                                        scale,
+                                        angle,
+                                        translation,
+                                        d.bounds.angle,
+                                    );
+                                    moved.style.track = track;
+                                    self.doc.layers[*l].frames[self.frame][*m] = moved;
                                 }
                             }
                         }
@@ -1187,7 +1324,15 @@ impl Editor {
                 CursorIcon::Grab
             } else if matches!(self.tool, Tool::Select | Tool::Transform | Tool::Object) {
                 CursorIcon::Default
-            } else if matches!(self.tool, Tool::Brush | Tool::VectorBrush | Tool::Eraser) {
+            } else if matches!(
+                self.tool,
+                Tool::Brush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
+                    | Tool::VectorBrush
+                    | Tool::Eraser
+            ) {
                 CursorIcon::None
             } else {
                 CursorIcon::Default
@@ -1199,41 +1344,81 @@ impl Editor {
             Pos2::new(state.stage_size.x, state.stage_size.y),
             Pos2::new(0., state.stage_size.y),
         ];
-        let screen: Vec<Pos2> = corners.into_iter().map(|p| view.screen(p)).collect();
+        let screen: Vec<Pos2> = corners.into_iter().map(|p| stage_view.screen(p)).collect();
         painter.add(egui::Shape::convex_polygon(
             screen.clone(),
             Color32::WHITE,
             Stroke::new(1., Color32::from_gray(90)),
         ));
-        // Viewport clipping allows transformed artwork outside the stage to remain editable.
-        for layer in self.doc.layers.iter().filter(|l| l.visible) {
-            if self.onion && !self.playing && self.frame > 0 {
-                for m in &layer.frames[self.frame - 1] {
-                    paint_mark(&painter, m, view, true, false, Some(&mut state.cache));
+        if self.onion && !self.playing {
+            let count = self.doc.layers[0].frames.len();
+            for f in self.frame.saturating_sub(self.studio.onion_before)
+                ..(self.frame + self.studio.onion_after + 1).min(count)
+            {
+                if f == self.frame {
+                    continue;
+                }
+                for (_, _, m) in crate::features::resolve(&self.doc, f, false) {
+                    paint_mark(&painter, &m, view, true, false, Some(&mut state.cache));
                 }
             }
         }
-        for (l, layer) in self
-            .doc
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.visible)
-        {
-            for (m, mark) in layer.frames[self.frame].iter().enumerate() {
-                paint_mark(
-                    &painter,
-                    mark,
-                    view,
-                    false,
-                    state.selected.contains(&(l, m)),
-                    Some(&mut state.cache),
-                );
-            }
+        for (l, m, mark) in crate::features::resolve(&self.doc, self.frame, false) {
+            paint_mark(
+                &painter,
+                &mark,
+                view,
+                false,
+                state.selected.contains(&(l, m)),
+                Some(&mut state.cache),
+            );
         }
         if let Some(mark) = &self.draft {
-            paint_mark(&painter, mark, view, false, false, None);
+            let previews = self.symmetry_marks(vec![mark.clone()]);
+            if matches!(
+                self.tool,
+                Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
+            ) {
+                let fills: Vec<_> = self.doc.layers[self.layer].frames[self.frame]
+                    .iter()
+                    .filter(|m| {
+                        m.fill.is_some()
+                            && m.style.instance.is_none()
+                            && match self.tool {
+                                Tool::ShadeBrush => m.style.shade < self.feature.toon_levels,
+                                Tool::LightBrush => m.style.light < self.feature.toon_levels,
+                                _ => true,
+                            }
+                    })
+                    .cloned()
+                    .map(|mut m| {
+                        m.stroke = false;
+                        m
+                    })
+                    .collect();
+                let mask = crate::features::ink(&fills);
+                for preview in previews {
+                    let color = match self.tool {
+                        Tool::ShadeBrush => [0, 0, 0, (self.studio.strength * 180.) as u8],
+                        Tool::LightBrush => [255, 255, 255, (self.studio.strength * 180.) as u8],
+                        _ => preview.color,
+                    };
+                    for ink in crate::vector::brush_fill(&preview, color) {
+                        for part in crate::features::clip_to(&ink, &mask) {
+                            paint_mark(&painter, &part, view, false, false, None);
+                        }
+                    }
+                }
+            } else {
+                for preview in previews {
+                    paint_mark(&painter, &preview, view, false, false, None);
+                }
+            }
         }
+        self.stage_mask(&painter, area, stage_view);
+        self.advanced_overlays(&painter, area, view);
+        self.visual_canvas_overlays(&painter, view, &state.selected);
+        self.paint_guides(&painter, area, view);
         if self.tool == Tool::Width {
             for &(l, m) in &state.selected {
                 paint_width_handles(&painter, &self.doc.layers[l].frames[self.frame][m], view);
@@ -1376,13 +1561,25 @@ impl Editor {
             }
             painter.add(egui::Shape::line(points, Stroke::new(1., ACCENT)));
         }
-        if over && !space && matches!(self.tool, Tool::Brush | Tool::VectorBrush | Tool::Eraser) {
+        if over
+            && !space
+            && matches!(
+                self.tool,
+                Tool::Brush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
+                    | Tool::VectorBrush
+                    | Tool::Eraser
+            )
+        {
             if let Some(pointer) = pointer {
                 let radius = (self.width * view.scale * 0.5).max(1.);
                 painter.circle_stroke(pointer, radius, Stroke::new(3., Color32::BLACK));
                 painter.circle_stroke(pointer, radius, Stroke::new(1., Color32::WHITE));
             }
         }
+        self.paint_rulers(&ruler_painter, ruler_area, view);
         self.sync_selected_style(&state.selected);
         self.canvas = state;
     }
@@ -1531,6 +1728,77 @@ fn fit_scale(area: Rect, size: Vec2) -> f32 {
     ((area.width() - 60.) / size.x)
         .min((area.height() - 60.) / size.y)
         .max(0.01)
+}
+
+#[cfg(test)]
+mod feature_gesture_tests {
+    use super::*;
+    #[test]
+    fn fill_brush_gesture_never_adds_ink_outside_the_fill_and_locked_layers_ignore_it() {
+        for locked in [false, true] {
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let mut e = Editor::new(&cc);
+            e.doc = crate::Document::default();
+            e.recovery = std::env::temp_dir().join(format!(
+                "libretoon-fill-gesture-{}-{locked}.json",
+                std::process::id()
+            ));
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[0., 0.], [100., 100.]].into(),
+                rectangle: true,
+                closed: true,
+                fill: Some([30, 80, 120, 255]),
+                stroke: false,
+                ..Default::default()
+            });
+            e.doc.layers[0].options.locked = locked;
+            e.activate_tool(Tool::FillBrush);
+            e.fill_color = Color32::from_rgb(230, 30, 60);
+            e.width = 20.;
+            e.smoothing = 0.;
+            let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| e.canvas_ui(ui),
+                );
+                out.textures_delta.clear();
+            };
+            tick(&mut e, vec![]);
+            let area = Rect::from_min_max(Pos2::new(8., 8.), Pos2::new(992., 692.));
+            let view = e.canvas.view(area);
+            let a = view.screen(Pos2::new(50., 50.));
+            let b = view.screen(Pos2::new(180., 50.));
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            let before = serde_json::to_value(&e.doc).unwrap();
+            tick(&mut e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(&mut e, vec![egui::Event::PointerMoved(b)]);
+            tick(&mut e, vec![button(b, false)]);
+            assert!(
+                e.doc.layers[0].frames[0]
+                    .iter()
+                    .all(|m| crate::vector::control_bounds(m).right() <= 100.001)
+            );
+            if locked {
+                assert_eq!(before, serde_json::to_value(&e.doc).unwrap());
+            } else {
+                assert!(
+                    e.doc.layers[0].frames[0]
+                        .iter()
+                        .any(|m| m.fill == Some([230, 30, 60, 255]))
+                );
+            }
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct SelectionBox {
@@ -1714,7 +1982,8 @@ impl Editor {
             return;
         }
         self.checkpoint();
-        self.commit_paint(pen.layer, pen.frame, vec![pen.mark]);
+        let marks = self.prepare_style(self.symmetry_marks(vec![pen.mark]));
+        self.commit_paint(pen.layer, pen.frame, marks);
         self.recover();
         self.status = "Trazado Bézier creado".into();
     }
@@ -1805,9 +2074,13 @@ impl Editor {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.visible && !l.options.locked)
         {
-            for (m, mark) in layer.frames[self.frame].iter().enumerate().rev() {
+            for (m, mark) in crate::animation::marks(layer, self.frame)
+                .iter()
+                .enumerate()
+                .rev()
+            {
                 if hit(mark, world, 6. / view.scale) {
                     state.clear_selection();
                     state.selected.push((l, m));
@@ -1845,7 +2118,7 @@ impl Editor {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.visible && !l.options.locked)
         {
             let mut marks = Vec::new();
             let mut layer_changed = false;
@@ -2179,7 +2452,7 @@ impl Editor {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.visible && !l.options.locked)
         {
             for (m, mark) in layer.frames[self.frame]
                 .iter()
@@ -2251,6 +2524,7 @@ impl Editor {
             self.fill_color.to_array(),
         ) {
             Ok(shapes) => {
+                let shapes = self.prepare_style(shapes);
                 // Recolor an existing bucket face when its geometry is unchanged.
                 let old = self.doc.layers[self.layer].frames[self.frame]
                     .iter()
@@ -2268,6 +2542,8 @@ impl Editor {
                 }) {
                     self.doc.layers[self.layer].frames[self.frame][index].fill =
                         Some(self.fill_color.to_array());
+                    self.doc.layers[self.layer].frames[self.frame][index].style =
+                        shapes[0].style.clone();
                 } else {
                     self.doc.layers[self.layer].frames[self.frame].extend(shapes);
                 }
@@ -2481,6 +2757,66 @@ mod new_tool_regressions {
     fn click(ctx: &egui::Context, e: &mut Editor, p: Pos2) {
         tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
         tick(ctx, e, vec![button(p, false)]);
+    }
+    #[test]
+    fn camera_drag_moves_art_with_pointer_and_records_local_key() {
+        run(|ctx, e| {
+            e.doc = crate::fresh_document();
+            e.add_camera();
+            e.frame = 10;
+            e.activate_tool(Tool::Camera);
+            tick(ctx, e, vec![]);
+            let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.));
+            let original = e.camera_view(e.canvas.view(area));
+            let stage = e.canvas.view(area);
+            let p = Pos2::new(500., 350.);
+            let q = p + Vec2::new(60., 20.);
+            let world = original.world(p);
+            tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(q)]);
+            tick(ctx, e, vec![button(q, false)]);
+            let v = e.camera_view(e.canvas.view(area));
+            assert!(
+                v.screen(world).distance(q) < 0.01,
+                "camera screen {:?}, expected {:?}",
+                v.screen(world),
+                q
+            );
+            assert_eq!(v.center, stage.center);
+            let c = &e.doc.extras.cameras[0];
+            assert_eq!(c.animation.keys.len(), 1);
+            assert_eq!(c.animation.keys[0].frame, 10);
+            assert_eq!(c.center, [480., 270.]);
+            assert!(e.project_document().validate().is_ok());
+        });
+    }
+    #[test]
+    fn moving_held_art_creates_motion_key_instead_of_rewriting_first_frame() {
+        run(|ctx, e| {
+            e.doc = crate::fresh_document();
+            let mark = rect([100., 100.], [200., 200.], [90, 60, 220, 255]);
+            for f in &mut e.doc.layers[0].frames {
+                *f = vec![mark.clone()].into();
+            }
+            e.frame = 10;
+            e.activate_tool(Tool::Transform);
+            tick(ctx, e, vec![]);
+            e.canvas.selected = vec![(0, 0)];
+            let v = view(e);
+            let p = v.screen(Pos2::new(130., 140.));
+            let q = p + Vec2::new(70., 0.);
+            tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(q)]);
+            tick(ctx, e, vec![button(q, false)]);
+            assert_eq!(e.doc.layers[0].frames[0][0].points, mark.points);
+            assert!(e.doc.layers[0].key(10));
+            assert_eq!(e.doc.layers[0].options.tweens.len(), 1);
+            let mid =
+                crate::vector::control_bounds(&crate::animation::marks(&e.doc.layers[0], 5)[0])
+                    .center();
+            let end = crate::vector::control_bounds(&e.doc.layers[0].frames[10][0]).center();
+            assert!((mid.x - (150. + (end.x - 150.) / 2.)).abs() < 0.01);
+        });
     }
     #[test]
     fn selected_fill_and_stroke_update_directly_and_undo_one_gesture() {
@@ -2724,6 +3060,7 @@ mod new_tool_regressions {
             e.tool = Tool::Wand;
             click(ctx, e, view(e).screen(Pos2::new(150., 150.)));
             assert_eq!(e.canvas.selected, vec![(0, 1), (0, 0)]);
+            e.canvas.clear_selection(); // This case samples without applying to a selection.
             e.activate_tool(Tool::Eyedropper);
             click(ctx, e, view(e).screen(Pos2::new(550., 150.)));
             assert_eq!(e.fill_color, Color32::BLUE);

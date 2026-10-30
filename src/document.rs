@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mark {
+    #[serde(default, skip_serializing_if = "crate::features::default_style")]
+    pub style: crate::features::MarkStyle,
     pub points: SharedVec<[f32; 2]>,
     pub color: [u8; 4],
     pub width: f32,
@@ -52,6 +54,7 @@ impl Node {
 impl Default for Mark {
     fn default() -> Self {
         Self {
+            style: Default::default(),
             points: Default::default(),
             color: [89, 72, 220, 255],
             width: 4.,
@@ -97,12 +100,19 @@ impl Mark {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layer {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::features::default_layer_options"
+    )]
+    pub options: crate::features::LayerOptions,
     pub name: String,
     pub visible: bool,
     pub frames: SharedVec<SharedVec<Mark>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Document {
+    #[serde(default, skip_serializing_if = "crate::features::default_extras")]
+    pub extras: crate::features::ProjectExtras,
     pub version: u32,
     pub fps: u32,
     #[serde(default = "default_width", skip_serializing_if = "is_default_width")]
@@ -126,11 +136,13 @@ fn is_default_height(v: &u32) -> bool {
 impl Default for Document {
     fn default() -> Self {
         Self {
+            extras: Default::default(),
             version: 1,
             fps: 12,
             width: 960,
             height: 540,
             layers: vec![Layer {
+                options: Default::default(),
                 name: "Capa 1".into(),
                 visible: true,
                 frames: vec![SharedVec::default(); 24].into(),
@@ -141,6 +153,7 @@ impl Default for Document {
 }
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
+        crate::features::validate(self)?;
         if self.version != 1
             || !(1..=240).contains(&self.fps)
             || !(1..=16384).contains(&self.width)
@@ -188,44 +201,7 @@ impl Document {
         Ok(())
     }
     pub fn svg(&self, frame: usize) -> String {
-        let mut out = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"><rect width=\"{}\" height=\"{}\" fill=\"white\"/>",
-            self.width, self.height, self.width, self.height, self.width, self.height
-        );
-        for layer in self.layers.iter().filter(|l| l.visible) {
-            for original in &layer.frames[frame] {
-                for m in crate::width::export_marks(original) {
-                    let c = format!("rgb({},{},{})", m.color[0], m.color[1], m.color[2]);
-                    let stroke = if m.stroke { c.as_str() } else { "none" };
-                    let (fill, alpha) = m
-                        .fill
-                        .map(|c| {
-                            (
-                                format!("rgb({},{},{})", c[0], c[1], c[2]),
-                                c[3] as f32 / 255.,
-                            )
-                        })
-                        .unwrap_or(("none".into(), 1.));
-                    if m.points.len() == 1 && m.nodes.is_empty() && m.stroke && !m.rectangle {
-                        out += &format!(
-                            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{c}\" fill-opacity=\"{}\"/>",
-                            m.points[0][0],
-                            m.points[0][1],
-                            m.width / 2.,
-                            m.color[3] as f32 / 255.
-                        );
-                    } else {
-                        out += &format!(
-                            "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{alpha}\" fill-rule=\"evenodd\" stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
-                            m.svg_path(),
-                            m.color[3] as f32 / 255.,
-                            m.width
-                        );
-                    }
-                }
-            }
-        }
-        out + "</svg>"
+        crate::features::svg(self, frame)
     }
 }
 #[cfg(test)]

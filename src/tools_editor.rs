@@ -14,7 +14,18 @@ impl Editor {
         self.style_selection = ids.to_vec();
         self.style_frame = self.frame;
         if let Some(&(l, m)) = ids.first() {
-            let mark = &self.doc.layers[l].frames[self.frame][m];
+            let evaluated = crate::animation::marks(&self.doc.layers[l], self.frame);
+            let mark = &evaluated[m];
+            self.feature.gradient_on = mark.style.gradient.is_some();
+            if let Some(g) = &mark.style.gradient {
+                self.feature.gradient = g.clone();
+            } else {
+                self.feature
+                    .gradient
+                    .fit(crate::vector::control_bounds(mark));
+            }
+            self.feature.start_cap = mark.style.start_cap;
+            self.feature.end_cap = mark.style.end_cap;
             self.fill_enabled = mark.fill.is_some();
             self.stroke_enabled = mark.stroke;
             if let Some(c) = mark.fill {
@@ -46,6 +57,10 @@ impl Editor {
             let mark = &mut self.doc.layers[l].frames[self.frame][m];
             if fill && mark.fill.is_some() {
                 mark.fill = Some(self.fill_color.to_array());
+                mark.style.gradient = None;
+                self.feature.gradient_on = false;
+                mark.style.shade = 0;
+                mark.style.light = 0;
             }
             if stroke && mark.stroke {
                 mark.color = self.color.to_array();
@@ -61,7 +76,11 @@ impl Editor {
         self.recover();
     }
     pub fn selection_properties_ui(&mut self, ui: &mut egui::Ui) {
-        ui.strong(format!("Selección · {}", self.canvas.selected.len()));
+        ui.strong(format!(
+            "{} · {}",
+            crate::i18n::tr("Selección"),
+            self.canvas.selected.len()
+        ));
         ui.add_space(12.);
         let fill = self
             .canvas
@@ -75,7 +94,7 @@ impl Editor {
             .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].stroke);
         if fill {
             ui.horizontal(|ui| {
-                ui.label("Relleno");
+                ui.label(crate::i18n::tr("Relleno"));
                 if ui.color_edit_button_srgba(&mut self.fill_color).changed() {
                     self.change_selected_style(true, false, false, false);
                 }
@@ -83,7 +102,7 @@ impl Editor {
         }
         if stroke {
             ui.horizontal(|ui| {
-                ui.label("Contorno");
+                ui.label(crate::i18n::tr("Contorno"));
                 if ui.color_edit_button_srgba(&mut self.color).changed() {
                     self.change_selected_style(false, true, false, false);
                 }
@@ -91,7 +110,7 @@ impl Editor {
             if ui
                 .add(
                     egui::Slider::new(&mut self.width, 0.1..=100.)
-                        .text("Grosor")
+                        .text(crate::i18n::tr("Grosor"))
                         .suffix(" px"),
                 )
                 .changed()
@@ -165,6 +184,10 @@ impl Editor {
         for area in areas {
             let mut next = vec![];
             for mark in marks {
+                if mark.style.instance.is_some() {
+                    next.push(mark);
+                    continue;
+                }
                 let (outside, inside) = crate::editing::split_area(&mark, &area);
                 if inside.is_empty() {
                     next.push(mark);
@@ -195,7 +218,11 @@ impl Editor {
                     return;
                 }
                 if crate::vector::contains_fill(mark, point) {
-                    let c = mark.fill.unwrap();
+                    let c = mark
+                        .style
+                        .gradient
+                        .as_ref()
+                        .map_or_else(|| mark.fill.unwrap(), |g| g.color(point));
                     self.fill_color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                     self.fill_enabled = true;
                     self.active_fill = true;
@@ -318,9 +345,9 @@ impl Editor {
         if rest.0.is_empty() {
             return id;
         }
-        let mut parts = crate::vector::polygons_to_marks(rest, color);
+        let mut parts = crate::features::styled(rest, color, &mark.style);
         let chosen = parts.len();
-        parts.extend(crate::vector::polygons_to_marks(selected, color));
+        parts.extend(crate::features::styled(selected, color, &mark.style));
         let count = parts.len();
         self.checkpoint();
         let marks = &mut self.doc.layers[id.0].frames[self.frame];
@@ -343,6 +370,9 @@ impl Editor {
         if matches!(
             tool,
             Tool::Brush
+                | Tool::FillBrush
+                | Tool::ShadeBrush
+                | Tool::LightBrush
                 | Tool::VectorBrush
                 | Tool::Pen
                 | Tool::Rectangle
@@ -351,7 +381,6 @@ impl Editor {
                 | Tool::Polygon
                 | Tool::Eraser
                 | Tool::Bucket
-                | Tool::Eyedropper
         ) {
             self.canvas.clear_selection();
             self.style_selection.clear();
@@ -363,6 +392,13 @@ impl Editor {
                 self.fill_enabled = true;
             }
         }
+        if tool == Tool::Ruler {
+            self.studio.rulers = true;
+        }
+        if tool == Tool::Perspective {
+            self.doc.extras.perspective.enabled = true;
+        }
+        self.feature.library = false;
         self.tool = tool;
     }
     pub fn split_clicked_crossing(
@@ -464,23 +500,33 @@ impl Editor {
         }
     }
     pub fn tool_options_ui(&mut self, ui: &mut egui::Ui) {
+        self.studio_tool_options(ui);
         match self.tool {
             Tool::Zoom => {
-                ui.radio_value(&mut self.zoom_out, false, "Acercar (+)");
-                ui.radio_value(&mut self.zoom_out, true, "Alejar (−)");
+                ui.radio_value(&mut self.zoom_out, false, crate::i18n::tr("Acercar (+)"));
+                ui.radio_value(&mut self.zoom_out, true, crate::i18n::tr("Alejar (−)"));
             }
             Tool::Polygon => {
-                ui.add(egui::Slider::new(&mut self.polygon_sides, 3..=32).text("Lados / puntas"));
-                ui.checkbox(&mut self.polygon_star, "Estrella");
+                ui.add(
+                    egui::Slider::new(&mut self.polygon_sides, 3..=32)
+                        .text(crate::i18n::tr("Lados / puntas")),
+                );
+                ui.checkbox(&mut self.polygon_star, crate::i18n::tr("Estrella"));
                 if self.polygon_star {
                     ui.add(
-                        egui::Slider::new(&mut self.star_ratio, 0.05..=0.95).text("Radio interior"),
+                        egui::Slider::new(&mut self.star_ratio, 0.05..=0.95)
+                            .text(crate::i18n::tr("Radio interior")),
                     );
                 }
             }
             Tool::Wand => {
-                ui.add(egui::Slider::new(&mut self.wand_tolerance, 0. ..=255.).text("Tolerancia"));
-                ui.label("Selecciona los rellenos o contornos de color parecido en la capa.");
+                ui.add(
+                    egui::Slider::new(&mut self.wand_tolerance, 0. ..=255.)
+                        .text(crate::i18n::tr("Tolerancia")),
+                );
+                ui.label(crate::i18n::tr(
+                    "Selecciona los rellenos o contornos de color parecido en la capa.",
+                ));
             }
             _ => {}
         }

@@ -15,12 +15,12 @@ pub enum Gap {
 impl Gap {
     pub const ALL: [Self; 4] = [Self::None, Self::Small, Self::Medium, Self::Large];
     pub fn label(self) -> &'static str {
-        match self {
+        crate::i18n::tr(match self {
             Self::None => "No cerrar huecos",
             Self::Small => "Cerrar huecos pequeños",
             Self::Medium => "Cerrar huecos medianos",
             Self::Large => "Cerrar huecos grandes",
-        }
+        })
     }
     pub fn distance(self) -> f32 {
         match self {

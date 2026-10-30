@@ -1,9 +1,13 @@
-use crate::design::{ACCENT, Icon, MUTED, PANEL, button, draw};
-use crate::{Document, Editor, Layer};
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use std::time::Instant;
+#[cfg(test)]
+use crate::Document;
+use crate::Editor;
+use crate::design::{ACCENT, Icon, MUTED, button, draw};
+#[cfg(test)]
+use eframe::egui::Pos2;
+use eframe::egui::{self, Color32, Rect, Sense, Vec2};
 impl Editor {
     pub fn workspace(&mut self, ui: &mut egui::Ui) {
+        self.animation.thumbnail_cache.begin_frame();
         let ctx = ui.ctx().clone();
         egui::Panel::top("application")
             .exact_size(42.)
@@ -13,21 +17,7 @@ impl Editor {
                     crate::design::logo(ui.painter(), logo_rect);
                     ui.label(egui::RichText::new("LibreToon").strong().size(14.));
                     ui.add_space(8.);
-                    ui.menu_button("Archivo", |ui| {
-                        if button(
-                            ui,
-                            Icon::Settings,
-                            "Ajustes de documento…",
-                            "Tamaño del escenario y velocidad",
-                            false,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_document_settings();
-                            ui.close();
-                        }
-                        ui.separator();
+                    ui.menu_button(crate::i18n::tr("Archivo"), |ui| {
                         if button(ui, Icon::New, "Nuevo", "Nuevo documento", false, true).clicked()
                         {
                             self.new_document();
@@ -58,19 +48,113 @@ impl Editor {
                         ui.separator();
                         if button(
                             ui,
-                            Icon::Export,
-                            "Exportar SVG…",
-                            "Exportar fotograma actual",
+                            Icon::Settings,
+                            "Ajustes de documento…",
+                            "Ajustes de documento…",
                             false,
                             true,
                         )
                         .clicked()
                         {
-                            self.export();
+                            self.open_document_settings();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Settings,
+                            "Preferencias del programa…",
+                            "Preferencias del programa…",
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.studio.preferences_open = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if button(
+                            ui,
+                            Icon::Export,
+                            "Exportar vídeo…",
+                            "Exportar vídeo…",
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.open_export(false);
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Film,
+                            "Exportar GIF…",
+                            "Exportar GIF…",
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.open_export(true);
                             ui.close();
                         }
                     });
-                    ui.menu_button("Edición", |ui| {
+                    ui.menu_button(crate::i18n::tr("Edición"), |ui| {
+                        if button(
+                            ui,
+                            Icon::Copy,
+                            "Copiar",
+                            "Copiar",
+                            false,
+                            !self.canvas.selected.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.copy_selection(false);
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Cut,
+                            "Cortar",
+                            "Cortar",
+                            false,
+                            !self.canvas.selected.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.copy_selection(true);
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Paste,
+                            "Pegar",
+                            "Pegar",
+                            false,
+                            !self.studio.clipboard.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.paste_selection();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Symbol,
+                            "Convertir a símbolo · F8",
+                            "Convertir a símbolo",
+                            false,
+                            !self.canvas.selected.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.convert_symbol();
+                            ui.close();
+                        }
+                        ui.separator();
+
                         if button(
                             ui,
                             Icon::Undo,
@@ -132,33 +216,19 @@ impl Editor {
                         self.history(true);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if button(
-                            ui,
-                            Icon::Export,
-                            "Exportar",
-                            "Exportar el fotograma como SVG",
-                            false,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.export();
-                        }
-                        ui.label(egui::RichText::new("ANIMACIÓN 2D").size(10.).color(MUTED));
-                    });
-                });
-            });
-        egui::Panel::bottom("status")
-            .exact_size(25.)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&self.status).size(11.).color(MUTED));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new("Rust nativo  •  LibreToon 0.2")
-                                .size(10.)
-                                .color(MUTED),
+                        self.window_controls(ui);
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 32.),
+                            Sense::click_and_drag(),
                         );
+                        let _ = rect;
+                        if response.drag_started() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                        if response.double_clicked() {
+                            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
                     });
                 });
             });
@@ -171,360 +241,84 @@ impl Editor {
                     for (label, rows) in [
                         (
                             "SELECCIÓN",
-                            vec![(Select, Transform), (Lasso, PolygonSelect), (Wand, Object)],
+                            vec![(Select, Object), (Lasso, PolygonSelect), (Wand, Wand)],
                         ),
+                        ("EDICIÓN", vec![(Transform, Mirror)]),
                         ("PINTURA", vec![(Brush, Eraser), (Bucket, Eyedropper)]),
                         ("VECTORIAL", vec![(VectorBrush, Pen), (Node, Width)]),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),
-                        ("LIENZO", vec![(Pan, Zoom)]),
+                        (
+                            "LIENZO",
+                            vec![(Pan, Zoom), (Ruler, Symmetry), (Perspective, Camera)],
+                        ),
                     ] {
                         ui.add_space(7.);
-                        ui.label(egui::RichText::new(label).size(8.).color(MUTED));
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr(label))
+                                .size(8.)
+                                .color(MUTED),
+                        );
                         ui.separator();
                         for (left, right) in rows {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 3.;
-                                for tool in [left, right] {
-                                    if button(
-                                        ui,
-                                        tool.icon(),
-                                        "",
-                                        tool.name(),
-                                        self.tool == tool,
-                                        true,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.activate_tool(tool);
+                                for (index, tool) in [left, right].into_iter().enumerate() {
+                                    if index == 1 && left == right {
+                                        continue;
                                     }
+                                    self.tool_button(ui, tool);
                                 }
                             });
                         }
                     }
                     ui.add_space(7.);
-                    ui.label(egui::RichText::new("COLOR").size(8.).color(MUTED));
+                    ui.label(
+                        egui::RichText::new(crate::i18n::tr("COLOR"))
+                            .size(8.)
+                            .color(MUTED),
+                    );
                     ui.separator();
                     self.color_swatches(ui);
                 });
             });
         egui::Panel::right("properties")
-            .exact_size(248.)
-            .resizable(true)
-            .show(ui, |ui| self.properties_ui(ui));
-        egui::Panel::bottom("timeline")
-            .exact_size(224.)
+            .exact_size(305.)
             .resizable(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Línea de tiempo").strong());
-                    ui.separator();
-                    if button(ui, Icon::First, "", "Primer fotograma", false, true).clicked() {
-                        self.frame = 0;
-                        self.playing = false;
-                    }
                     if button(
                         ui,
-                        Icon::Previous,
-                        "",
-                        "Fotograma anterior",
-                        false,
-                        self.frame > 0,
-                    )
-                    .clicked()
-                    {
-                        self.frame -= 1;
-                        self.playing = false;
-                    }
-                    if button(
-                        ui,
-                        if self.playing {
-                            Icon::Pause
-                        } else {
-                            Icon::Play
-                        },
-                        "",
-                        if self.playing { "Pausar" } else { "Reproducir" },
-                        self.playing,
+                        Icon::Settings,
+                        "Propiedades",
+                        "Propiedades",
+                        !self.feature.library,
                         true,
                     )
                     .clicked()
                     {
-                        self.playing = !self.playing;
-                        self.tick = Instant::now();
+                        self.feature.library = false;
                     }
                     if button(
                         ui,
-                        Icon::Next,
-                        "",
-                        "Fotograma siguiente",
-                        false,
-                        self.frame + 1 < self.doc.layers[0].frames.len(),
+                        Icon::Library,
+                        "Biblioteca",
+                        "Biblioteca",
+                        self.feature.library,
+                        true,
                     )
                     .clicked()
                     {
-                        self.frame += 1;
-                        self.playing = false;
-                    }
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!("{:03}", self.frame + 1))
-                            .monospace()
-                            .color(ACCENT),
-                    );
-                    ui.label(egui::RichText::new(format!("/ {}",self.doc.layers[0].frames.len())).color(MUTED));
-                    let mut fps=self.doc.fps;
-                    if ui.add(egui::DragValue::new(&mut fps).range(1..=240).suffix(" fps").update_while_editing(false)).on_hover_text("Velocidad del documento").changed(){self.set_fps(fps);}
-                    ui.separator();
-                    if !self.duration_editing{self.timeline_duration=self.doc.layers[0].frames.len() as f32/self.doc.fps as f32;}
-                    let response=ui.add(egui::DragValue::new(&mut self.timeline_duration).range(1./self.doc.fps as f32..=10000./self.doc.fps as f32).speed(0.05).fixed_decimals(2).suffix(" s").update_while_editing(false)).on_hover_text("Duración total. Al acortar se recortan los fotogramas finales; Ctrl+Z permite recuperarlos.");
-                    let editing=response.dragged()||response.has_focus();
-                    if response.drag_stopped()||response.lost_focus()||(response.changed()&&!editing){self.set_duration(self.timeline_duration);}
-                    self.duration_editing=editing;
-                    ui.separator();
-                    if button(ui, Icon::Onion, "", "Papel cebolla", self.onion, true).clicked() {
-                        self.onion = !self.onion;
+                        self.feature.library = true;
                     }
                 });
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if button(ui, Icon::Layers, "", "Añadir capa", false, self.doc.layers.len()<100).clicked() {
-                        self.checkpoint();
-                        let n = self.doc.layers.len();
-                        let frame_count = self.doc.layers[0].frames.len();
-                        self.doc.layers.push(Layer {
-                            name: format!("Capa {}", n + 1),
-                            visible: true,
-                            frames: vec![Default::default(); frame_count].into(),
-                        });
-                        self.layer = n;
-                        self.recover();
-                    }
-                    if button(ui, Icon::Plus, "", "Insertar fotograma vacío", false, true).clicked()
-                    {
-                        self.insert_frame(false);
-                    }
-                    if button(ui, Icon::Copy, "", "Duplicar fotograma", false, true).clicked() {
-                        self.insert_frame(true);
-                    }
-                    if button(
-                        ui,
-                        Icon::Trash,
-                        "",
-                        "Eliminar fotograma",
-                        false,
-                        self.doc.layers[0].frames.len() > 1,
-                    )
-                    .clicked()
-                    {
-                        self.checkpoint();
-                        for l in &mut self.doc.layers {
-                            l.frames.remove(self.frame);
-                        }
-                        self.frame = self.frame.min(self.doc.layers[0].frames.len() - 1);
-                        self.recover();
-                    }
-                    ui.separator();
-                    if button(ui,Icon::Up,"","Subir capa activa",false,self.layer+1<self.doc.layers.len()).clicked(){self.checkpoint();self.doc.layers.swap(self.layer,self.layer+1);self.layer+=1;self.recover();}
-                    if button(ui,Icon::Down,"","Bajar capa activa",false,self.layer>0).clicked(){self.checkpoint();self.doc.layers.swap(self.layer,self.layer-1);self.layer-=1;self.recover();}
-                    if button(ui,Icon::Trash,"","Eliminar capa activa",false,self.doc.layers.len()>1).clicked(){self.checkpoint();self.doc.layers.remove(self.layer);self.layer=self.layer.min(self.doc.layers.len()-1);self.renaming_layer=None;self.recover();}
-                    ui.label(egui::RichText::new("CAPAS").size(10.).color(MUTED));
-                });
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let count = self.doc.layers[0].frames.len();
-                        let row_h = 27.;
-                        let label_w = 180.;
-                        let cell_w = 22.;
-                        let (r, _) = ui.allocate_exact_size(
-                            Vec2::new(
-                                label_w + count as f32 * cell_w,
-                                24. + self.doc.layers.len() as f32 * row_h,
-                            ),
-                            Sense::hover(),
-                        );
-                        let visible = ui.clip_rect();
-                        let frames = visible_range(
-                            r.left() + label_w,
-                            cell_w,
-                            count,
-                            visible.left(),
-                            visible.right(),
-                        );
-                        let rows = visible_range(
-                            r.top() + 24.,
-                            row_h,
-                            self.doc.layers.len(),
-                            visible.top(),
-                            visible.bottom(),
-                        );
-                        let painter = ui.painter().clone();
-                        painter.rect_filled(
-                            Rect::from_min_size(r.min, Vec2::new(r.width(), 24.)),
-                            0.,
-                            Color32::from_rgb(32, 33, 37),
-                        );
-                        painter.text(
-                            r.min + Vec2::new(12., 12.),
-                            egui::Align2::LEFT_CENTER,
-                            "Nombre de capa",
-                            egui::FontId::proportional(10.),
-                            MUTED,
-                        );
-                        for f in frames.clone() {
-                            let x = r.left() + label_w + f as f32 * cell_w;
-                            if f == 0 || (f + 1) % 5 == 0 {
-                                painter.text(
-                                    Pos2::new(x + cell_w / 2., r.top() + 12.),
-                                    egui::Align2::CENTER_CENTER,
-                                    (f + 1).to_string(),
-                                    egui::FontId::monospace(10.),
-                                    MUTED,
-                                );
-                            }
-                        }
-                        for row in rows {
-                            let l = self.doc.layers.len() - 1 - row;
-                            let y = r.top() + 24. + row as f32 * row_h;
-                            let name_rect = Rect::from_min_size(
-                                Pos2::new(r.left(), y),
-                                Vec2::new(label_w, row_h),
-                            );
-                            painter.rect_filled(
-                                name_rect,
-                                0.,
-                                if self.layer == l {
-                                    Color32::from_rgb(46, 61, 80)
-                                } else {
-                                    PANEL
-                                },
-                            );
-                            let eye = Rect::from_min_size(
-                                name_rect.min + Vec2::new(5., 3.),
-                                Vec2::splat(21.),
-                            );
-                            draw(
-                                &painter,
-                                eye,
-                                if self.doc.layers[l].visible {
-                                    Icon::Eye
-                                } else {
-                                    Icon::EyeOff
-                                },
-                                MUTED,
-                            );
-                            painter.line_segment(
-                                [
-                                    Pos2::new(r.left() + 33., y + 7.),
-                                    Pos2::new(r.left() + 33., y + 20.),
-                                ],
-                                Stroke::new(3., ACCENT),
-                            );
-                            let clipped =
-                                painter.with_clip_rect(name_rect.shrink2(Vec2::new(4., 0.)));
-                            if self.renaming_layer!=Some(l){
-                            clipped.text(
-                                Pos2::new(r.left() + 42., y + row_h / 2.),
-                                egui::Align2::LEFT_CENTER,
-                                &self.doc.layers[l].name,
-                                egui::FontId::proportional(11.),
-                                Color32::from_gray(218),
-                            );
-                            }
-                            if ui
-                                .interact(eye, ui.scope_id().with(("eye", l)), Sense::click())
-                                .on_hover_text("Mostrar / ocultar capa")
-                                .clicked()
-                            {
-                                self.checkpoint();
-                                self.doc.layers[l].visible = !self.doc.layers[l].visible;
-                                self.recover();
-                            }
-                            if self.renaming_layer==Some(l){
-                                let mut name=self.doc.layers[l].name.clone();let field=Rect::from_min_max(Pos2::new(r.left()+39.,y+2.),name_rect.max-Vec2::new(3.,2.));
-                                let response=ui.put(field,egui::TextEdit::singleline(&mut name).id(egui::Id::unique(("layer-name",l))).frame(egui::Frame::NONE));
-                                if self.rename_focus{response.request_focus();self.rename_focus=false;}
-                                if response.changed(){self.checkpoint();self.doc.layers[l].name=name;self.recover();}
-                                if response.lost_focus()||ui.input(|i|i.key_pressed(egui::Key::Enter)){self.renaming_layer=None;}
-                            }else{
-                                let response=ui.interact(Rect::from_min_max(Pos2::new(r.left()+30.,y),name_rect.max),ui.scope_id().with(("name",l)),Sense::click()).on_hover_text("Doble clic para cambiar el nombre");
-                                if response.clicked(){self.layer=l;}
-                                if response.double_clicked(){self.renaming_layer=Some(l);self.rename_focus=true;}
-                            }
-                            for f in frames.clone() {
-                                let cell = Rect::from_min_size(
-                                    Pos2::new(r.left() + label_w + f as f32 * cell_w, y),
-                                    Vec2::new(cell_w, row_h),
-                                );
-                                let active = f == self.frame;
-                                let bg = if active {
-                                    Color32::from_rgb(47, 83, 124)
-                                } else if (f / 5) % 2 == 0 {
-                                    Color32::from_rgb(55, 57, 62)
-                                } else {
-                                    Color32::from_rgb(48, 50, 55)
-                                };
-                                painter.rect_filled(cell, 0., bg);
-                                painter.rect_stroke(
-                                    cell,
-                                    0.,
-                                    Stroke::new(0.5, Color32::from_rgb(30, 31, 35)),
-                                    egui::StrokeKind::Inside,
-                                );
-                                if !self.doc.layers[l].frames[f].is_empty() {
-                                    painter.circle_filled(
-                                        cell.center(),
-                                        3.3,
-                                        if active {
-                                            ACCENT
-                                        } else {
-                                            Color32::from_gray(204)
-                                        },
-                                    );
-                                } else {
-                                    painter.circle_stroke(
-                                        cell.center(),
-                                        2.6,
-                                        Stroke::new(1., Color32::from_gray(102)),
-                                    );
-                                }
-                                if ui
-                                    .interact(
-                                        cell,
-                                        ui.scope_id().with(("frame", l, f)),
-                                        Sense::click(),
-                                    )
-                                    .on_hover_text(format!(
-                                        "{} · Fotograma {}",
-                                        self.doc.layers[l].name,
-                                        f + 1
-                                    ))
-                                    .clicked()
-                                {
-                                    self.frame = f;
-                                    self.layer = l;
-                                    self.playing = false;
-                                }
-                            }
-                        }
-                        let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell_w;
-                        painter.line_segment(
-                            [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
-                            Stroke::new(1., ACCENT),
-                        );
-                        painter.add(egui::Shape::convex_polygon(
-                            vec![
-                                Pos2::new(x - 5., r.top()),
-                                Pos2::new(x + 5., r.top()),
-                                Pos2::new(x + 5., r.top() + 8.),
-                                Pos2::new(x, r.top() + 13.),
-                                Pos2::new(x - 5., r.top() + 8.),
-                            ],
-                            ACCENT,
-                            Stroke::NONE,
-                        ));
-                    });
+                if self.feature.library {
+                    self.library_ui(ui);
+                } else {
+                    self.properties_ui(ui);
+                }
             });
+        self.sequencer(ui);
         egui::Panel::top("document_tab")
             .exact_size(34.)
             .show(ui, |ui| {
@@ -544,6 +338,18 @@ impl Editor {
                             .unwrap_or("Sin título.fla".into()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if button(
+                            ui,
+                            Icon::Stage,
+                            "",
+                            "Solo escenario",
+                            self.studio.stage_only,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.studio.stage_only = !self.studio.stage_only;
+                        }
                         if button(
                             ui,
                             Icon::Fit,
@@ -590,12 +396,56 @@ impl Editor {
             .exact_size(28.)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Escena 1").size(11.).color(ACCENT));
-                    ui.label(egui::RichText::new(" /  Escenario").size(11.).color(MUTED));
+                    if !self.feature.symbol_stack.is_empty() {
+                        if button(
+                            ui,
+                            Icon::Previous,
+                            "Volver a escena",
+                            "Volver a escena",
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.exit_symbol();
+                        }
+                        if let Some((_, _, _, id)) = self.feature.symbol_stack.last() {
+                            if let Some(symbol) =
+                                self.doc.extras.symbols.iter().find(|s| s.id == *id)
+                            {
+                                ui.label(
+                                    egui::RichText::new(format!("/ {}", symbol.name)).color(ACCENT),
+                                );
+                            }
+                        }
+                    } else {
+                        let label = self.scene_label();
+                        if button(ui, Icon::Film, &label, "Scene manager", false, true).clicked() {
+                            self.animation.scenes_open = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr(" /  Escenario"))
+                                .size(11.)
+                                .color(MUTED),
+                        );
+                    }
                 });
             });
-        if !ctx.egui_wants_keyboard_input() {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::W)) {
+        if !ctx.egui_wants_keyboard_input()
+            && !self.animation.scenes_open
+            && self.animation.picker.is_none()
+            && !self.studio.preferences_open
+            && self.studio.export.is_none()
+        {
+            if self.studio.prefs.bindings[17].key == "W"
+                && !self.studio.prefs.bindings[17].ctrl
+                && !self.studio.prefs.bindings[17].shift
+                && !self.studio.prefs.bindings[17].alt
+                && !self.animation.scenes_open
+                && self.animation.picker.is_none()
+                && !self.studio.preferences_open
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::W))
+            {
                 self.activate_tool(crate::canvas::Tool::Width);
             }
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::X)) {
@@ -608,76 +458,49 @@ impl Editor {
                 self.stroke_enabled = true;
                 self.fill_enabled = true;
             }
-            for (key, tool) in [
-                (egui::Key::E, crate::canvas::Tool::Eraser),
-                (egui::Key::I, crate::canvas::Tool::Eyedropper),
-                (egui::Key::L, crate::canvas::Tool::Lasso),
-                (egui::Key::H, crate::canvas::Tool::Pan),
-                (egui::Key::Z, crate::canvas::Tool::Zoom),
-                (egui::Key::O, crate::canvas::Tool::Ellipse),
-                (egui::Key::N, crate::canvas::Tool::Line),
-                (egui::Key::V, crate::canvas::Tool::Select),
-                (egui::Key::Q, crate::canvas::Tool::Transform),
-                (egui::Key::B, crate::canvas::Tool::Brush),
-                (egui::Key::Y, crate::canvas::Tool::VectorBrush),
-                (egui::Key::P, crate::canvas::Tool::Pen),
-                (egui::Key::A, crate::canvas::Tool::Node),
-                (egui::Key::R, crate::canvas::Tool::Rectangle),
-                (egui::Key::K, crate::canvas::Tool::Bucket),
-                (egui::Key::W, crate::canvas::Tool::Width),
-            ] {
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
-                    self.activate_tool(tool);
-                }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F8)) {
+                self.convert_symbol();
             }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Comma)) {
+                self.frame = self.frame.saturating_sub(1);
+                self.playing = false;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Period)) {
+                self.frame = (self.frame + 1).min(self.doc.layers[0].frames.len() - 1);
+                self.playing = false;
+            }
+            self.tool_shortcuts(&ctx);
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
             self.style_transaction = false;
         }
         self.document_settings_ui(&ctx);
+        self.preferences_ui(&ctx);
+        self.scenes_ui(&ctx);
+        self.frame_picker_ui(&ctx);
+        self.export_ui(&ctx);
+        self.notice_ui(&ctx);
     }
     fn new_document(&mut self) {
+        self.leave_symbol_context_for_document_change();
         self.renaming_layer = None;
         self.canvas.cancel_drafts();
         self.draft = None;
         self.checkpoint();
-        self.doc = Document::default();
+        self.feature = crate::features::FeatureState::default();
+        self.animation = Default::default();
+        self.doc = crate::fresh_document();
+        self.clear_guides();
         self.frame = 0;
         self.layer = 0;
         self.path = None;
         self.playing = false;
         self.recover();
     }
-    fn insert_frame(&mut self, duplicate: bool) {
-        self.checkpoint();
-        for l in &mut self.doc.layers {
-            let content = if duplicate {
-                l.frames[self.frame].clone()
-            } else {
-                Default::default()
-            };
-            l.frames.insert(self.frame + 1, content);
-        }
-        self.frame += 1;
-        self.playing = false;
-        self.recover();
-    }
-    fn export(&mut self) {
-        if let Some(p) = rfd::FileDialog::new()
-            .add_filter("SVG", &["svg"])
-            .set_file_name("fotograma.svg")
-            .save_file()
-        {
-            self.status = match std::fs::write(p, self.doc.svg(self.frame)) {
-                Ok(()) => "Fotograma exportado".into(),
-                Err(e) => e.to_string(),
-            };
-        }
-    }
 }
 
 /// Include partially visible cells, clamp to content and skip offscreen work.
-fn visible_range(
+pub(crate) fn visible_range(
     origin: f32,
     size: f32,
     count: usize,

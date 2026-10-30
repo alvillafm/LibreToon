@@ -176,6 +176,9 @@ pub fn split_area(mark: &Mark, cutter: &Polygon<f64>) -> (Vec<Mark>, Vec<Mark>) 
     if !vector::control_bounds(mark).intersects(bounds) {
         return (vec![mark.clone()], vec![]);
     }
+    if mark.style.instance.is_some() {
+        return (vec![], vec![mark.clone()]);
+    }
     let mut outside = vec![];
     let mut inside = vec![];
     if let Some(color) = mark.fill {
@@ -188,8 +191,8 @@ pub fn split_area(mark: &Mark, cutter: &Polygon<f64>) -> (Vec<Mark>, Vec<Mark>) 
         if rest.0.is_empty() && !mark.stroke {
             return (vec![], vec![mark.clone()]);
         }
-        outside.extend(vector::polygons_to_marks(rest, color));
-        inside.extend(vector::polygons_to_marks(selected, color));
+        outside.extend(crate::features::styled(rest, color, &mark.style));
+        inside.extend(crate::features::styled(selected, color, &mark.style));
     }
     if mark.stroke {
         let curves = vector::cubics(mark);
@@ -260,6 +263,10 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
         let mut next = vec![];
         let mut touched = false;
         for old in &result {
+            if old.style.instance.is_some() {
+                next.push(old.clone());
+                continue;
+            }
             let Some(old_color) = old.fill else {
                 next.push(old.clone());
                 continue;
@@ -274,12 +281,13 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
                 continue;
             }
             touched = true;
-            if color == old_color {
+            if color == old_color && new.style == old.style {
                 region = region.union(&poly);
             } else {
-                next.extend(vector::polygons_to_marks(
+                next.extend(crate::features::styled(
                     poly.difference(&region),
                     old_color,
+                    &old.style,
                 ));
             }
             if old.stroke {
@@ -291,7 +299,7 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
         if !touched {
             next.push(new);
         } else {
-            next.extend(vector::polygons_to_marks(region, color));
+            next.extend(crate::features::styled(region, color, &new.style));
             if new.stroke {
                 let mut contour = new;
                 contour.fill = None;

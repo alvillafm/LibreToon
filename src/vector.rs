@@ -474,6 +474,9 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
     if rect.contains_rect(bounds) {
         return (vec![], vec![mark.clone()]);
     }
+    if mark.style.instance.is_some() {
+        return (vec![], vec![mark.clone()]);
+    }
     let mut outside = vec![];
     let mut inside = vec![];
     if let Some(color) = mark.fill {
@@ -488,8 +491,16 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
             ]),
             vec![],
         );
-        outside.extend(polygons_to_marks(area.difference(&cutter), color));
-        inside.extend(polygons_to_marks(area.intersection(&cutter), color));
+        outside.extend(crate::features::styled(
+            area.difference(&cutter),
+            color,
+            &mark.style,
+        ));
+        inside.extend(crate::features::styled(
+            area.intersection(&cutter),
+            color,
+            &mark.style,
+        ));
     }
     if mark.stroke {
         let (a, b) = clip_stroke(mark, rect);
@@ -500,6 +511,22 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
 }
 pub fn transform(mark: &Mark, mut f: impl FnMut(Pos2) -> Pos2) -> Mark {
     let mut out = mark.clone();
+    if let Some(g) = out.style.gradient.as_mut() {
+        g.start = xy(f(pos(g.start)));
+        g.end = xy(f(pos(g.end)));
+    }
+    if let Some(i) = out.style.instance.as_mut() {
+        let origin = f(Pos2::new(i.matrix[4], i.matrix[5]));
+        let x = f(Pos2::new(
+            i.matrix[4] + i.matrix[0],
+            i.matrix[5] + i.matrix[1],
+        )) - origin;
+        let y = f(Pos2::new(
+            i.matrix[4] + i.matrix[2],
+            i.matrix[5] + i.matrix[3],
+        )) - origin;
+        i.matrix = [x.x, x.y, y.x, y.y, origin.x, origin.y];
+    }
     if mark.rectangle {
         out.points = flatten(mark, 0.1).into_iter().map(|p| xy(f(p))).collect();
         out.rectangle = false;

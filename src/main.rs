@@ -1,21 +1,32 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod advanced;
+mod animation;
+#[cfg(test)]
+mod animation_tests;
 mod brush;
 mod bucket;
 mod canvas;
 mod design;
 mod document;
 mod editing;
+mod exporter;
+mod features;
 mod fla;
 mod fla_zip;
+mod i18n;
 mod inspector;
 mod paint;
 mod recovery;
+mod scenes;
+mod sequencer;
 mod shared;
+mod studio;
 mod tools_editor;
 mod vector;
+mod visual_controls;
 mod width;
 mod workspace;
-use document::{Document, Layer, Mark};
+use document::{Document, Mark};
 use eframe::egui::{self, Color32};
 use std::{
     path::PathBuf,
@@ -23,6 +34,9 @@ use std::{
 };
 
 struct Editor {
+    feature: features::FeatureState,
+    animation: animation::State,
+    studio: studio::Studio,
     doc: Document,
     frame: usize,
     layer: usize,
@@ -83,7 +97,10 @@ impl Editor {
         }
         .into();
         Self {
-            doc: recovered.unwrap_or_default(),
+            feature: Default::default(),
+            animation: Default::default(),
+            studio: studio::Studio::load(),
+            doc: recovered.unwrap_or_else(fresh_document),
             frame: 0,
             layer: 0,
             color: Color32::from_rgb(89, 72, 220),
@@ -134,8 +151,9 @@ impl Editor {
         self.redo.clear();
     }
     fn recover(&mut self) {
+        self.sync_exposures();
         self.recovery_writer
-            .submit(self.recovery.clone(), self.doc.clone());
+            .submit(self.recovery.clone(), self.project_document());
     }
     fn save_project(&mut self, save_as: bool) {
         self.finish_pending_pen();
@@ -148,7 +166,7 @@ impl Editor {
             self.path.clone()
         };
         if let Some(path) = target {
-            match write_document(&path, &self.doc) {
+            match write_document(&path, &self.project_document()) {
                 Ok(()) => {
                     self.status = "Proyecto guardado".into();
                     self.path = Some(path);
@@ -182,10 +200,13 @@ impl Editor {
                 });
             match result {
                 Ok(d) => {
+                    self.leave_symbol_context_for_document_change();
                     self.checkpoint();
                     self.canvas.clear_selection();
                     self.canvas.cancel_drafts();
                     self.draft = None;
+                    self.feature = features::FeatureState::default();
+                    self.animation = Default::default();
                     self.doc = d;
                     self.frame = 0;
                     self.layer = 0;
@@ -199,6 +220,7 @@ impl Editor {
                     };
                     self.playing = false;
                     self.recover();
+                    self.clear_guides();
                     self.status = "Proyecto abierto".into();
                 }
                 Err(e) => self.status = format!("No se pudo abrir: {e}"),
@@ -227,6 +249,13 @@ impl Editor {
         }
     }
 }
+fn fresh_document() -> Document {
+    let mut doc = Document::default();
+    let mut keys = vec![false; doc.layers[0].frames.len()];
+    keys[0] = true;
+    doc.layers[0].options.keys = keys.into();
+    doc
+}
 fn write_document(path: &std::path::Path, doc: &Document) -> Result<(), String> {
     let temporary = path.with_extension("libretoon.tmp");
     let file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
@@ -249,17 +278,24 @@ impl eframe::App for Editor {
         if let Some(error) = self.recovery_writer.take_error() {
             self.status = format!("No se pudo recuperar sesión: {error}");
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+        if !self.studio.preferences_open
+            && self.studio.export.is_none()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
+        {
             self.save_project(false);
         }
-        if !ctx.egui_wants_keyboard_input()
+        if !self.studio.preferences_open
+            && self.studio.export.is_none()
+            && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
         {
             if !self.canvas.undo_pen() {
                 self.history(false);
             }
         }
-        if !ctx.egui_wants_keyboard_input()
+        if !self.studio.preferences_open
+            && self.studio.export.is_none()
+            && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y))
         {
             self.history(true);
@@ -275,18 +311,20 @@ impl eframe::App for Editor {
             let elapsed = self.tick.elapsed().as_secs_f64();
             let steps = (elapsed * self.doc.fps as f64).floor() as usize;
             if steps > 0 {
-                self.frame = (self.frame + steps) % self.doc.layers[0].frames.len();
+                self.advance_animation(steps);
                 self.tick += Duration::from_secs_f64(steps as f64 / self.doc.fps as f64);
             }
             let period = Duration::from_secs_f64(1. / self.doc.fps as f64);
             ctx.request_repaint_after(period.saturating_sub(self.tick.elapsed()));
         }
+        crate::i18n::set_language(self.studio.prefs.spanish);
+        self.clipboard_shortcuts(&ctx);
         self.workspace(ui);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(29, 30, 34))
-                    .inner_margin(24.),
+                    .inner_margin(0.),
             )
             .show(ui, |ui| {
                 self.canvas_ui(ui);
@@ -295,9 +333,10 @@ impl eframe::App for Editor {
 }
 fn main() -> eframe::Result {
     eframe::run_native(
-        "LibreToon · Animación 2D",
+        "LibreToon",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_decorations(false)
                 .with_inner_size([1360., 860.])
                 .with_min_inner_size([1050., 700.])
                 .with_icon(design::window_icon()),
