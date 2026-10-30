@@ -4,6 +4,8 @@
 
 The project aims to bring together Adobe Animate's workflow, DragonBones-inspired rigging tools, and improved scene management, lighting, and camera controls.
 
+<img src="https://i.imgur.com/GVQsCoT.png" width="700" alt="LibreToon Editor">
+
 ### Planned Features
 
 - **Scene Manager:** Organize multiple scenes, each with its own timeline.
