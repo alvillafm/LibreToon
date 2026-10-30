@@ -1,0 +1,488 @@
+use crate::{
+    Editor,
+    canvas::{Canvas, Tool},
+    document::Mark,
+};
+use eframe::egui::{self, Color32, Pos2};
+
+impl Editor {
+    pub fn sync_selected_style(&mut self, ids: &[(usize, usize)]) {
+        if self.style_selection == ids && self.style_frame == self.frame {
+            return;
+        }
+        self.style_transaction = false;
+        self.style_selection = ids.to_vec();
+        self.style_frame = self.frame;
+        if let Some(&(l, m)) = ids.first() {
+            let mark = &self.doc.layers[l].frames[self.frame][m];
+            self.fill_enabled = mark.fill.is_some();
+            self.stroke_enabled = mark.stroke;
+            if let Some(c) = mark.fill {
+                self.fill_color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                self.active_fill = true;
+            }
+            if mark.stroke {
+                let c = mark.color;
+                self.color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                self.width = mark.width;
+                self.width_profile = mark.width_profile.clone();
+                self.width_preset = crate::width::Preset::Custom;
+                if mark.fill.is_none() {
+                    self.active_fill = false;
+                }
+            }
+        }
+    }
+    pub fn change_selected_style(&mut self, fill: bool, stroke: bool, width: bool, profile: bool) {
+        let ids = self.canvas.selected.clone();
+        if ids.is_empty() {
+            return;
+        }
+        if !self.style_transaction {
+            self.checkpoint();
+            self.style_transaction = true;
+        }
+        for &(l, m) in &ids {
+            let mark = &mut self.doc.layers[l].frames[self.frame][m];
+            if fill && mark.fill.is_some() {
+                mark.fill = Some(self.fill_color.to_array());
+            }
+            if stroke && mark.stroke {
+                mark.color = self.color.to_array();
+            }
+            if width && mark.stroke {
+                mark.width = self.width;
+            }
+            if profile && mark.stroke {
+                mark.width_profile = self.width_profile.clone();
+            }
+        }
+        self.canvas.selected = ids;
+        self.recover();
+    }
+    pub fn selection_properties_ui(&mut self, ui: &mut egui::Ui) {
+        ui.strong(format!("Selección · {}", self.canvas.selected.len()));
+        ui.add_space(12.);
+        let fill = self
+            .canvas
+            .selected
+            .iter()
+            .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].fill.is_some());
+        let stroke = self
+            .canvas
+            .selected
+            .iter()
+            .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].stroke);
+        if fill {
+            ui.horizontal(|ui| {
+                ui.label("Relleno");
+                if ui.color_edit_button_srgba(&mut self.fill_color).changed() {
+                    self.change_selected_style(true, false, false, false);
+                }
+            });
+        }
+        if stroke {
+            ui.horizontal(|ui| {
+                ui.label("Contorno");
+                if ui.color_edit_button_srgba(&mut self.color).changed() {
+                    self.change_selected_style(false, true, false, false);
+                }
+            });
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.width, 0.1..=100.)
+                        .text("Grosor")
+                        .suffix(" px"),
+                )
+                .changed()
+            {
+                self.change_selected_style(false, false, true, false);
+            }
+            self.width_profile_ui(ui);
+        }
+    }
+    pub fn cut_area_selection(&mut self, state: &mut Canvas, points: &[Pos2], add: bool) {
+        if points.len() < 3 {
+            return;
+        }
+        let cutter = crate::editing::area(points);
+        let mut selected = vec![];
+        let mut edits = vec![];
+        let mut changed = false;
+        for (l, layer) in self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.visible)
+        {
+            let mut marks = vec![];
+            let mut layer_changed = false;
+            for (m, mark) in layer.frames[self.frame].iter().enumerate() {
+                let (outside, inside) = crate::editing::split_area(mark, &cutter);
+                let previous = add && state.selected.contains(&(l, m));
+                if inside.is_empty() {
+                    if previous {
+                        selected.push((l, marks.len()));
+                    }
+                    marks.push(mark.clone());
+                } else if outside.is_empty() {
+                    selected.push((l, marks.len()));
+                    marks.push(mark.clone());
+                } else {
+                    layer_changed = true;
+                    changed = true;
+                    for part in outside {
+                        if previous {
+                            selected.push((l, marks.len()));
+                        }
+                        marks.push(part);
+                    }
+                    for part in inside {
+                        selected.push((l, marks.len()));
+                        marks.push(part);
+                    }
+                }
+            }
+            if layer_changed {
+                edits.push((l, marks));
+            }
+        }
+        if changed {
+            self.checkpoint();
+            for (l, marks) in edits {
+                self.doc.layers[l].frames[self.frame] = marks.into();
+            }
+            self.recover();
+        }
+        state.selected = selected;
+        state.pivot = None;
+    }
+    pub fn erase_segment(&mut self, a: Pos2, b: Pos2) -> bool {
+        let areas = crate::editing::eraser_area(a, b, self.width * 0.5);
+        let mut marks = self.doc.layers[self.layer].frames[self.frame].to_vec();
+        let mut changed = false;
+        for area in areas {
+            let mut next = vec![];
+            for mark in marks {
+                let (outside, inside) = crate::editing::split_area(&mark, &area);
+                if inside.is_empty() {
+                    next.push(mark);
+                } else {
+                    changed = true;
+                    next.extend(outside);
+                }
+            }
+            marks = next;
+        }
+        if changed {
+            self.doc.layers[self.layer].frames[self.frame] = marks.into();
+        }
+        changed
+    }
+    pub fn sample_at(&mut self, point: Pos2, tolerance: f32) {
+        for layer in self.doc.layers.iter().rev().filter(|l| l.visible) {
+            for mark in layer.frames[self.frame].iter().rev() {
+                let stroke = crate::canvas::stroke_hit(mark, point, tolerance);
+                if stroke {
+                    let c = mark.color;
+                    self.color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    self.stroke_enabled = true;
+                    self.active_fill = false;
+                    self.width = mark.width;
+                    self.width_profile = mark.width_profile.clone();
+                    self.width_preset = crate::width::Preset::Custom;
+                    return;
+                }
+                if crate::vector::contains_fill(mark, point) {
+                    let c = mark.fill.unwrap();
+                    self.fill_color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    self.fill_enabled = true;
+                    self.active_fill = true;
+                    return;
+                }
+            }
+        }
+    }
+    pub fn wand_select(&mut self, state: &mut Canvas, point: Pos2, add: bool) {
+        let found = self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, l)| l.visible)
+            .find_map(|(l, layer)| {
+                layer.frames[self.frame]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(m, mark)| {
+                        if crate::canvas::stroke_hit(mark, point, 3.) {
+                            Some((l, m, false))
+                        } else if crate::vector::contains_fill(mark, point) {
+                            Some((l, m, true))
+                        } else {
+                            None
+                        }
+                    })
+            });
+        if !add {
+            state.clear_selection();
+        }
+        let Some((l, m, target_fill)) = found else {
+            return;
+        };
+        let reference = &self.doc.layers[l].frames[self.frame][m];
+        let color = if target_fill {
+            reference.fill.unwrap()
+        } else {
+            reference.color
+        };
+        let mut candidates: Vec<_> = self.doc.layers[l].frames[self.frame]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mark)| {
+                let c = if target_fill {
+                    mark.fill
+                } else {
+                    mark.stroke.then_some(mark.color)
+                }?;
+                let diff = c
+                    .iter()
+                    .zip(color)
+                    .map(|(a, b)| (*a as f32 - b as f32).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+                    / 2.;
+                (diff <= self.wand_tolerance).then_some(index)
+            })
+            .collect();
+        candidates.sort_unstable_by(|a, b| b.cmp(a));
+        for m in candidates {
+            let id = self.separate_component(state, (l, m), !target_fill);
+            if !state.selected.contains(&id) {
+                state.selected.push(id);
+            }
+        }
+    }
+    pub fn split_fill_face(
+        &mut self,
+        state: &mut Canvas,
+        id: (usize, usize),
+        point: Pos2,
+    ) -> (usize, usize) {
+        use geo::{BooleanOps, Buffer, Contains};
+        let mark = &self.doc.layers[id.0].frames[self.frame][id.1];
+        let Some(color) = mark.fill else {
+            return id;
+        };
+        let bounds = crate::vector::control_bounds(mark);
+        let barriers: Vec<_> = self.doc.layers[id.0].frames[self.frame]
+            .iter()
+            .skip(id.1 + 1)
+            .filter(|m| m.stroke && bounds.intersects(crate::vector::control_bounds(m)))
+            .map(|m| {
+                let points = crate::vector::flatten(m, 0.025);
+                geo::LineString::from(
+                    points
+                        .iter()
+                        .map(|p| (p.x as f64, p.y as f64))
+                        .collect::<Vec<_>>(),
+                )
+                .buffer(0.002)
+            })
+            .collect();
+        if barriers.is_empty() {
+            return id;
+        }
+        let original = crate::vector::polygon(mark);
+        let ink = geo::algorithm::bool_ops::unary_union(&barriers);
+        let faces = original.difference(&ink);
+        if faces.0.len() < 2 {
+            return id;
+        }
+        let Some(face) = faces
+            .0
+            .into_iter()
+            .find(|face| face.contains(&geo::Point::new(point.x as f64, point.y as f64)))
+        else {
+            return id;
+        };
+        // Expand across the microscopic construction seam, then subtract from the
+        // original fill so no ink area is lost or left as an antialiasing crack.
+        let selected = face
+            .buffer(0.004)
+            .intersection(&geo::MultiPolygon(vec![original.clone()]));
+        let rest = geo::MultiPolygon(vec![original]).difference(&selected);
+        if rest.0.is_empty() {
+            return id;
+        }
+        let mut parts = crate::vector::polygons_to_marks(rest, color);
+        let chosen = parts.len();
+        parts.extend(crate::vector::polygons_to_marks(selected, color));
+        let count = parts.len();
+        self.checkpoint();
+        let marks = &mut self.doc.layers[id.0].frames[self.frame];
+        marks.remove(id.1);
+        for (i, m) in parts.into_iter().enumerate() {
+            marks.insert(id.1 + i, m);
+        }
+        for (l, m) in &mut state.selected {
+            if *l == id.0 && *m > id.1 {
+                *m += count - 1;
+            }
+        }
+        self.recover();
+        (id.0, id.1 + chosen)
+    }
+    pub fn activate_tool(&mut self, tool: Tool) {
+        if self.tool == tool {
+            return;
+        }
+        if matches!(
+            tool,
+            Tool::Brush
+                | Tool::VectorBrush
+                | Tool::Pen
+                | Tool::Rectangle
+                | Tool::Line
+                | Tool::Ellipse
+                | Tool::Polygon
+                | Tool::Eraser
+                | Tool::Bucket
+                | Tool::Eyedropper
+        ) {
+            self.canvas.clear_selection();
+            self.style_selection.clear();
+            self.style_transaction = false;
+            if tool == Tool::VectorBrush || tool == Tool::Line {
+                self.stroke_enabled = true;
+            }
+            if tool == Tool::Brush || tool == Tool::Bucket {
+                self.fill_enabled = true;
+            }
+        }
+        self.tool = tool;
+    }
+    pub fn split_clicked_crossing(
+        &mut self,
+        state: &mut Canvas,
+        id: (usize, usize),
+        point: Pos2,
+    ) -> (usize, usize) {
+        let marks = &self.doc.layers[id.0].frames[self.frame];
+        let mark = &marks[id.1];
+        if !mark.stroke {
+            return id;
+        }
+        let others: Vec<Mark> = marks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != id.1)
+            .map(|(_, m)| m.clone())
+            .collect();
+        let parts = crate::editing::crossing_parts(mark, &others);
+        if parts.len() < 2 {
+            return id;
+        }
+        let closest = parts
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                crate::canvas::axis_distance(a, point)
+                    .total_cmp(&crate::canvas::axis_distance(b, point))
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let count = parts.len();
+        self.checkpoint();
+        let frame = &mut self.doc.layers[id.0].frames[self.frame];
+        frame.remove(id.1);
+        for (i, part) in parts.into_iter().enumerate() {
+            frame.insert(id.1 + i, part);
+        }
+        for (l, m) in &mut state.selected {
+            if *l == id.0 && *m > id.1 {
+                *m += count - 1;
+            }
+        }
+        self.recover();
+        (id.0, id.1 + closest)
+    }
+    pub fn commit_paint(&mut self, layer: usize, frame: usize, marks: Vec<Mark>) {
+        let composed = crate::editing::compose(&self.doc.layers[layer].frames[frame], marks);
+        self.doc.layers[layer].frames[frame] = composed.into();
+    }
+    pub fn select_connected_object(&self, state: &mut Canvas, seed: (usize, usize), add: bool) {
+        use geo::{BooleanOps, Intersects};
+        let marks = &self.doc.layers[seed.0].frames[self.frame];
+        let ink = |mark: &Mark| {
+            let mut area = if mark.fill.is_some() {
+                geo::MultiPolygon(vec![crate::vector::polygon(mark)])
+            } else {
+                geo::MultiPolygon(vec![])
+            };
+            if mark.stroke {
+                area = area.union(&crate::width::outline(mark));
+            }
+            area
+        };
+        let mut visited = vec![false; marks.len()];
+        visited[seed.1] = true;
+        let mut stack = vec![seed.1];
+        let mut prepared = std::collections::HashMap::new();
+        while let Some(index) = stack.pop() {
+            let bounds =
+                crate::vector::control_bounds(&marks[index]).expand(marks[index].width * 2. + 0.1);
+            let region = prepared
+                .entry(index)
+                .or_insert_with(|| ink(&marks[index]))
+                .clone();
+            for j in 0..marks.len() {
+                if visited[j]
+                    || !bounds.intersects(
+                        crate::vector::control_bounds(&marks[j]).expand(marks[j].width * 2. + 0.1),
+                    )
+                {
+                    continue;
+                }
+                let candidate = prepared.entry(j).or_insert_with(|| ink(&marks[j]));
+                if region.intersects(candidate) {
+                    visited[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        if !add {
+            state.clear_selection();
+        }
+        for (index, yes) in visited.into_iter().enumerate() {
+            if yes && !state.selected.contains(&(seed.0, index)) {
+                state.selected.push((seed.0, index));
+            }
+        }
+    }
+    pub fn tool_options_ui(&mut self, ui: &mut egui::Ui) {
+        match self.tool {
+            Tool::Zoom => {
+                ui.radio_value(&mut self.zoom_out, false, "Acercar (+)");
+                ui.radio_value(&mut self.zoom_out, true, "Alejar (−)");
+            }
+            Tool::Polygon => {
+                ui.add(egui::Slider::new(&mut self.polygon_sides, 3..=32).text("Lados / puntas"));
+                ui.checkbox(&mut self.polygon_star, "Estrella");
+                if self.polygon_star {
+                    ui.add(
+                        egui::Slider::new(&mut self.star_ratio, 0.05..=0.95).text("Radio interior"),
+                    );
+                }
+            }
+            Tool::Wand => {
+                ui.add(egui::Slider::new(&mut self.wand_tolerance, 0. ..=255.).text("Tolerancia"));
+                ui.label("Selecciona los rellenos o contornos de color parecido en la capa.");
+            }
+            _ => {}
+        }
+    }
+}

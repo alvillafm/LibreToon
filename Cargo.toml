@@ -11,4 +11,6 @@ rfd = "0.17"
 xml-rs = "=0.8.29"
 flate2 = "1"
 crc32fast = "1"
+geo = { version = "=0.33.1", default-features = false }
+lyon_tessellation = "=1.0.22"
 

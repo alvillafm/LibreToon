@@ -1,0 +1,118 @@
+//! One background writer and one pending snapshot. Rapid edits replace the
+//! pending snapshot; shutdown flushes the last edit before joining the worker.
+use crate::{document::Document, write_document};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
+    thread::JoinHandle,
+    time::Duration,
+};
+
+#[derive(Default)]
+struct State {
+    pending: Option<(PathBuf, Document)>,
+    shutdown: bool,
+    error: Option<String>,
+}
+#[derive(Default)]
+pub struct RecoveryWriter {
+    shared: Arc<(Mutex<State>, Condvar)>,
+    worker: Option<JoinHandle<()>>,
+}
+impl RecoveryWriter {
+    pub fn submit(&mut self, path: PathBuf, document: Document) {
+        if self.worker.is_none() {
+            let shared = self.shared.clone();
+            self.worker = Some(std::thread::spawn(move || {
+                let (lock, wake) = &*shared;
+                loop {
+                    let mut state = lock.lock().unwrap();
+                    while state.pending.is_none() && !state.shutdown {
+                        state = wake.wait(state).unwrap();
+                    }
+                    if !state.shutdown {
+                        // A bounded delay groups edits without postponing recovery
+                        // indefinitely during continuous drawing.
+                        state = wake
+                            .wait_timeout_while(state, Duration::from_millis(250), |state| {
+                                !state.shutdown
+                            })
+                            .unwrap()
+                            .0;
+                    }
+                    let pending = state.pending.take();
+                    let shutdown = state.shutdown;
+                    drop(state);
+                    if let Some((path, doc)) = pending {
+                        let result = path
+                            .parent()
+                            .map_or(Ok(()), std::fs::create_dir_all)
+                            .map_err(|e| e.to_string())
+                            .and_then(|()| write_document(&path, &doc));
+                        if let Err(error) = result {
+                            lock.lock().unwrap().error = Some(error);
+                        }
+                    }
+                    if shutdown {
+                        break;
+                    }
+                }
+            }));
+        }
+        self.shared.0.lock().unwrap().pending = Some((path, document));
+        self.shared.1.notify_one();
+    }
+    pub fn take_error(&self) -> Option<String> {
+        self.shared.0.lock().unwrap().error.take()
+    }
+}
+impl Drop for RecoveryWriter {
+    fn drop(&mut self) {
+        self.shared.0.lock().unwrap().shutdown = true;
+        self.shared.1.notify_one();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closing_flushes_latest_snapshot_and_preserves_previous_state() {
+        let path = std::env::temp_dir().join(format!(
+            "libretoon-recovery-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"previous recovery").unwrap();
+        let mut doc = Document::default();
+        {
+            let mut writer = RecoveryWriter::default();
+            writer.submit(path.clone(), doc.clone());
+            for fps in 1..=60 {
+                doc.fps = fps;
+                writer.submit(path.clone(), doc.clone());
+            }
+        }
+        let restored: Document = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.fps, 60);
+        assert!(restored.validate().is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn write_failures_are_reported() {
+        let mut writer = RecoveryWriter::default();
+        // A child of a file cannot be created as a directory.
+        let parent =
+            std::env::temp_dir().join(format!("libretoon-file-{}.json", std::process::id()));
+        std::fs::write(&parent, b"test").unwrap();
+        writer.submit(parent.join("recovery.json"), Document::default());
+        writer.shared.0.lock().unwrap().shutdown = true;
+        writer.shared.1.notify_one();
+        writer.worker.take().unwrap().join().unwrap();
+        assert!(writer.take_error().is_some());
+        std::fs::remove_file(parent).unwrap();
+    }
+}

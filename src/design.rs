@@ -13,6 +13,11 @@ pub enum Icon {
     Undo,
     Redo,
     Brush,
+    VectorBrush,
+    Bucket,
+    Width,
+    Pen,
+    Node,
     Rectangle,
     Trash,
     Plus,
@@ -34,6 +39,17 @@ pub enum Icon {
     Transform,
     Rotate,
     Fit,
+    Lasso,
+    PolygonSelect,
+    Wand,
+    Object,
+    Eraser,
+    Eyedropper,
+    Line,
+    Ellipse,
+    Polygon,
+    Pan,
+    Zoom,
 }
 
 pub fn theme(ctx: &egui::Context) {
@@ -95,6 +111,115 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::Lasso => {
+            path(&[
+                (5., 15.),
+                (2., 10.),
+                (4., 4.),
+                (12., 2.),
+                (18., 6.),
+                (17., 13.),
+                (10., 16.),
+                (5., 15.),
+                (4., 19.),
+            ]);
+        }
+        Icon::PolygonSelect => {
+            path(&[(3., 16.), (5., 3.), (17., 6.), (13., 17.), (3., 16.)]);
+            rect(2., 15., 2., 2.);
+            rect(4., 2., 2., 2.);
+            rect(16., 5., 2., 2.);
+        }
+        Icon::Wand => {
+            line((3., 18.), (14., 7.));
+            line((10., 8.), (13., 11.));
+            line((15., 1.), (15., 4.));
+            line((18., 5.), (20., 5.));
+            line((9., 2.), (11., 4.));
+        }
+        Icon::Object => {
+            rect(3., 3., 14., 14.);
+            path(&[
+                (7., 6.),
+                (7., 14.),
+                (10., 12.),
+                (12., 16.),
+                (14., 15.),
+                (12., 11.),
+                (16., 11.),
+                (7., 6.),
+            ]);
+        }
+        Icon::Eraser => {
+            path(&[
+                (2., 12.),
+                (11., 3.),
+                (18., 10.),
+                (10., 18.),
+                (8., 18.),
+                (2., 12.),
+            ]);
+            line((6., 8.), (13., 15.));
+            line((10., 18.), (19., 18.));
+        }
+        Icon::Eyedropper => {
+            path(&[
+                (3., 17.),
+                (5., 12.),
+                (14., 3.),
+                (18., 7.),
+                (9., 16.),
+                (3., 17.),
+            ]);
+            line((11., 4.), (17., 10.));
+        }
+        Icon::Line => {
+            line((3., 17.), (17., 3.));
+        }
+        Icon::Ellipse => {
+            p.circle_stroke(pt(10., 10.), 7., s);
+        }
+        Icon::Polygon => {
+            path(&[
+                (10., 2.),
+                (18., 8.),
+                (15., 17.),
+                (5., 17.),
+                (2., 8.),
+                (10., 2.),
+            ]);
+        }
+        Icon::Pan => {
+            path(&[
+                (5., 11.),
+                (5., 6.),
+                (7., 6.),
+                (7., 2.),
+                (9., 2.),
+                (9., 7.),
+                (10., 7.),
+                (10., 2.),
+                (12., 2.),
+                (12., 7.),
+                (13., 7.),
+                (13., 4.),
+                (15., 4.),
+                (15., 9.),
+                (17., 7.),
+                (19., 9.),
+                (15., 17.),
+                (9., 19.),
+                (3., 13.),
+                (3., 10.),
+                (5., 11.),
+            ]);
+        }
+        Icon::Zoom => {
+            p.circle_stroke(pt(8., 8.), 5., s);
+            line((12., 12.), (18., 18.));
+            line((5., 8.), (11., 8.));
+            line((8., 5.), (8., 11.));
+        }
         Icon::New => {
             path(&[
                 (5., 2.),
@@ -151,6 +276,63 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
                 (9., 14.),
                 (7., 12.),
             ]);
+        }
+        Icon::VectorBrush => {
+            path(&[(10., 10.), (15., 3.), (18., 6.), (12., 13.)]);
+            path(&[(10., 10.), (7., 12.), (6., 16.), (10., 15.), (12., 13.)]);
+            p.add(egui::Shape::CubicBezier(
+                egui::epaint::CubicBezierShape::from_points_stroke(
+                    [pt(1., 18.), pt(10., 20.), pt(1., 8.), pt(7., 13.)],
+                    false,
+                    Color32::TRANSPARENT,
+                    s,
+                ),
+            ));
+            rect(0., 16., 3., 3.);
+            rect(5., 11., 3., 3.);
+        }
+        Icon::Bucket => {
+            path(&[(6., 3.), (15., 11.), (8., 18.), (1., 11.), (6., 3.)]);
+            line((2., 10.), (13., 10.));
+            path(&[(6., 3.), (10., 1.), (14., 5.)]);
+            p.circle_filled(pt(17., 17.), 2., c);
+            path(&[(16., 13.), (18., 16.)]);
+        }
+        Icon::Width => {
+            path(&[
+                (2., 10.),
+                (5., 7.),
+                (10., 4.),
+                (15., 7.),
+                (18., 10.),
+                (15., 13.),
+                (10., 16.),
+                (5., 13.),
+                (2., 10.),
+            ]);
+            line((1., 10.), (19., 10.));
+            line((10., 1.), (10., 19.));
+            path(&[(7., 3.), (10., 1.), (13., 3.)]);
+            path(&[(7., 17.), (10., 19.), (13., 17.)]);
+        }
+        Icon::Pen => {
+            path(&[
+                (10., 2.),
+                (17., 11.),
+                (12., 17.),
+                (8., 17.),
+                (3., 11.),
+                (10., 2.),
+            ]);
+            line((10., 2.), (10., 10.));
+            p.circle_stroke(pt(10., 11.), 2., s);
+            line((6., 19.), (14., 19.));
+        }
+        Icon::Node => {
+            line((3., 16.), (17., 4.));
+            p.circle_stroke(pt(3., 16.), 2., s);
+            p.circle_stroke(pt(17., 4.), 2., s);
+            p.rect_filled(Rect::from_center_size(pt(10., 10.), Vec2::splat(6.)), 0., c);
         }
         Icon::Rectangle => rect(3., 4., 14., 12.),
         Icon::Trash => {
@@ -337,81 +519,56 @@ pub fn button(
     }
     response.on_hover_text(tip)
 }
-pub fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(12.);
-    ui.label(egui::RichText::new(title).size(11.).color(MUTED).strong());
-    ui.add_space(4.);
-}
-
-/// Original mouse mascot: asymmetric ears, long muzzle and blue pencil whisker.
+/// The supplied app artwork, uploaded once and reused by the header.
 pub fn logo(p: &egui::Painter, r: Rect) {
-    let at = |x: f32, y: f32| r.min + Vec2::new(x / 64. * r.width(), y / 64. * r.height());
-    let scale = r.width() / 64.;
-    let cream = Color32::from_rgb(224, 228, 237);
-    let pink = Color32::from_rgb(205, 132, 155);
-    p.circle_filled(at(17., 16.), 12. * scale, cream);
-    p.circle_filled(at(43., 12.), 10. * scale, cream);
-    p.circle_filled(at(17., 16.), 7. * scale, pink);
-    p.circle_filled(at(43., 12.), 5.5 * scale, pink);
-    p.add(egui::Shape::convex_polygon(
-        vec![
-            at(13., 23.),
-            at(39., 21.),
-            at(53., 41.),
-            at(40., 55.),
-            at(18., 51.),
-            at(10., 37.),
-        ],
-        cream,
-        Stroke::NONE,
-    ));
-    p.circle_filled(at(28., 32.), 2.5 * scale, Color32::from_rgb(30, 32, 40));
-    p.circle_filled(at(42., 31.), 2.5 * scale, Color32::from_rgb(30, 32, 40));
-    p.circle_filled(at(45., 43.), 5. * scale, Color32::from_rgb(30, 32, 40));
-    p.line_segment(
-        [at(41., 48.), at(56., 54.)],
-        Stroke::new(3. * scale, ACCENT),
-    );
-    p.line_segment(
-        [at(40., 51.), at(53., 60.)],
-        Stroke::new(2. * scale, ACCENT),
+    let id = egui::Id::unique("libretoon-app-icon");
+    let cached = p
+        .ctx()
+        .data_mut(|data| data.get_temp::<egui::TextureHandle>(id));
+    // Loading a texture reads Context input; never do this while holding data_mut.
+    let texture = cached.unwrap_or_else(|| {
+        let icon = window_icon();
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        );
+        let texture = p
+            .ctx()
+            .load_texture("LibreToon", image, egui::TextureOptions::LINEAR);
+        p.ctx()
+            .data_mut(|data| data.insert_temp(id, texture.clone()));
+        texture
+    });
+    p.image(
+        texture.id(),
+        r,
+        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+        Color32::WHITE,
     );
 }
 pub fn window_icon() -> egui::IconData {
-    let mut rgba = vec![0; 64 * 64 * 4];
-    for y in 0..64 {
-        for x in 0..64 {
-            let ellipse = |cx: f32, cy: f32, rx: f32, ry: f32| {
-                ((x as f32 - cx) / rx).powi(2) + ((y as f32 - cy) / ry).powi(2) <= 1.
-            };
-            let mut c = [0, 0, 0, 0];
-            if ellipse(17., 16., 12., 12.)
-                || ellipse(43., 12., 10., 10.)
-                || ellipse(29., 35., 19., 21.)
-                || ellipse(41., 42., 13., 12.)
-            {
-                c = [224, 228, 237, 255];
-            }
-            if ellipse(17., 16., 7., 7.) || ellipse(43., 12., 5.5, 5.5) {
-                c = [205, 132, 155, 255];
-            }
-            if ellipse(28., 32., 2.5, 3.) || ellipse(42., 31., 2.5, 3.) || ellipse(45., 43., 5., 4.)
-            {
-                c = [30, 32, 40, 255];
-            }
-            if x >= 42
-                && x <= 59
-                && ((y as f32 - (48. + (x - 42) as f32 * 0.42)).abs() < 1.5
-                    || (y as f32 - (52. + (x - 42) as f32 * 0.7)).abs() < 1.)
-            {
-                c = [91, 158, 255, 255];
-            }
-            rgba[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4].copy_from_slice(&c);
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/libretoon-icon.png"))
+        .expect("the bundled LibreToon icon must be a valid PNG")
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn header_icon_loads_and_reuses_texture_across_frames() {
+        let ctx = eframe::egui::Context::default();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                eframe::egui::Frame::NONE.show(ui, |ui| {
+                    super::logo(
+                        ui.painter(),
+                        eframe::egui::Rect::from_min_size(
+                            eframe::egui::Pos2::ZERO,
+                            eframe::egui::vec2(32., 32.),
+                        ),
+                    );
+                });
+            });
+            output.textures_delta.clear();
         }
-    }
-    egui::IconData {
-        rgba,
-        width: 64,
-        height: 64,
     }
 }

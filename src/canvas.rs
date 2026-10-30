@@ -9,28 +9,76 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, 
 pub enum Tool {
     #[default]
     Brush,
+    VectorBrush,
+    Pen,
+    Node,
+    Bucket,
+    Width,
     Rectangle,
     Select,
     Transform,
     RotateView,
+    Lasso,
+    PolygonSelect,
+    Wand,
+    Object,
+    Eraser,
+    Eyedropper,
+    Line,
+    Ellipse,
+    Polygon,
+    Pan,
+    Zoom,
 }
 impl Tool {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Brush => "Pincel",
+            Self::Brush => "Pincel Estándar",
+            Self::VectorBrush => "Pincel Vectorial",
+            Self::Pen => "Pluma",
+            Self::Node => "Editar nodos",
+            Self::Bucket => "Bote de pintura",
+            Self::Width => "Anchura del contorno",
             Self::Rectangle => "Rectángulo",
             Self::Select => "Selección",
             Self::Transform => "Transformación libre",
             Self::RotateView => "Rotar vista",
+            Self::Lasso => "Lazo",
+            Self::PolygonSelect => "Selección poligonal",
+            Self::Wand => "Varita mágica",
+            Self::Object => "Selección de objeto",
+            Self::Eraser => "Goma de borrar",
+            Self::Eyedropper => "Cuentagotas",
+            Self::Line => "Línea",
+            Self::Ellipse => "Círculo / elipse",
+            Self::Polygon => "Polígono / estrella",
+            Self::Pan => "Mano",
+            Self::Zoom => "Lupa",
         }
     }
     pub fn icon(self) -> Icon {
         match self {
             Self::Brush => Icon::Brush,
+            Self::VectorBrush => Icon::VectorBrush,
+            Self::Pen => Icon::Pen,
+            Self::Node => Icon::Node,
+            Self::Bucket => Icon::Bucket,
+            Self::Width => Icon::Width,
             Self::Rectangle => Icon::Rectangle,
             Self::Select => Icon::Select,
             Self::Transform => Icon::Transform,
             Self::RotateView => Icon::Rotate,
+            Self::Lasso => Icon::Lasso,
+            Self::PolygonSelect => Icon::PolygonSelect,
+            Self::Wand => Icon::Wand,
+            Self::Object => Icon::Object,
+            Self::Eraser => Icon::Eraser,
+            Self::Eyedropper => Icon::Eyedropper,
+            Self::Line => Icon::Line,
+            Self::Ellipse => Icon::Ellipse,
+            Self::Polygon => Icon::Polygon,
+            Self::Pan => Icon::Pan,
+            Self::Zoom => Icon::Zoom,
         }
     }
 }
@@ -39,6 +87,7 @@ pub struct View {
     pub center: Pos2,
     pub scale: f32,
     pub angle: f32,
+    pub stage_center: Pos2,
 }
 pub fn rotate(v: Vec2, a: f32) -> Vec2 {
     let (s, c) = a.sin_cos();
@@ -46,10 +95,10 @@ pub fn rotate(v: Vec2, a: f32) -> Vec2 {
 }
 impl View {
     pub fn screen(self, p: Pos2) -> Pos2 {
-        self.center + rotate(p - Pos2::new(480., 270.), self.angle) * self.scale
+        self.center + rotate(p - self.stage_center, self.angle) * self.scale
     }
     pub fn world(self, p: Pos2) -> Pos2 {
-        Pos2::new(480., 270.) + rotate((p - self.center) / self.scale, -self.angle)
+        self.stage_center + rotate((p - self.center) / self.scale, -self.angle)
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -66,16 +115,42 @@ struct TransformDrag {
     bounds: SelectionBox,
     originals: Vec<((usize, usize), Mark)>,
     changed: bool,
+    last_input: Option<(Pos2, bool)>,
 }
 enum Drag {
+    Area {
+        points: Vec<Pos2>,
+        add: bool,
+    },
+    Erase {
+        last: Pos2,
+        changed: bool,
+    },
     Pan(Pos2),
-    ViewRotate { start: f32, angle: f32 },
-    Draw { raw: Vec<[f32; 2]> },
-    Marquee { start: Pos2, end: Pos2, add: bool },
+    ViewRotate {
+        start: f32,
+        angle: f32,
+    },
+    Draw {
+        smoother: crate::brush::StrokeSmoother,
+        tool: Tool,
+    },
+    Marquee {
+        start: Pos2,
+        end: Pos2,
+        add: bool,
+    },
     Transform(TransformDrag),
+    PenNode {
+        index: usize,
+        start: Pos2,
+    },
+    Node(NodeDrag),
+    Width(WidthDrag),
 }
 pub struct Canvas {
     pub zoom: f32,
+    pub actual_scale: f32,
     pub pan: Vec2,
     pub angle: f32,
     pub selected: Vec<(usize, usize)>,
@@ -83,11 +158,18 @@ pub struct Canvas {
     orientation: f32,
     frame: usize,
     drag: Option<Drag>,
+    pen: Option<PenDraft>,
+    node_selection: Option<(usize, usize, usize)>,
+    cache: crate::paint::RenderCache,
+    stage_size: Vec2,
+    polygon_selection: Vec<Pos2>,
+    polygon_add: bool,
 }
 impl Default for Canvas {
     fn default() -> Self {
         Self {
             zoom: 1.,
+            actual_scale: 1.,
             pan: Vec2::ZERO,
             angle: 0.,
             selected: vec![],
@@ -95,6 +177,12 @@ impl Default for Canvas {
             orientation: 0.,
             frame: 0,
             drag: None,
+            pen: None,
+            node_selection: None,
+            cache: Default::default(),
+            stage_size: Vec2::new(960., 540.),
+            polygon_selection: vec![],
+            polygon_add: false,
         }
     }
 }
@@ -102,12 +190,15 @@ impl Canvas {
     fn view(&self, area: Rect) -> View {
         View {
             center: area.center() + self.pan,
-            scale: fit_scale(area) * self.zoom,
+            scale: fit_scale(area, self.stage_size) * self.zoom,
             angle: self.angle,
+            stage_center: Pos2::ZERO + self.stage_size * 0.5,
         }
     }
     pub fn clear_selection(&mut self) {
+        self.polygon_selection.clear();
         self.selected.clear();
+        self.node_selection = None;
         self.pivot = None;
         self.orientation = 0.;
         self.drag = None;
@@ -141,19 +232,7 @@ impl Canvas {
     }
 }
 pub fn vertices(m: &Mark) -> Vec<Pos2> {
-    if m.rectangle && m.points.len() > 1 {
-        let a = m.points[0];
-        let b = *m.points.last().unwrap();
-        vec![
-            Pos2::new(a[0], a[1]),
-            Pos2::new(b[0], a[1]),
-            Pos2::new(b[0], b[1]),
-            Pos2::new(a[0], b[1]),
-            Pos2::new(a[0], a[1]),
-        ]
-    } else {
-        m.points.iter().map(|p| Pos2::new(p[0], p[1])).collect()
-    }
+    crate::vector::flatten(m, 0.1)
 }
 fn handles(r: Rect) -> [Pos2; 8] {
     [
@@ -176,26 +255,42 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     };
     p.distance(a + ab * t)
 }
+pub(crate) fn stroke_hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
+    if !m.stroke {
+        return false;
+    }
+    let points = vertices(m);
+    let (lengths, total) = crate::width::lengths(&points);
+    points.first().is_some_and(|q| {
+        q.distance(p) <= tolerance + m.width * crate::width::sample(&m.width_profile, 0.) * 0.5
+    }) || points.windows(2).enumerate().any(|(i, w)| {
+        let d = w[1] - w[0];
+        let t = ((p - w[0]).dot(d) / d.length_sq().max(1e-12)).clamp(0., 1.);
+        let fraction = (lengths[i] + d.length() * t) / total.max(1e-6);
+        p.distance(w[0] + d * t)
+            <= tolerance + m.width * crate::width::sample(&m.width_profile, fraction) * 0.5
+    }) || m.holes.iter().any(|r| {
+        r.windows(2).any(|w| {
+            distance_to_segment(p, crate::vector::pos(w[0]), crate::vector::pos(w[1]))
+                <= tolerance + m.width * 0.5
+        })
+    })
+}
+pub(crate) fn axis_distance(m: &Mark, p: Pos2) -> f32 {
+    vertices(m)
+        .windows(2)
+        .map(|w| distance_to_segment(p, w[0], w[1]))
+        .fold(f32::INFINITY, f32::min)
+}
 fn hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
-    let pts = vertices(m);
-    let t = tolerance + m.width / 2.;
-    pts.first().is_some_and(|q| q.distance(p) <= t)
-        || pts
-            .windows(2)
-            .any(|w| distance_to_segment(p, w[0], w[1]) <= t)
+    stroke_hit(m, p, tolerance) || crate::vector::contains_fill(m, p)
 }
 pub fn transformed(m: &Mark, pivot: Pos2, scale: Vec2, angle: f32, translation: Vec2) -> Mark {
-    let mut out = m.clone();
-    out.rectangle = false;
-    out.points = vertices(m)
-        .into_iter()
-        .map(|p| {
-            let v = p - pivot;
-            let p = pivot + rotate(Vec2::new(v.x * scale.x, v.y * scale.y), angle) + translation;
-            [p.x.clamp(-1e7, 1e7), p.y.clamp(-1e7, 1e7)]
-        })
-        .collect();
-    out
+    crate::vector::transform(m, |p| {
+        let v = p - pivot;
+        let p = pivot + rotate(Vec2::new(v.x * scale.x, v.y * scale.y), angle) + translation;
+        Pos2::new(p.x.clamp(-1e7, 1e7), p.y.clamp(-1e7, 1e7))
+    })
 }
 fn safe_ratio(a: f32, b: f32) -> f32 {
     if b.abs() < 0.0001 {
@@ -209,61 +304,33 @@ fn safe_ratio(a: f32, b: f32) -> f32 {
         }
     }
 }
-fn paint_mark(p: &egui::Painter, m: &Mark, v: View, ghost: bool, selected: bool) {
-    let points: Vec<Pos2> = vertices(m).into_iter().map(|p| v.screen(p)).collect();
-    let c = if ghost {
-        Color32::from_rgba_unmultiplied(110, 145, 220, 65)
-    } else {
-        Color32::from_rgba_unmultiplied(m.color[0], m.color[1], m.color[2], m.color[3])
-    };
-    let width = m.width * v.scale;
-    if points.len() == 1 {
-        p.circle_filled(points[0], width / 2., c);
-    } else if points.len() > 1 {
-        p.add(egui::Shape::line(points.clone(), Stroke::new(width, c)));
-        if points[0].distance(*points.last().unwrap()) > 0.1 {
-            p.circle_filled(points[0], width / 2., c);
-            p.circle_filled(*points.last().unwrap(), width / 2., c);
-        }
-    }
-    // A stippled selection on the actual ink, instead of displaying sampled nodes.
-    if selected {
-        let mut carry = 0.;
-        let spacing = 3.5;
-        let mut count = 0;
-        for pair in points.windows(2) {
-            let delta = pair[1] - pair[0];
-            let length = delta.length();
-            if length < 0.001 {
-                continue;
-            }
-            let direction = delta / length;
-            let normal = Vec2::new(-direction.y, direction.x);
-            let mut distance = carry;
-            while distance < length && count < 20000 {
-                let center = pair[0] + direction * distance;
-                let rows = (width / 3.).floor().clamp(0., 12.) as i32;
-                for row in -rows..=rows {
-                    let offset = row as f32 * 1.5;
-                    if offset.abs() < width / 2. - 0.4 || row == 0 {
-                        p.circle_filled(
-                            center + normal * offset,
-                            0.65,
-                            Color32::from_white_alpha(185),
-                        );
-                    }
-                }
-                distance += spacing;
-                count += 1;
-            }
-            carry = distance - length;
-        }
-    }
+fn paint_mark(
+    p: &egui::Painter,
+    m: &Mark,
+    v: View,
+    ghost: bool,
+    selected: bool,
+    cache: Option<&mut crate::paint::RenderCache>,
+) -> bool {
+    crate::paint::draw(p, m, v, ghost, selected, cache)
 }
 impl Editor {
     pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
         let mut state = std::mem::take(&mut self.canvas);
+        state.stage_size = Vec2::new(self.doc.width as f32, self.doc.height as f32);
+        if state.pen.as_ref().is_some_and(|p| {
+            self.tool != Tool::Pen || p.frame != self.frame || p.layer != self.layer || self.playing
+        }) {
+            let pen = state.pen.take().unwrap();
+            state.drag = None;
+            self.commit_pen(pen);
+        }
+        if self.tool != Tool::PolygonSelect {
+            state.polygon_selection.clear();
+        }
+        state.cache.begin_frame();
         if state.frame != self.frame || self.playing {
+            self.draft = None;
             state.clear_selection();
             state.frame = self.frame;
         }
@@ -275,7 +342,7 @@ impl Editor {
         });
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let area = response.rect;
-        let fit = fit_scale(area);
+        let fit = fit_scale(area, state.stage_size);
         let mut view = state.view(area);
         let ctx = ui.ctx().clone();
         let wants_keyboard = ctx.egui_wants_keyboard_input();
@@ -304,7 +371,46 @@ impl Editor {
                 i.key_pressed(egui::Key::Escape),
             )
         });
-        let over = pointer.is_some_and(|p| area.contains(p));
+        let over = response.contains_pointer();
+        let press_position = ctx.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            })
+        });
+        let alt = ctx.input(|i| i.modifiers.alt);
+        let command = ctx.input(|i| i.modifiers.command);
+        let mut handled_delete = false;
+        if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let Some(pen) = state.pen.take() {
+                state.drag = None;
+                self.commit_pen(pen);
+            }
+        }
+        if self.tool == Tool::Node
+            && !wants_keyboard
+            && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+        {
+            if let Some((l, m, index)) = state.node_selection.take() {
+                let mut mark = editable_nodes(&self.doc.layers[l].frames[self.frame][m]);
+                self.checkpoint();
+                handled_delete = true;
+                state.drag = None;
+                if mark.nodes.len() <= 2 {
+                    self.doc.layers[l].frames[self.frame].remove(m);
+                    state.clear_selection();
+                } else {
+                    mark.nodes.remove(index);
+                    self.doc.layers[l].frames[self.frame][m] = mark;
+                }
+                self.recover();
+            }
+        }
         if over && scroll != 0. && state.drag.is_none() {
             let p = pointer.unwrap();
             let before = view.world(p);
@@ -314,7 +420,14 @@ impl Editor {
             view.center = area.center() + state.pan;
         }
         if escape {
-            if let Some(Drag::Transform(d)) = state.drag.take() {
+            let canceled = state.drag.take();
+            if let Some(Drag::Width(d)) = &canceled {
+                self.doc.layers[d.id.0].frames[self.frame][d.id.1] = d.original.clone();
+            }
+            if let Some(Drag::Node(d)) = &canceled {
+                self.doc.layers[d.id.0].frames[self.frame][d.id.1] = d.original.clone();
+            }
+            if let Some(Drag::Transform(d)) = canceled {
                 for ((l, m), original) in d.originals {
                     self.doc.layers[l].frames[self.frame][m] = original;
                 }
@@ -324,10 +437,11 @@ impl Editor {
                 state.clear_selection();
             }
             self.draft = None;
+            state.pen = None;
         }
         if !ctx.egui_wants_keyboard_input() && state.drag.is_none() {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
-                && matches!(self.tool, Tool::Select | Tool::Transform)
+                && matches!(self.tool, Tool::Select | Tool::Transform | Tool::Object)
             {
                 state.selected.clear();
                 for (l, layer) in self
@@ -343,7 +457,10 @@ impl Editor {
                 }
                 state.pivot = state.bounds(self).map(|b| b.center());
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !state.selected.is_empty() {
+            if !handled_delete
+                && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                && !state.selected.is_empty()
+            {
                 self.checkpoint();
                 let mut ids = state.selected.clone();
                 ids.sort_unstable();
@@ -375,35 +492,138 @@ impl Editor {
                 self.recover();
             }
         }
-        if over && state.drag.is_none() && (pressed || middle_pressed) {
-            let screen = pointer.unwrap();
+        if (press_position
+            .or(pointer)
+            .is_some_and(|p| area.contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())))
+            && state.drag.is_none()
+            && (pressed || middle_pressed)
+        {
+            let screen = press_position.or(pointer).unwrap();
             let world = view.world(screen);
-            if middle_pressed || (pressed && space) {
+            if middle_pressed || (pressed && (space || self.tool == Tool::Pan)) {
                 state.drag = Some(Drag::Pan(screen));
+            } else if self.tool == Tool::Zoom {
+                let old = view.world(screen);
+                state.zoom =
+                    (state.zoom * if self.zoom_out ^ alt { 0.8 } else { 1.25 }).clamp(0.05, 32.);
+                view = state.view(area);
+                state.pan += screen - view.screen(old);
+                view = state.view(area);
+            } else if !self.playing && self.tool == Tool::Eyedropper {
+                self.sample_at(world, 3. / view.scale);
+            } else if !self.playing && self.tool == Tool::Wand {
+                self.wand_select(&mut state, world, shift);
+            } else if !self.playing && self.tool == Tool::Lasso {
+                state.drag = Some(Drag::Area {
+                    points: vec![world],
+                    add: shift,
+                });
+            } else if !self.playing && self.tool == Tool::PolygonSelect {
+                if state.polygon_selection.is_empty() {
+                    state.polygon_add = shift;
+                }
+                if state.polygon_selection.len() >= 3
+                    && view.screen(state.polygon_selection[0]).distance(screen) < 8.
+                {
+                    let points = std::mem::take(&mut state.polygon_selection);
+                    let add = state.polygon_add;
+                    self.cut_area_selection(&mut state, &points, add);
+                } else {
+                    state.polygon_selection.push(world);
+                }
+            } else if !self.playing
+                && self.tool == Tool::Eraser
+                && self.doc.layers[self.layer].visible
+            {
+                state.clear_selection();
+                state.drag = Some(Drag::Erase {
+                    last: world,
+                    changed: false,
+                });
+            } else if !self.playing
+                && self.tool == Tool::Select
+                && selected_node_hit(self, &state, world, view)
+            {
+                self.start_node_drag(&mut state, world, view);
             } else if self.tool == Tool::RotateView {
                 let delta = screen - view.center;
                 state.drag = Some(Drag::ViewRotate {
                     start: delta.y.atan2(delta.x),
                     angle: state.angle,
                 });
+            } else if !self.playing && self.tool == Tool::Pen && self.doc.layers[self.layer].visible
+            {
+                self.begin_pen(&mut state, world, view);
             } else if !self.playing
-                && matches!(self.tool, Tool::Brush | Tool::Rectangle)
+                && self.tool == Tool::Bucket
                 && self.doc.layers[self.layer].visible
-                && Rect::from_min_max(Pos2::ZERO, Pos2::new(960., 540.)).contains(world)
+            {
+                self.bucket_at(&mut state, world);
+            } else if !self.playing && self.tool == Tool::Width {
+                self.start_width_drag(&mut state, world, view);
+            } else if !self.playing && self.tool == Tool::Node {
+                self.start_node_drag(&mut state, world, view);
+            } else if !self.playing
+                && matches!(
+                    self.tool,
+                    Tool::Brush
+                        | Tool::VectorBrush
+                        | Tool::Rectangle
+                        | Tool::Line
+                        | Tool::Ellipse
+                        | Tool::Polygon
+                )
+                && self.doc.layers[self.layer].visible
+                && match self.tool {
+                    Tool::Brush => self.fill_enabled,
+                    Tool::VectorBrush | Tool::Line => self.stroke_enabled,
+                    _ => self.fill_enabled || self.stroke_enabled,
+                }
             {
                 self.draft = Some(Mark {
-                    points: vec![[world.x, world.y]],
+                    points: vec![[world.x, world.y]].into(),
                     width: self.width,
-                    color: self.color.to_array(),
+                    width_profile: if matches!(
+                        self.tool,
+                        Tool::VectorBrush | Tool::Line | Tool::Ellipse | Tool::Polygon
+                    ) {
+                        self.width_profile.clone()
+                    } else {
+                        Default::default()
+                    },
+                    color: if self.tool == Tool::Brush {
+                        self.fill_color.to_array()
+                    } else {
+                        self.color.to_array()
+                    },
                     rectangle: self.tool == Tool::Rectangle,
+                    closed: self.tool == Tool::Rectangle,
+                    stroke: if matches!(self.tool, Tool::Rectangle | Tool::Ellipse | Tool::Polygon)
+                    {
+                        self.stroke_enabled
+                    } else {
+                        true
+                    },
+                    fill: if matches!(self.tool, Tool::Rectangle | Tool::Ellipse | Tool::Polygon)
+                        && self.fill_enabled
+                    {
+                        Some(self.fill_color.to_array())
+                    } else {
+                        None
+                    },
+                    ..Mark::default()
                 });
                 state.clear_selection();
                 state.drag = Some(Drag::Draw {
-                    raw: vec![[world.x, world.y]],
+                    smoother: crate::brush::StrokeSmoother::new([world.x, world.y], self.smoothing),
+                    tool: self.tool,
                 });
-            } else if !self.playing && matches!(self.tool, Tool::Select | Tool::Transform) {
+            } else if !self.playing
+                && matches!(self.tool, Tool::Select | Tool::Transform | Tool::Object)
+            {
+                let force_marquee = command && self.tool == Tool::Select;
                 let mut op = None;
-                if let Some(bounds) = state.bounds(self) {
+                if let Some(bounds) = state.bounds(self).filter(|_| !force_marquee) {
                     let pivot = state.pivot.unwrap_or(bounds.center());
                     state.pivot = Some(pivot);
                     if self.tool == Tool::Transform {
@@ -424,7 +644,18 @@ impl Editor {
                             }
                         }
                     }
-                    if op.is_none() && !shift && bounds.contains(world) {
+                    if op.is_none()
+                        && !shift
+                        && bounds.contains(world)
+                        && (self.tool == Tool::Transform
+                            || state.selected.iter().any(|&(l, m)| {
+                                hit(
+                                    &self.doc.layers[l].frames[self.frame][m],
+                                    world,
+                                    4. / view.scale,
+                                )
+                            }))
+                    {
                         op = Some(Operation::Move);
                     }
                 }
@@ -439,13 +670,29 @@ impl Editor {
                         .filter(|(_, l)| l.visible)
                     {
                         for (m, mark) in layer.frames[self.frame].iter().enumerate().rev() {
-                            if hit(mark, world, 6. / view.scale) {
+                            if !force_marquee && hit(mark, world, 6. / view.scale) {
                                 found = Some((l, m));
                                 break 'layers;
                             }
                         }
                     }
-                    if let Some(id) = found {
+                    if let Some(mut id) = found {
+                        if self.tool == Tool::Object {
+                            self.select_connected_object(&mut state, id, shift);
+                        }
+                        if self.tool == Tool::Select && !state.selected.contains(&id) {
+                            let wants_stroke = stroke_hit(
+                                &self.doc.layers[id.0].frames[self.frame][id.1],
+                                world,
+                                4. / view.scale,
+                            );
+                            id = self.separate_component(&mut state, id, wants_stroke);
+                            if wants_stroke {
+                                id = self.split_clicked_crossing(&mut state, id, world);
+                            } else {
+                                id = self.split_fill_face(&mut state, id, world);
+                            }
+                        }
                         if shift && state.selected.contains(&id) {
                             state.selected.retain(|x| *x != id);
                             state.pivot = state.bounds(self).map(|b| b.center());
@@ -485,6 +732,7 @@ impl Editor {
                         bounds,
                         originals,
                         changed: false,
+                        last_input: None,
                     }));
                 }
             }
@@ -492,11 +740,79 @@ impl Editor {
         if let Some(screen) = pointer {
             let world = view.world(screen);
             match state.drag.as_mut() {
+                Some(Drag::Erase { last, changed }) => {
+                    let samples = ctx.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| match e {
+                                egui::Event::PointerMoved(p) => Some(view.world(*p)),
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: PointerButton::Primary,
+                                    pressed: false,
+                                    ..
+                                } => Some(view.world(*pos)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    for point in samples.into_iter().chain(std::iter::once(world)) {
+                        let before = (!*changed).then(|| self.doc.clone());
+                        let did_change = self.erase_segment(*last, point);
+                        if did_change && !*changed {
+                            self.undo.push(before.unwrap());
+                            if self.undo.len() > 60 {
+                                self.undo.remove(0);
+                            }
+                            self.redo.clear();
+                        }
+                        *changed |= did_change;
+                        *last = point;
+                    }
+                    if released || !primary_down {
+                        if *changed {
+                            self.recover();
+                        }
+                        state.drag = None;
+                    }
+                }
+                Some(Drag::Area { points, add }) => {
+                    let samples = ctx.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| {
+                                if let egui::Event::PointerMoved(p) = e {
+                                    Some(view.world(*p))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    for p in samples {
+                        if points
+                            .last()
+                            .is_none_or(|q| q.distance(p) * view.scale > 2.)
+                        {
+                            points.push(p);
+                        }
+                    }
+                    if released || !primary_down {
+                        points.push(world);
+                        let points = points.clone();
+                        let add = *add;
+                        self.cut_area_selection(&mut state, &points, add);
+                        state.drag = None;
+                    }
+                }
                 Some(Drag::Pan(last)) => {
-                    if primary_down || middle_down {
+                    if primary_down || middle_down || released {
                         state.pan += screen - *last;
                         *last = screen;
                         view.center = area.center() + state.pan;
+                        if released {
+                            state.drag = None;
+                        }
                     } else {
                         state.drag = None;
                     }
@@ -514,59 +830,256 @@ impl Editor {
                         state.drag = None;
                     }
                 }
-                Some(Drag::Draw { raw }) => {
+                Some(Drag::PenNode { index, start }) => {
+                    if let Some(pen) = &mut state.pen {
+                        if primary_down
+                            && (!pen.closing || world.distance(*start) > 1. / view.scale)
+                        {
+                            let node = &mut pen.mark.nodes[*index];
+                            let anchor = crate::vector::pos(node.position);
+                            let mut delta = world - anchor;
+                            if shift {
+                                let angle = (delta.y.atan2(delta.x) / (std::f32::consts::PI / 4.))
+                                    .round()
+                                    * (std::f32::consts::PI / 4.);
+                                delta = Vec2::angled(angle) * delta.length();
+                            }
+                            node.out_handle = crate::vector::xy(anchor + delta);
+                            node.in_handle = if alt {
+                                node.position
+                            } else {
+                                crate::vector::xy(anchor - delta)
+                            };
+                        }
+                    }
+                    if released || !primary_down {
+                        state.drag = None;
+                        if state.pen.as_ref().is_some_and(|p| p.closing) {
+                            let pen = state.pen.take().unwrap();
+                            self.commit_pen(pen);
+                        }
+                    }
+                }
+                Some(Drag::Width(d)) => {
+                    if d.changed || world.distance(d.start) > 1.5 / view.scale {
+                        if !d.changed {
+                            self.checkpoint();
+                            d.changed = true;
+                        }
+                        let mut mark = d.original.clone();
+                        let half = (world - d.anchor).dot(d.normal).abs();
+                        self.profile_point = Some(crate::width::edit_stop(
+                            &mut mark.width_profile,
+                            d.t,
+                            (half * 2. / mark.width).clamp(0., 4.),
+                        ));
+                        self.width_profile = mark.width_profile.clone();
+                        self.width_preset = crate::width::Preset::Custom;
+                        self.doc.layers[d.id.0].frames[self.frame][d.id.1] = mark;
+                    }
+                    if released || !primary_down {
+                        if d.changed {
+                            self.recover();
+                        }
+                        state.drag = None;
+                    }
+                }
+                Some(Drag::Node(d)) => {
+                    if d.changed || world.distance(d.start) > 0.001 {
+                        if !d.changed {
+                            self.checkpoint();
+                            d.changed = true;
+                        }
+                        let mut mark = editable_nodes(&d.original);
+                        let node = &mut mark.nodes[d.index];
+                        let delta = world - d.start;
+                        let anchor = crate::vector::pos(node.position);
+                        if d.handle == 0 {
+                            node.position = crate::vector::xy(anchor + delta);
+                            node.in_handle =
+                                crate::vector::xy(crate::vector::pos(node.in_handle) + delta);
+                            node.out_handle =
+                                crate::vector::xy(crate::vector::pos(node.out_handle) + delta);
+                        } else {
+                            let value = crate::vector::pos(if d.handle == 1 {
+                                node.in_handle
+                            } else {
+                                node.out_handle
+                            }) + delta;
+                            if d.handle == 1 {
+                                node.in_handle = crate::vector::xy(value);
+                                if !alt {
+                                    node.out_handle = crate::vector::xy(anchor - (value - anchor));
+                                }
+                            } else {
+                                node.out_handle = crate::vector::xy(value);
+                                if !alt {
+                                    node.in_handle = crate::vector::xy(anchor - (value - anchor));
+                                }
+                            }
+                        }
+                        self.doc.layers[d.id.0].frames[self.frame][d.id.1] = mark;
+                    }
+                    if released || !primary_down {
+                        if d.changed {
+                            self.recover();
+                        }
+                        state.drag = None;
+                    }
+                }
+                Some(Drag::Draw { smoother, tool }) => {
                     if let Some(m) = &mut self.draft {
-                        let p = [world.x.clamp(0., 960.), world.y.clamp(0., 540.)];
-                        if m.rectangle {
+                        if matches!(*tool, Tool::Line | Tool::Ellipse | Tool::Polygon) {
+                            let a = smoother.last();
+                            let mut b = world;
+                            if shift {
+                                let delta = b - a;
+                                if *tool == Tool::Line {
+                                    let angle = (delta.angle() / std::f32::consts::FRAC_PI_4)
+                                        .round()
+                                        * std::f32::consts::FRAC_PI_4;
+                                    b = a + Vec2::angled(angle) * delta.length();
+                                } else {
+                                    let size = delta.x.abs().max(delta.y.abs());
+                                    b = a + Vec2::new(
+                                        delta.x.signum() * size,
+                                        delta.y.signum() * size,
+                                    );
+                                }
+                            }
+                            *m = crate::editing::shape(
+                                *tool,
+                                a,
+                                b,
+                                self.polygon_sides,
+                                self.polygon_star,
+                                self.star_ratio,
+                                m,
+                            );
+                        } else if m.rectangle {
+                            let p = crate::vector::xy(world);
                             if m.points.len() == 1 {
                                 m.points.push(p);
                             } else {
                                 m.points[1] = p;
                             }
-                        } else if raw.last().is_none_or(|last| {
-                            (Pos2::new(last[0], last[1]) - Pos2::new(p[0], p[1])).length() > 0.4
-                        }) {
-                            raw.push(p);
-                            m.points = crate::brush::smooth(raw, self.smoothing);
+                        } else {
+                            let samples = ctx.input(|i| {
+                                let first = if pressed {
+                                    i.events
+                                        .iter()
+                                        .rposition(|e| {
+                                            matches!(
+                                                e,
+                                                egui::Event::PointerButton {
+                                                    button: PointerButton::Primary,
+                                                    pressed: true,
+                                                    ..
+                                                }
+                                            )
+                                        })
+                                        .map_or(0, |n| n + 1)
+                                } else {
+                                    0
+                                };
+                                i.events[first..]
+                                    .iter()
+                                    .filter_map(|e| match e {
+                                        egui::Event::PointerMoved(p) => Some(*p),
+                                        egui::Event::PointerButton {
+                                            pos,
+                                            button: PointerButton::Primary,
+                                            pressed: false,
+                                            ..
+                                        } => Some(*pos),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                            for screen in samples {
+                                let p = crate::vector::xy(view.world(screen));
+                                if smoother.last().distance(crate::vector::pos(p)) > 0.08 {
+                                    smoother.push(p, &mut m.points);
+                                }
+                            }
                         }
                     }
                     if released || !primary_down {
-                        if let Some(m) = self.draft.take() {
-                            self.checkpoint();
-                            self.doc.layers[self.layer].frames[self.frame].push(m);
-                            self.recover();
+                        if let Some(mut m) = self.draft.take() {
+                            let mut parts = vec![];
+                            if matches!(
+                                *tool,
+                                Tool::Rectangle | Tool::Line | Tool::Ellipse | Tool::Polygon
+                            ) {
+                                parts.push(m);
+                            } else {
+                                let curves =
+                                    crate::vector::fit(&m.points, 0.2 + self.smoothing * 3.8);
+                                if !curves.is_empty() {
+                                    m = crate::vector::from_cubics(&curves, &m);
+                                }
+                                if *tool == Tool::Brush {
+                                    parts = crate::vector::brush_fill(&m, m.color);
+                                } else {
+                                    parts.push(m);
+                                }
+                            }
+                            parts.retain(|m| {
+                                !matches!(
+                                    *tool,
+                                    Tool::Rectangle | Tool::Line | Tool::Ellipse | Tool::Polygon
+                                ) || crate::vector::control_bounds(m).size().length() > 0.01
+                            });
+                            if !parts.is_empty() {
+                                self.checkpoint();
+                                self.commit_paint(self.layer, self.frame, parts);
+                                self.recover();
+                            }
                         }
                         state.drag = None;
+                    } else {
+                        ctx.request_repaint();
                     }
                 }
                 Some(Drag::Marquee { start, end, add }) => {
                     *end = world;
                     if released || !primary_down {
                         let rect = Rect::from_two_pos(*start, *end);
-                        if !*add {
-                            state.selected.clear();
-                        }
-                        for (l, layer) in self
-                            .doc
-                            .layers
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, l)| l.visible)
-                        {
-                            for (m, mark) in layer.frames[self.frame].iter().enumerate() {
-                                if vertices(mark).iter().all(|p| rect.contains(*p))
-                                    && !state.selected.contains(&(l, m))
-                                {
-                                    state.selected.push((l, m));
-                                }
+                        let additive = *add;
+                        if self.tool == Tool::Object {
+                            if !additive {
+                                state.clear_selection();
                             }
+                            let seeds: Vec<_> = self
+                                .doc
+                                .layers
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, l)| l.visible)
+                                .flat_map(|(l, layer)| {
+                                    layer.frames[self.frame].iter().enumerate().filter_map(
+                                        move |(m, mark)| {
+                                            crate::vector::control_bounds(mark)
+                                                .intersects(rect)
+                                                .then_some((l, m))
+                                        },
+                                    )
+                                })
+                                .collect();
+                            for seed in seeds {
+                                self.select_connected_object(&mut state, seed, true);
+                            }
+                        } else {
+                            self.cut_selection(&mut state, rect, additive);
                         }
-                        state.pivot = state.bounds(self).map(|b| b.center());
                         state.drag = None;
                     }
                 }
                 Some(Drag::Transform(d)) => {
-                    if d.changed || world.distance(d.start) > 0.01 {
+                    if d.last_input != Some((world, shift))
+                        && (d.changed || world.distance(d.start) > 0.01)
+                    {
+                        d.last_input = Some((world, shift));
                         if !d.changed && !matches!(d.operation, Operation::Pivot) {
                             self.checkpoint();
                         }
@@ -641,22 +1154,50 @@ impl Editor {
                 None => {}
             }
         }
+        if self.tool == Tool::PolygonSelect
+            && (response.double_clicked()
+                || (!wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Enter))))
+        {
+            let points = std::mem::take(&mut state.polygon_selection);
+            let add = state.polygon_add;
+            self.cut_area_selection(&mut state, &points, add);
+        }
+        if escape {
+            state.polygon_selection.clear();
+        }
+        if self.tool == Tool::Pen && response.double_clicked() {
+            if let Some(mut pen) = state.pen.take() {
+                let n = pen.mark.nodes.len();
+                if n > 1
+                    && view
+                        .screen(crate::vector::pos(pen.mark.nodes[n - 1].position))
+                        .distance(view.screen(crate::vector::pos(pen.mark.nodes[n - 2].position)))
+                        < 4.
+                {
+                    pen.mark.nodes.pop();
+                }
+                state.drag = None;
+                self.commit_pen(pen);
+            }
+        }
         if over {
             ctx.set_cursor_icon(if matches!(state.drag, Some(Drag::Pan(_))) {
                 CursorIcon::Grabbing
-            } else if space {
+            } else if space || self.tool == Tool::Pan {
                 CursorIcon::Grab
-            } else if matches!(self.tool, Tool::Select | Tool::Transform) {
+            } else if matches!(self.tool, Tool::Select | Tool::Transform | Tool::Object) {
                 CursorIcon::Default
+            } else if matches!(self.tool, Tool::Brush | Tool::VectorBrush | Tool::Eraser) {
+                CursorIcon::None
             } else {
-                CursorIcon::Crosshair
+                CursorIcon::Default
             });
         }
         let corners = [
             Pos2::ZERO,
-            Pos2::new(960., 0.),
-            Pos2::new(960., 540.),
-            Pos2::new(0., 540.),
+            Pos2::new(state.stage_size.x, 0.),
+            Pos2::new(state.stage_size.x, state.stage_size.y),
+            Pos2::new(0., state.stage_size.y),
         ];
         let screen: Vec<Pos2> = corners.into_iter().map(|p| view.screen(p)).collect();
         painter.add(egui::Shape::convex_polygon(
@@ -668,7 +1209,7 @@ impl Editor {
         for layer in self.doc.layers.iter().filter(|l| l.visible) {
             if self.onion && !self.playing && self.frame > 0 {
                 for m in &layer.frames[self.frame - 1] {
-                    paint_mark(&painter, m, view, true, false);
+                    paint_mark(&painter, m, view, true, false, Some(&mut state.cache));
                 }
             }
         }
@@ -686,14 +1227,69 @@ impl Editor {
                     view,
                     false,
                     state.selected.contains(&(l, m)),
+                    Some(&mut state.cache),
                 );
             }
         }
         if let Some(mark) = &self.draft {
-            paint_mark(&painter, mark, view, false, false);
+            paint_mark(&painter, mark, view, false, false, None);
+        }
+        if self.tool == Tool::Width {
+            for &(l, m) in &state.selected {
+                paint_width_handles(&painter, &self.doc.layers[l].frames[self.frame][m], view);
+            }
+        }
+        if matches!(self.tool, Tool::Node | Tool::Select) {
+            for &(l, m) in &state.selected {
+                let mark = &self.doc.layers[l].frames[self.frame][m];
+                if self.tool == Tool::Select && (!mark.stroke || mark.nodes.is_empty()) {
+                    continue;
+                }
+                paint_nodes(
+                    &painter,
+                    &self.doc.layers[l].frames[self.frame][m],
+                    view,
+                    state
+                        .node_selection
+                        .filter(|(a, b, _)| *a == l && *b == m)
+                        .map(|(_, _, n)| n),
+                );
+            }
+        }
+        if let Some(pen) = &state.pen {
+            let mut preview = pen.mark.clone();
+            if !preview.closed {
+                preview.fill = None;
+            }
+            if !preview.stroke {
+                preview.stroke = true;
+                preview.color = ACCENT.to_array();
+            }
+            paint_mark(&painter, &preview, view, false, false, None);
+            paint_nodes(&painter, &pen.mark, view, None);
+            if state.drag.is_none() && over {
+                if let (Some(last), Some(pointer)) = (pen.mark.nodes.last(), pointer) {
+                    let end = view.world(pointer);
+                    let curve = crate::vector::Cubic([
+                        crate::vector::pos(last.position),
+                        crate::vector::pos(last.out_handle),
+                        end,
+                        end,
+                    ]);
+                    let line = crate::vector::from_cubics(
+                        &[curve],
+                        &Mark {
+                            color: ACCENT.to_array(),
+                            width: 1. / view.scale,
+                            ..Mark::default()
+                        },
+                    );
+                    paint_mark(&painter, &line, view, false, false, None);
+                }
+            }
         }
         if let Some(bounds) = state.bounds(self) {
-            if matches!(self.tool, Tool::Select | Tool::Transform) {
+            if self.tool == Tool::Transform {
                 let mut points: Vec<Pos2> = [
                     bounds.left_top(),
                     bounds.right_top(),
@@ -758,6 +1354,36 @@ impl Editor {
                 Stroke::new(1., ACCENT),
             ));
         }
+        state.actual_scale = view.scale;
+        if let Some(Drag::Area { points, .. }) = &state.drag {
+            let mut points: Vec<_> = points.iter().map(|p| view.screen(*p)).collect();
+            if let Some(first) = points.first().copied() {
+                points.push(first);
+            }
+            painter.add(egui::Shape::line(points, Stroke::new(1., ACCENT)));
+        }
+        if !state.polygon_selection.is_empty() {
+            let mut points: Vec<_> = state
+                .polygon_selection
+                .iter()
+                .map(|p| view.screen(*p))
+                .collect();
+            if let Some(p) = pointer {
+                points.push(p);
+            }
+            if let Some(first) = points.first().copied() {
+                points.push(first);
+            }
+            painter.add(egui::Shape::line(points, Stroke::new(1., ACCENT)));
+        }
+        if over && !space && matches!(self.tool, Tool::Brush | Tool::VectorBrush | Tool::Eraser) {
+            if let Some(pointer) = pointer {
+                let radius = (self.width * view.scale * 0.5).max(1.);
+                painter.circle_stroke(pointer, radius, Stroke::new(3., Color32::BLACK));
+                painter.circle_stroke(pointer, radius, Stroke::new(1., Color32::WHITE));
+            }
+        }
+        self.sync_selected_style(&state.selected);
         self.canvas = state;
     }
 }
@@ -766,10 +1392,11 @@ mod tests {
     use super::*;
     fn mark() -> Mark {
         Mark {
-            points: vec![[10., 20.], [50., 60.]],
+            points: vec![[10., 20.], [50., 60.]].into(),
             color: [0, 0, 0, 255],
             width: 4.,
             rectangle: false,
+            ..Mark::default()
         }
     }
     #[test]
@@ -778,6 +1405,7 @@ mod tests {
             center: Pos2::new(143., -22.),
             scale: 2.7,
             angle: 1.3,
+            stage_center: Pos2::new(480., 270.),
         };
         let p = Pos2::new(-32., 750.);
         assert!(v.world(v.screen(p)).distance(p) < 0.001);
@@ -878,10 +1506,11 @@ mod gesture_tests {
     fn transformed_offstage_art_survives_save_and_export() {
         let mut doc = crate::Document::default();
         let mark = Mark {
-            points: vec![[0., 0.], [40., 30.]],
+            points: vec![[0., 0.], [40., 30.]].into(),
             color: [20, 30, 40, 255],
             width: 3.,
             rectangle: true,
+            ..Mark::default()
         };
         doc.layers[0].frames[0].push(transformed(
             &mark,
@@ -893,14 +1522,14 @@ mod gesture_tests {
         let restored: crate::Document =
             serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
         assert!(restored.validate().is_ok());
-        assert!(restored.svg(0).contains("polyline"));
+        assert!(restored.svg(0).contains("<path"));
         assert_eq!(restored.layers[0].frames[0][0].points.len(), 5);
     }
 }
 
-fn fit_scale(area: Rect) -> f32 {
-    ((area.width() - 60.) / 960.)
-        .min((area.height() - 60.) / 540.)
+fn fit_scale(area: Rect, size: Vec2) -> f32 {
+    ((area.width() - 60.) / size.x)
+        .min((area.height() - 60.) / size.y)
         .max(0.01)
 }
 #[derive(Clone, Copy)]
@@ -946,21 +1575,12 @@ fn transformed_in_basis(
     translation: Vec2,
     basis: f32,
 ) -> Mark {
-    let mut out = m.clone();
-    out.rectangle = false;
-    out.points = vertices(m)
-        .into_iter()
-        .map(|p| {
-            let local = rotate(p - pivot, -basis);
-            let v = rotate(
-                Vec2::new(local.x * scale.x, local.y * scale.y),
-                basis + angle,
-            );
-            let p = pivot + v + translation;
-            [p.x.clamp(-1e7, 1e7), p.y.clamp(-1e7, 1e7)]
-        })
-        .collect();
-    out
+    crate::vector::transform(m, |p| {
+        let v = rotate(p - pivot, -basis);
+        let p =
+            pivot + rotate(Vec2::new(v.x * scale.x, v.y * scale.y), basis + angle) + translation;
+        Pos2::new(p.x.clamp(-1e7, 1e7), p.y.clamp(-1e7, 1e7))
+    })
 }
 
 #[cfg(test)]
@@ -1008,10 +1628,12 @@ mod rotation_regressions {
                 [180., 100.],
                 [20., 100.],
                 [20., 30.],
-            ],
+            ]
+            .into(),
             color: [0, 0, 0, 255],
             width: 6.,
             rectangle: false,
+            ..Mark::default()
         };
         let pivot = Pos2::new(-80., 190.);
         for degrees in (0..360).step_by(11) {
@@ -1031,5 +1653,1163 @@ mod rotation_regressions {
             assert!((rect.width() - 160.).abs() < 0.001);
             assert!((rect.height() - 70.).abs() < 0.001);
         }
+    }
+}
+
+struct PenDraft {
+    mark: Mark,
+    layer: usize,
+    frame: usize,
+    closing: bool,
+}
+struct NodeDrag {
+    id: (usize, usize),
+    index: usize,
+    handle: u8,
+    start: Pos2,
+    original: Mark,
+    changed: bool,
+}
+
+impl Canvas {
+    pub fn cancel_drafts(&mut self) {
+        self.pen = None;
+        self.drag = None;
+        self.node_selection = None;
+    }
+    pub fn undo_pen(&mut self) -> bool {
+        if let Some(pen) = &mut self.pen {
+            pen.mark.nodes.pop();
+            if pen.mark.nodes.is_empty() {
+                self.pen = None;
+            }
+            self.drag = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+impl Editor {
+    pub fn finish_pending_pen(&mut self) {
+        if let Some(pen) = self.canvas.pen.take() {
+            self.commit_pen(pen);
+        }
+    }
+    fn commit_pen(&mut self, mut pen: PenDraft) {
+        if pen.mark.nodes.len() < 2
+            || pen.layer >= self.doc.layers.len()
+            || pen.frame >= self.doc.layers[pen.layer].frames.len()
+        {
+            return;
+        }
+        if !pen.mark.closed {
+            if !pen.mark.stroke && pen.mark.fill.is_some() && pen.mark.nodes.len() >= 2 {
+                pen.mark.closed = true;
+            } else {
+                pen.mark.fill = None;
+            }
+        }
+        if !pen.mark.stroke && pen.mark.fill.is_none() {
+            return;
+        }
+        self.checkpoint();
+        self.commit_paint(pen.layer, pen.frame, vec![pen.mark]);
+        self.recover();
+        self.status = "Trazado Bézier creado".into();
+    }
+    fn begin_pen(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+        if state.pen.is_none() {
+            if !self.stroke_enabled && !self.fill_enabled {
+                self.status = "Activa relleno o contorno para dibujar".into();
+                return;
+            }
+            state.clear_selection();
+            state.pen = Some(PenDraft {
+                mark: Mark {
+                    color: self.color.to_array(),
+                    width: self.width,
+                    width_profile: self.width_profile.clone(),
+                    stroke: self.stroke_enabled,
+                    fill: self.fill_enabled.then(|| self.fill_color.to_array()),
+                    ..Mark::default()
+                },
+                layer: self.layer,
+                frame: self.frame,
+                closing: false,
+            });
+        }
+        let pen = state.pen.as_mut().unwrap();
+        if pen.mark.nodes.len() >= 2
+            && view
+                .screen(crate::vector::pos(pen.mark.nodes[0].position))
+                .distance(view.screen(world))
+                < 9.
+        {
+            pen.mark.closed = true;
+            pen.closing = true;
+            state.drag = Some(Drag::PenNode {
+                index: 0,
+                start: world,
+            });
+        } else {
+            let index = pen.mark.nodes.len();
+            pen.mark
+                .nodes
+                .push(crate::document::Node::corner(crate::vector::xy(world)));
+            state.drag = Some(Drag::PenNode {
+                index,
+                start: world,
+            });
+        }
+        self.status="Pluma: clic crea esquina · arrastrar crea curva · primer nodo cierra · Enter termina · Esc cancela".into();
+    }
+    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+        let mut found = None;
+        for &(l, m) in &state.selected {
+            let mark = editable_nodes(&self.doc.layers[l].frames[self.frame][m]);
+            for (index, node) in mark.nodes.iter().enumerate() {
+                for (handle, p) in [
+                    (1, node.in_handle),
+                    (2, node.out_handle),
+                    (0, node.position),
+                ] {
+                    if handle != 0 && p == node.position {
+                        continue;
+                    }
+                    if view
+                        .screen(crate::vector::pos(p))
+                        .distance(view.screen(world))
+                        < 8.
+                    {
+                        found = Some(((l, m), index, handle));
+                    }
+                }
+            }
+        }
+        if let Some((id, index, handle)) = found {
+            state.node_selection = Some((id.0, id.1, index));
+            state.drag = Some(Drag::Node(NodeDrag {
+                id,
+                index,
+                handle,
+                start: world,
+                original: self.doc.layers[id.0].frames[self.frame][id.1].clone(),
+                changed: false,
+            }));
+            return;
+        }
+        'layers: for (l, layer) in self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, l)| l.visible)
+        {
+            for (m, mark) in layer.frames[self.frame].iter().enumerate().rev() {
+                if hit(mark, world, 6. / view.scale) {
+                    state.clear_selection();
+                    state.selected.push((l, m));
+                    self.layer = l;
+                    let editable = editable_nodes(mark);
+                    if let Some(index) = editable.nodes.iter().position(|node| {
+                        view.screen(crate::vector::pos(node.position))
+                            .distance(view.screen(world))
+                            < 8.
+                    }) {
+                        state.node_selection = Some((l, m, index));
+                        state.drag = Some(Drag::Node(NodeDrag {
+                            id: (l, m),
+                            index,
+                            handle: 0,
+                            start: world,
+                            original: mark.clone(),
+                            changed: false,
+                        }));
+                    }
+                    break 'layers;
+                }
+            }
+        }
+    }
+    fn cut_selection(&mut self, state: &mut Canvas, rect: Rect, add: bool) {
+        if rect.width() < 0.001 || rect.height() < 0.001 {
+            return;
+        }
+        let mut edits = vec![];
+        let mut selected = vec![];
+        let mut changed = false;
+        for (l, layer) in self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.visible)
+        {
+            let mut marks = Vec::new();
+            let mut layer_changed = false;
+            for (m, mark) in layer.frames[self.frame].iter().enumerate() {
+                let (outside, inside) = crate::vector::split_rect(mark, rect);
+                let partial = !outside.is_empty() && !inside.is_empty();
+                let previous = add && state.selected.contains(&(l, m));
+                if inside.is_empty() {
+                    if previous {
+                        selected.push((l, marks.len()));
+                    }
+                    marks.push(mark.clone());
+                } else if outside.is_empty() {
+                    selected.push((l, marks.len()));
+                    marks.push(mark.clone());
+                } else {
+                    layer_changed |= partial;
+                    changed |= partial;
+                    for part in outside {
+                        if previous {
+                            selected.push((l, marks.len()));
+                        }
+                        marks.push(part);
+                    }
+                    for part in inside {
+                        selected.push((l, marks.len()));
+                        marks.push(part);
+                    }
+                }
+            }
+            if layer_changed {
+                edits.push((l, marks));
+            }
+        }
+        if changed {
+            self.checkpoint();
+            for (l, marks) in edits {
+                self.doc.layers[l].frames[self.frame] = marks.into();
+            }
+            self.recover();
+            self.status = "Fragmento separado: puedes moverlo, transformarlo o borrarlo".into();
+        }
+        state.selected = selected;
+        state.orientation = 0.;
+        state.pivot = state.bounds(self).map(|b| b.center());
+    }
+    pub(crate) fn separate_component(
+        &mut self,
+        state: &mut Canvas,
+        id: (usize, usize),
+        stroke: bool,
+    ) -> (usize, usize) {
+        let mark = &self.doc.layers[id.0].frames[self.frame][id.1];
+        if mark.fill.is_none() || !mark.stroke {
+            return id;
+        }
+        let mut fill = mark.clone();
+        fill.stroke = false;
+        let mut line = mark.clone();
+        line.fill = None;
+        self.checkpoint();
+        self.doc.layers[id.0].frames[self.frame][id.1] = fill;
+        self.doc.layers[id.0].frames[self.frame].insert(id.1 + 1, line);
+        for (l, m) in &mut state.selected {
+            if *l == id.0 && *m >= id.1 {
+                *m += 1;
+            }
+        }
+        self.recover();
+        (id.0, id.1 + usize::from(stroke))
+    }
+    pub fn apply_drawing_style(&mut self) {
+        if self.canvas.selected.is_empty() || (!self.fill_enabled && !self.stroke_enabled) {
+            return;
+        }
+        if !self.stroke_enabled
+            && self.canvas.selected.iter().any(|&(l, m)| {
+                let mark = &self.doc.layers[l].frames[self.frame][m];
+                !mark.closed && !mark.rectangle
+            })
+        {
+            self.status = "Cierra primero el trazado para aplicarle solo relleno".into();
+            return;
+        }
+        let ids = self.canvas.selected.clone();
+        self.checkpoint();
+        for &(l, m) in &ids {
+            let mark = &mut self.doc.layers[l].frames[self.frame][m];
+            mark.color = self.color.to_array();
+            mark.width = self.width;
+            mark.width_profile = self.width_profile.clone();
+            mark.stroke = self.stroke_enabled;
+            mark.fill = if self.fill_enabled && (mark.closed || mark.rectangle) {
+                Some(self.fill_color.to_array())
+            } else {
+                None
+            };
+        }
+        self.canvas.selected = ids;
+        self.recover();
+    }
+}
+fn editable_nodes(mark: &Mark) -> Mark {
+    if !mark.nodes.is_empty() {
+        return mark.clone();
+    }
+    let mut editable = crate::vector::from_cubics(&crate::vector::cubics(mark), mark);
+    editable.holes = mark.holes.clone();
+    editable
+}
+fn paint_nodes(p: &egui::Painter, mark: &Mark, view: View, active: Option<usize>) {
+    for (index, node) in editable_nodes(mark).nodes.iter().enumerate() {
+        let anchor = view.screen(crate::vector::pos(node.position));
+        for h in [node.in_handle, node.out_handle] {
+            let handle = view.screen(crate::vector::pos(h));
+            if handle.distance(anchor) > 0.5 {
+                p.line_segment([anchor, handle], Stroke::new(1., ACCENT));
+                p.circle_filled(handle, 3.4, Color32::from_rgb(34, 36, 44));
+                p.circle_stroke(handle, 3.4, Stroke::new(1., ACCENT));
+            }
+        }
+        let rect = Rect::from_center_size(
+            anchor,
+            Vec2::splat(if active == Some(index) { 8. } else { 6. }),
+        );
+        p.rect_filled(
+            rect,
+            0.,
+            if active == Some(index) {
+                ACCENT
+            } else {
+                Color32::from_rgb(35, 38, 44)
+            },
+        );
+        p.rect_stroke(rect, 0., Stroke::new(1., ACCENT), egui::StrokeKind::Inside);
+    }
+}
+
+#[cfg(test)]
+mod vector_gesture_tests {
+    use super::*;
+    fn button(p: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    fn tick(ctx: &egui::Context, e: &mut Editor, events: Vec<egui::Event>) {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.canvas_ui(ui),
+        );
+        out.textures_delta.clear();
+    }
+    fn run(test: impl FnOnce(&egui::Context, &mut Editor)) {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut e = Editor::new(&cc);
+        e.doc = crate::Document::default();
+        let recovery = std::env::temp_dir().join(format!(
+            "libretoon-vector-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        e.recovery = recovery.clone();
+        tick(&ctx, &mut e, vec![]);
+        test(&ctx, &mut e);
+        drop(e);
+        let _ = std::fs::remove_file(recovery);
+    }
+    #[test]
+    fn brush_can_start_and_finish_outside_the_white_stage() {
+        run(|ctx, e| {
+            e.tool = Tool::Brush;
+            let a = Pos2::new(300., 20.);
+            let b = Pos2::new(600., 30.);
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+            assert!(!e.doc.layers[0].frames[0].is_empty());
+            assert!(
+                e.doc.layers[0].frames[0]
+                    .iter()
+                    .all(|m| crate::vector::control_bounds(m).max.y < 0.)
+            );
+            assert!(e.doc.validate().is_ok());
+        });
+    }
+    #[test]
+    fn all_pointer_samples_in_one_frame_survive_vector_brush_completion() {
+        run(|ctx, e| {
+            e.tool = Tool::VectorBrush;
+            let a = Pos2::new(200., 200.);
+            let middle = Pos2::new(350., 380.);
+            let b = Pos2::new(500., 200.);
+            tick(
+                ctx,
+                e,
+                vec![
+                    egui::Event::PointerMoved(a),
+                    button(a, true),
+                    egui::Event::PointerMoved(Pos2::new(270., 300.)),
+                    egui::Event::PointerMoved(middle),
+                    egui::Event::PointerMoved(Pos2::new(430., 300.)),
+                    egui::Event::PointerMoved(b),
+                    button(b, false),
+                ],
+            );
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            let mark = &e.doc.layers[0].frames[0][0];
+            assert!(!mark.nodes.is_empty());
+            assert!(mark.stroke && mark.fill.is_none());
+            let bounds = crate::vector::control_bounds(mark);
+            assert!(bounds.height() > 130., "{bounds:?}");
+        });
+    }
+    #[test]
+    fn pen_click_drag_creates_real_handles_and_enter_finishes_open_path() {
+        run(|ctx, e| {
+            e.tool = Tool::Pen;
+            for (a, b) in [
+                (Pos2::new(200., 200.), Pos2::new(240., 160.)),
+                (Pos2::new(400., 250.), Pos2::new(440., 290.)),
+            ] {
+                tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+                tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+                tick(ctx, e, vec![button(b, false)]);
+            }
+            assert!(e.canvas.pen.is_some());
+            tick(ctx, e, vec![key(egui::Key::Enter)]);
+            let mark = &e.doc.layers[0].frames[0][0];
+            assert_eq!(mark.nodes.len(), 2);
+            assert!(!mark.closed);
+            assert_ne!(mark.nodes[0].position, mark.nodes[0].out_handle);
+            assert!(mark.fill.is_none());
+        });
+    }
+    #[test]
+    fn clicking_first_pen_anchor_closes_a_filled_shape() {
+        run(|ctx, e| {
+            e.tool = Tool::Pen;
+            for a in [
+                Pos2::new(200., 200.),
+                Pos2::new(400., 200.),
+                Pos2::new(350., 400.),
+                Pos2::new(200., 200.),
+            ] {
+                tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+                tick(ctx, e, vec![button(a, false)]);
+            }
+            assert!(e.canvas.pen.is_none());
+            let mark = &e.doc.layers[0].frames[0][0];
+            assert_eq!(mark.nodes.len(), 3);
+            assert!(mark.closed && mark.fill.is_some());
+        });
+    }
+    #[test]
+    fn rectangle_modes_keep_fill_and_stroke_independent() {
+        for (fill, stroke) in [(true, false), (false, true), (true, true)] {
+            run(|ctx, e| {
+                e.tool = Tool::Rectangle;
+                e.fill_enabled = fill;
+                e.stroke_enabled = stroke;
+                let a = Pos2::new(150., 150.);
+                let b = Pos2::new(400., 400.);
+                tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+                tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+                let mark = &e.doc.layers[0].frames[0][0];
+                assert_eq!(mark.fill.is_some(), fill);
+                assert_eq!(mark.stroke, stroke);
+            });
+        }
+    }
+    #[test]
+    fn selection_marquee_separates_fill_instead_of_requiring_whole_object() {
+        run(|ctx, e| {
+            e.tool = Tool::Select;
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[200., 100.], [500., 400.]].into(),
+                rectangle: true,
+                closed: true,
+                fill: Some([80, 100, 200, 255]),
+                stroke: false,
+                ..Default::default()
+            });
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let a = view.screen(Pos2::new(150., 50.));
+            let b = view.screen(Pos2::new(350., 250.));
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+            assert!(e.doc.layers[0].frames[0].len() >= 2);
+            assert!(!e.canvas.selected.is_empty());
+            let (l, m) = e.canvas.selected[0];
+            let selected = &e.doc.layers[l].frames[0][m];
+            assert!(crate::vector::control_bounds(selected).max.x < 400.);
+        });
+    }
+}
+
+struct WidthDrag {
+    id: (usize, usize),
+    t: f32,
+    anchor: Pos2,
+    normal: Vec2,
+    start: Pos2,
+    original: Mark,
+    changed: bool,
+}
+impl Editor {
+    fn start_width_drag(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+        let mut hit = None;
+        for (l, layer) in self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, l)| l.visible)
+        {
+            for (m, mark) in layer.frames[self.frame]
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, m)| m.stroke)
+            {
+                if state.selected.contains(&(l, m)) {
+                    for stop in &mark.width_profile {
+                        if let Some((anchor, normal)) = crate::width::at_length(mark, stop.t) {
+                            let radius = mark.width * stop.width * 0.5;
+                            if [-1., 1.].iter().any(|side| {
+                                view.screen(anchor + normal * radius * *side)
+                                    .distance(view.screen(world))
+                                    < 9.
+                            }) {
+                                hit = Some(((l, m), stop.t, anchor, normal));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if hit.is_none() {
+                    if let Some(p) = crate::width::nearest(mark, world) {
+                        if p.distance
+                            <= mark.width * crate::width::sample(&mark.width_profile, p.t) * 0.5
+                                + 9. / view.scale
+                        {
+                            hit = Some(((l, m), p.t, p.point, p.normal));
+                        }
+                    }
+                }
+                if hit.is_some() {
+                    break;
+                }
+            }
+            if hit.is_some() {
+                break;
+            }
+        }
+        if let Some((id, t, anchor, normal)) = hit {
+            let original = self.doc.layers[id.0].frames[self.frame][id.1].clone();
+            state.clear_selection();
+            state.selected.push(id);
+            self.layer = id.0;
+            self.width = original.width;
+            self.width_profile = original.width_profile.clone();
+            self.width_preset = crate::width::Preset::Custom;
+            state.drag = Some(Drag::Width(WidthDrag {
+                id,
+                t,
+                anchor,
+                normal,
+                start: world,
+                original,
+                changed: false,
+            }));
+        }
+    }
+    fn bucket_at(&mut self, state: &mut Canvas, world: Pos2) {
+        if !self.fill_enabled {
+            self.status = "Activa un color de relleno".into();
+            return;
+        }
+        match crate::bucket::fill(
+            &self.doc.layers[self.layer].frames[self.frame],
+            world,
+            self.gap,
+            self.fill_color.to_array(),
+        ) {
+            Ok(shapes) => {
+                // Recolor an existing bucket face when its geometry is unchanged.
+                let old = self.doc.layers[self.layer].frames[self.frame]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, m)| m.bucket && crate::vector::contains_fill(m, world))
+                    .map(|(i, _)| i);
+                self.checkpoint();
+                state.clear_selection();
+                if let Some(index) = old.filter(|&i| {
+                    let previous = &self.doc.layers[self.layer].frames[self.frame][i];
+                    shapes.len() == 1
+                        && previous.points == shapes[0].points
+                        && previous.holes == shapes[0].holes
+                }) {
+                    self.doc.layers[self.layer].frames[self.frame][index].fill =
+                        Some(self.fill_color.to_array());
+                } else {
+                    self.doc.layers[self.layer].frames[self.frame].extend(shapes);
+                }
+                self.recover();
+                self.status = "Relleno aplicado".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+}
+fn paint_width_handles(p: &egui::Painter, mark: &Mark, view: View) {
+    let controls = if mark.width_profile.is_empty() {
+        crate::width::Preset::Custom.stops()
+    } else {
+        mark.width_profile.clone()
+    };
+    for stop in &controls {
+        if let Some((anchor, normal)) = crate::width::at_length(mark, stop.t) {
+            let radius = mark.width * stop.width * 0.5;
+            let left = view.screen(anchor - normal * radius);
+            let right = view.screen(anchor + normal * radius);
+            p.line_segment([left, right], Stroke::new(1., ACCENT));
+            for handle in [left, right] {
+                p.circle_filled(handle, 3.5, Color32::from_rgb(32, 35, 40));
+                p.circle_stroke(handle, 3.5, Stroke::new(1., ACCENT));
+            }
+            p.circle_filled(view.screen(anchor), 2., Color32::WHITE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod styling_gesture_tests {
+    use super::*;
+    fn button(p: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    fn tick(ctx: &egui::Context, e: &mut Editor, events: Vec<egui::Event>) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.canvas_ui(ui),
+        );
+        output.textures_delta.clear();
+    }
+    fn run(test: impl FnOnce(&egui::Context, &mut Editor)) {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut e = Editor::new(&cc);
+        e.doc = crate::Document::default();
+        let path = std::env::temp_dir().join(format!(
+            "libretoon-styling-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        e.recovery = path.clone();
+        tick(&ctx, &mut e, vec![]);
+        test(&ctx, &mut e);
+        drop(e);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn resized_stage_keeps_world_screen_inverse_under_rotation() {
+        let mut c = Canvas::default();
+        c.stage_size = Vec2::new(3840., 2160.);
+        c.zoom = 1.7;
+        c.angle = 0.6;
+        c.pan = Vec2::new(21., -44.);
+        let v = c.view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 800.)));
+        let p = Pos2::new(-500., 3000.);
+        assert!(v.world(v.screen(p)).distance(p) < 0.001);
+        assert_eq!(v.stage_center, Pos2::new(1920., 1080.));
+    }
+    #[test]
+    fn width_tool_widens_locally_and_undo_restores_uniform_centerline() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[100., 200.], [600., 200.]].into(),
+                width: 20.,
+                ..Default::default()
+            });
+            e.tool = Tool::Width;
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let a = view.screen(Pos2::new(350., 200.));
+            let b = view.screen(Pos2::new(350., 240.));
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            tick(ctx, e, vec![button(b, false)]);
+            let mark = &e.doc.layers[0].frames[0][0];
+            assert!(crate::width::sample(&mark.width_profile, 0.5) > 3.5);
+            assert_eq!(mark.points.len(), 2);
+            e.history(false);
+            assert!(e.doc.layers[0].frames[0][0].width_profile.is_empty());
+            e.history(true);
+            assert!(crate::width::sample(&e.doc.layers[0].frames[0][0].width_profile, 0.5) > 3.5);
+        });
+    }
+    #[test]
+    fn bucket_click_creates_vector_fill_and_recolor_does_not_accumulate_faces() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[100., 100.], [500., 400.]].into(),
+                rectangle: true,
+                closed: true,
+                width: 3.,
+                ..Default::default()
+            });
+            e.tool = Tool::Bucket;
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let point = view.screen(Pos2::new(300., 250.));
+            tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(point), button(point, true)],
+            );
+            tick(ctx, e, vec![button(point, false)]);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            assert!(e.doc.layers[0].frames[0][1].bucket);
+            e.fill_color = Color32::RED;
+            tick(ctx, e, vec![button(point, true)]);
+            tick(ctx, e, vec![button(point, false)]);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            assert_eq!(
+                e.doc.layers[0].frames[0][1].fill,
+                Some(Color32::RED.to_array())
+            );
+        });
+    }
+}
+
+fn selected_node_hit(e: &Editor, state: &Canvas, world: Pos2, view: View) -> bool {
+    state.selected.iter().any(|&(l, m)| {
+        let mark = &e.doc.layers[l].frames[e.frame][m];
+        mark.stroke
+            && mark.nodes.iter().any(|n| {
+                [n.position, n.in_handle, n.out_handle].iter().any(|p| {
+                    view.screen(crate::vector::pos(*p))
+                        .distance(view.screen(world))
+                        < 8.
+                })
+            })
+    })
+}
+
+#[cfg(test)]
+mod new_tool_regressions {
+    use super::*;
+    use geo::Area;
+    fn button(p: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+    fn tick(ctx: &egui::Context, e: &mut Editor, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.canvas_ui(ui),
+        );
+        out.textures_delta.clear();
+        out
+    }
+    fn run(test: impl FnOnce(&egui::Context, &mut Editor)) {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut e = Editor::new(&cc);
+        e.doc = crate::Document::default();
+        let path = std::env::temp_dir().join(format!(
+            "libretoon-new-tools-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        e.recovery = path.clone();
+        tick(&ctx, &mut e, vec![]);
+        test(&ctx, &mut e);
+        drop(e);
+        let _ = std::fs::remove_file(path);
+    }
+    fn rect(a: [f32; 2], b: [f32; 2], c: [u8; 4]) -> Mark {
+        Mark {
+            points: vec![a, b].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some(c),
+            stroke: false,
+            ..Default::default()
+        }
+    }
+    fn view(e: &Editor) -> View {
+        e.canvas
+            .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)))
+    }
+    fn click(ctx: &egui::Context, e: &mut Editor, p: Pos2) {
+        tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+        tick(ctx, e, vec![button(p, false)]);
+    }
+    #[test]
+    fn selected_fill_and_stroke_update_directly_and_undo_one_gesture() {
+        run(|ctx, e| {
+            let mut mark = rect([100., 100.], [300., 300.], [10, 20, 30, 255]);
+            mark.stroke = true;
+            mark.color = [90, 80, 70, 255];
+            e.doc.layers[0].frames[0].push(mark);
+            e.canvas.selected = vec![(0, 0)];
+            e.sync_selected_style(&[(0, 0)]);
+            assert_eq!(e.fill_color.to_array(), [10, 20, 30, 255]);
+            assert_eq!(e.color.to_array(), [90, 80, 70, 255]);
+            e.fill_color = Color32::RED;
+            e.change_selected_style(true, false, false, false);
+            e.width = 23.;
+            e.change_selected_style(false, false, true, false);
+            assert_eq!(e.undo.len(), 1);
+            let m = &e.doc.layers[0].frames[0][0];
+            assert_eq!(m.fill, Some(Color32::RED.to_array()));
+            assert_eq!(m.width, 23.);
+            assert_eq!(m.color, [90, 80, 70, 255]);
+            e.history(false);
+            assert_eq!(e.doc.layers[0].frames[0][0].fill, Some([10, 20, 30, 255]));
+            tick(ctx, e, vec![]);
+        });
+    }
+    #[test]
+    fn select_tool_edits_visible_bezier_handles_without_switching_tools() {
+        run(|ctx, e| {
+            e.tool = Tool::Select;
+            let curve = crate::vector::Cubic([
+                Pos2::new(180., 200.),
+                Pos2::new(220., 100.),
+                Pos2::new(320., 100.),
+                Pos2::new(360., 200.),
+            ]);
+            e.doc.layers[0].frames[0].push(crate::vector::from_cubics(&[curve], &Mark::default()));
+            e.canvas.selected = vec![(0, 0)];
+            tick(ctx, e, vec![]);
+            let v = view(e);
+            let a = v.screen(curve.0[1]);
+            let b = a + Vec2::new(25., 30.);
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+            let changed = &e.doc.layers[0].frames[0][0];
+            assert!(crate::vector::pos(changed.nodes[0].out_handle).distance(curve.0[1]) > 20.);
+            assert_eq!(changed.nodes[0].position, [180., 200.]);
+            assert_eq!(e.undo.len(), 1);
+            e.history(false);
+            assert_eq!(
+                e.doc.layers[0].frames[0][0].nodes[0].out_handle,
+                [220., 100.]
+            );
+        });
+    }
+    #[test]
+    fn crossing_selection_deletes_only_the_chosen_segment_and_saves_curves() {
+        run(|ctx, e| {
+            e.tool = Tool::Select;
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[100., 200.], [500., 200.]].into(),
+                width_profile: crate::width::Preset::Tapered.stops(),
+                ..Default::default()
+            });
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[300., 100.], [300., 300.]].into(),
+                ..Default::default()
+            });
+            let p = view(e).screen(Pos2::new(180., 200.));
+            click(ctx, e, p);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 3);
+            assert_eq!(e.canvas.selected.len(), 1);
+            let (l, m) = e.canvas.selected[0];
+            assert!(
+                crate::vector::control_bounds(&e.doc.layers[l].frames[0][m])
+                    .max
+                    .x
+                    < 301.
+            );
+            tick(
+                ctx,
+                e,
+                vec![egui::Event::Key {
+                    key: egui::Key::Delete,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            assert!(
+                e.doc.layers[0].frames[0]
+                    .iter()
+                    .any(|m| crate::vector::control_bounds(m).min.x > 299.)
+            );
+            let copy = crate::fla::decode(&crate::fla::encode(&e.doc).unwrap()).unwrap();
+            assert_eq!(copy.layers[0].frames[0].len(), 2);
+            e.history(false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 3);
+        });
+    }
+    #[test]
+    fn lasso_and_polygon_select_cut_real_areas_with_undo() {
+        run(|ctx, e| {
+            for tool in [Tool::Lasso, Tool::PolygonSelect] {
+                e.doc = crate::Document::default();
+                e.canvas.clear_selection();
+                e.doc.layers[0].frames[0].push(rect([100., 100.], [400., 400.], [1, 2, 3, 255]));
+                e.tool = tool;
+                let v = view(e);
+                let points = [
+                    Pos2::new(150., 150.),
+                    Pos2::new(350., 150.),
+                    Pos2::new(150., 350.),
+                ]
+                .map(|p| v.screen(p));
+                if tool == Tool::Lasso {
+                    tick(
+                        ctx,
+                        e,
+                        vec![
+                            egui::Event::PointerMoved(points[0]),
+                            button(points[0], true),
+                        ],
+                    );
+                    tick(
+                        ctx,
+                        e,
+                        vec![
+                            egui::Event::PointerMoved(points[1]),
+                            egui::Event::PointerMoved(points[2]),
+                            button(points[0], false),
+                        ],
+                    );
+                } else {
+                    for p in points {
+                        click(ctx, e, p);
+                    }
+                    tick(
+                        ctx,
+                        e,
+                        vec![egui::Event::Key {
+                            key: egui::Key::Enter,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Default::default(),
+                        }],
+                    );
+                }
+                assert!(!e.canvas.selected.is_empty(), "{}", tool.name());
+                let selected: f64 = e
+                    .canvas
+                    .selected
+                    .iter()
+                    .map(|&(l, m)| {
+                        crate::vector::polygon(&e.doc.layers[l].frames[0][m]).unsigned_area()
+                    })
+                    .sum();
+                assert!((selected - 20000.).abs() < 2., "{} {selected}", tool.name());
+                let total: f64 = e.doc.layers[0].frames[0]
+                    .iter()
+                    .map(|m| crate::vector::polygon(m).unsigned_area())
+                    .sum();
+                assert!((total - 90000.).abs() < 2.);
+                e.history(false);
+                assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            }
+        });
+    }
+    #[test]
+    fn eraser_removes_fill_and_axis_sections_in_a_single_undo_step() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].push(rect([100., 100.], [400., 400.], [10, 20, 30, 255]));
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[80., 250.], [450., 250.]].into(),
+                ..Default::default()
+            });
+            e.tool = Tool::Eraser;
+            e.width = 40.;
+            let v = view(e);
+            let a = v.screen(Pos2::new(250., 80.));
+            let b = v.screen(Pos2::new(250., 420.));
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+            assert!(
+                !e.doc.layers[0].frames[0]
+                    .iter()
+                    .any(|m| crate::vector::contains_fill(m, Pos2::new(250., 250.)))
+            );
+            assert!(!e.doc.layers[0].frames[0].iter().any(|m| stroke_hit(
+                m,
+                Pos2::new(250., 250.),
+                0.
+            )));
+            assert_eq!(e.undo.len(), 1);
+            e.history(false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+        });
+    }
+    #[test]
+    fn new_shapes_are_editable_and_roundtrip_native_fla() {
+        run(|ctx, e| {
+            for tool in [Tool::Line, Tool::Ellipse, Tool::Polygon] {
+                e.doc = crate::Document::default();
+                e.canvas.clear_selection();
+                e.tool = tool;
+                e.polygon_star = true;
+                e.polygon_sides = 7;
+                let a = Pos2::new(200., 200.);
+                let b = Pos2::new(480., 400.);
+                tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+                tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+                assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+                let m = &e.doc.layers[0].frames[0][0];
+                assert_eq!(
+                    m.nodes.len(),
+                    match tool {
+                        Tool::Line => 2,
+                        Tool::Ellipse => 4,
+                        _ => 14,
+                    }
+                );
+                if tool == Tool::Ellipse {
+                    assert_ne!(m.nodes[0].out_handle, m.nodes[0].position);
+                }
+                let copy = crate::fla::decode(&crate::fla::encode(&e.doc).unwrap()).unwrap();
+                assert_eq!(copy.layers[0].frames[0][0].nodes, m.nodes);
+            }
+        });
+    }
+    #[test]
+    fn wand_eyedropper_and_connected_object_selection_are_distinct() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].extend([
+                rect([100., 100.], [200., 200.], [255, 0, 0, 255]),
+                rect([300., 100.], [400., 200.], [255, 0, 0, 255]),
+                rect([500., 100.], [600., 200.], [0, 0, 255, 255]),
+            ]);
+            e.tool = Tool::Wand;
+            click(ctx, e, view(e).screen(Pos2::new(150., 150.)));
+            assert_eq!(e.canvas.selected, vec![(0, 1), (0, 0)]);
+            e.activate_tool(Tool::Eyedropper);
+            click(ctx, e, view(e).screen(Pos2::new(550., 150.)));
+            assert_eq!(e.fill_color, Color32::BLUE);
+            e.doc.layers[0].frames[0].push(Mark {
+                points: vec![[190., 150.], [310., 150.]].into(),
+                width: 4.,
+                ..Default::default()
+            });
+            e.activate_tool(Tool::Object);
+            click(ctx, e, view(e).screen(Pos2::new(150., 150.)));
+            assert_eq!(e.canvas.selected.len(), 3);
+            assert!(!e.canvas.selected.contains(&(0, 2)));
+        });
+    }
+    #[test]
+    fn fill_face_selection_conserves_area_and_leaves_crossing_contour_untouched() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].extend([
+                rect([100., 100.], [400., 400.], [255, 0, 0, 255]),
+                Mark {
+                    points: vec![[250., 80.], [250., 420.]].into(),
+                    ..Default::default()
+                },
+            ]);
+            e.tool = Tool::Select;
+            click(ctx, e, view(e).screen(Pos2::new(150., 150.)));
+            assert_eq!(e.canvas.selected.len(), 1);
+            let (l, m) = e.canvas.selected[0];
+            assert!(
+                crate::vector::control_bounds(&e.doc.layers[l].frames[0][m])
+                    .max
+                    .x
+                    < 251.
+            );
+            assert_eq!(
+                e.doc.layers[0].frames[0]
+                    .iter()
+                    .filter(|m| m.stroke)
+                    .count(),
+                1
+            );
+            let total: f64 = e.doc.layers[0].frames[0]
+                .iter()
+                .filter(|m| m.fill.is_some())
+                .map(|m| crate::vector::polygon(m).unsigned_area())
+                .sum();
+            assert!((total - 90000.).abs() < 0.2);
+        });
+    }
+    #[test]
+    fn hand_and_zoom_preserve_art_and_zoom_anchors_at_pointer() {
+        run(|ctx, e| {
+            e.tool = Tool::Pan;
+            let a = Pos2::new(300., 300.);
+            let b = Pos2::new(400., 350.);
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
+            assert!(e.canvas.pan.length() > 100.);
+            assert!(e.doc.layers[0].frames[0].is_empty());
+            e.tool = Tool::Zoom;
+            let before = view(e).world(a);
+            let old = e.canvas.zoom;
+            click(ctx, e, a);
+            assert!(e.canvas.zoom > old);
+            assert!(view(e).world(a).distance(before) < 0.01);
+            e.zoom_out = true;
+            click(ctx, e, a);
+            assert!((e.canvas.zoom - old).abs() < 0.01);
+        });
+    }
+    #[test]
+    fn brush_cursor_uses_high_contrast_radius_and_recovers_default_outside_canvas() {
+        run(|ctx, e| {
+            e.tool = Tool::Brush;
+            e.width = 30.;
+            let p = Pos2::new(300., 300.);
+            let out = tick(ctx, e, vec![egui::Event::PointerMoved(p)]);
+            assert_eq!(out.platform_output.cursor_icon, CursorIcon::None);
+            let expected = e.width * e.canvas.actual_scale * 0.5;
+            assert!(out.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Circle(c) if (c.radius-expected).abs()<0.01&&c.stroke.color==Color32::WHITE)));
+            let out = tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(Pos2::new(-20., -20.))],
+            );
+            assert_eq!(out.platform_output.cursor_icon, CursorIcon::Default);
+        });
     }
 }

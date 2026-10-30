@@ -6,6 +6,19 @@ function Get-SourceStamp {
     $files += Get-Item -LiteralPath (Join-Path $PSScriptRoot 'Cargo.toml')
     return (($files | Sort-Object FullName | ForEach-Object { $_.FullName + ':' + $_.LastWriteTimeUtc.Ticks }) -join '|')
 }
+# Let the editor flush its pending recovery snapshot before a restart.
+function Close-LibreToon {
+    param([System.Diagnostics.Process]$Process)
+    if ($null -eq $Process -or $Process.HasExited) { return }
+    $Process.Refresh()
+    if ($Process.CloseMainWindow()) {
+        $Process.WaitForExit()
+    } else {
+        # The application has not created its window yet.
+        Stop-Process -Id $Process.Id -ErrorAction SilentlyContinue
+        $Process.WaitForExit()
+    }
+}
 $appProcess = $null
 $stamp = ''
 try {
@@ -14,8 +27,7 @@ try {
         if ($next -ne $stamp) {
             $stamp = $next
             if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-                Stop-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
-                $appProcess.WaitForExit()
+                Close-LibreToon -Process $appProcess
                 $appProcess = $null
             }
             Write-Host 'Compilando LibreToon...' -ForegroundColor Cyan
@@ -29,7 +41,7 @@ try {
         Start-Sleep -Milliseconds 600
     }
 } finally {
-    if ($null -ne $appProcess -and -not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -ErrorAction SilentlyContinue }
+    if ($null -ne $appProcess -and -not $appProcess.HasExited) { Close-LibreToon -Process $appProcess }
 }
 
 

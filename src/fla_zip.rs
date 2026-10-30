@@ -64,6 +64,12 @@ pub fn pack(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     out
 }
 pub fn document(bytes: &[u8]) -> Result<String, String> {
+    String::from_utf8(
+        entry(bytes, b"DOMDocument.xml")?.ok_or("No se encuentra DOMDocument.xml en el FLA")?,
+    )
+    .map_err(|e| e.to_string())
+}
+pub fn entry(bytes: &[u8], wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
     let end=(bytes.len().saturating_sub(65557)..bytes.len().saturating_sub(3)).rev().find(|&i|bytes.get(i..i+4)==Some(&[0x50,0x4b,0x05,0x06])).ok_or("Este archivo no es un FLA moderno (CS5 o posterior). Los FLA binarios antiguos no están admitidos.")?;
     if u16_at(bytes, end + 4)? != 0 || u16_at(bytes, end + 6)? != 0 {
         return Err("ZIP dividido no admitido".into());
@@ -86,7 +92,7 @@ pub fn document(bytes: &[u8]) -> Result<String, String> {
         let name = bytes
             .get(p + 46..p + 46 + name_len)
             .ok_or("Nombre ZIP truncado")?;
-        if name == b"DOMDocument.xml" {
+        if name == wanted {
             if flags & 1 != 0 || uncompressed > LIMIT || compressed > LIMIT {
                 return Err("FLA cifrado o demasiado grande".into());
             }
@@ -115,13 +121,13 @@ pub fn document(bytes: &[u8]) -> Result<String, String> {
             if decoded.len() != uncompressed || crc32fast::hash(&decoded) != crc {
                 return Err("DOMDocument.xml dañado".into());
             }
-            return String::from_utf8(decoded).map_err(|e| e.to_string());
+            return Ok(Some(decoded));
         }
         p = p
             .checked_add(46 + name_len + extra + comment)
             .ok_or("Directorio ZIP no válido")?;
     }
-    Err("No se encuentra DOMDocument.xml en el FLA".into())
+    Ok(None)
 }
 #[cfg(test)]
 mod tests {

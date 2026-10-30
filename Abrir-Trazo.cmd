@@ -1,9 +1,9 @@
 @echo off
 cd /d "%~dp0"
-if exist "target\debug\libretoon.exe" (
-  start "" "target\debug\libretoon.exe"
+if exist "target\release\libretoon.exe" (
+  start "" "target\release\libretoon.exe"
 ) else (
-  cargo run --locked
+  cargo run --release --locked
   if errorlevel 1 pause
 )
 

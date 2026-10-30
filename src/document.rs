@@ -1,41 +1,150 @@
+use crate::shared::SharedVec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mark {
-    pub points: Vec<[f32; 2]>,
+    pub points: SharedVec<[f32; 2]>,
     pub color: [u8; 4],
     pub width: f32,
     pub rectangle: bool,
+    #[serde(default, skip_serializing_if = "empty")]
+    pub nodes: SharedVec<Node>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<[u8; 4]>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub stroke: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "empty")]
+    pub holes: SharedVec<SharedVec<[f32; 2]>>,
+    #[serde(default, skip_serializing_if = "empty")]
+    pub width_profile: SharedVec<crate::width::WidthStop>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bucket: bool,
+}
+fn empty<T>(v: &SharedVec<T>) -> bool {
+    v.is_empty()
+}
+fn yes() -> bool {
+    true
+}
+fn is_true(v: &bool) -> bool {
+    *v
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Node {
+    pub position: [f32; 2],
+    pub in_handle: [f32; 2],
+    pub out_handle: [f32; 2],
+}
+impl Node {
+    pub fn corner(position: [f32; 2]) -> Self {
+        Self {
+            position,
+            in_handle: position,
+            out_handle: position,
+        }
+    }
+}
+impl Default for Mark {
+    fn default() -> Self {
+        Self {
+            points: Default::default(),
+            color: [89, 72, 220, 255],
+            width: 4.,
+            rectangle: false,
+            nodes: Default::default(),
+            fill: None,
+            stroke: true,
+            closed: false,
+            holes: Default::default(),
+            width_profile: Default::default(),
+            bucket: false,
+        }
+    }
+}
+impl Mark {
+    pub fn svg_path(&self) -> String {
+        let mut d = String::new();
+        if let Some(first) = self.nodes.first() {
+            d += &format!("M{} {}", first.position[0], first.position[1]);
+            for c in crate::vector::cubics(self) {
+                let [_, b, c, destination] = c.0;
+                d += &format!(
+                    " C{} {} {} {} {} {}",
+                    b.x, b.y, c.x, c.y, destination.x, destination.y
+                );
+            }
+        } else {
+            for (i, p) in crate::vector::flatten(self, 0.1).iter().enumerate() {
+                d += &format!("{}{} {}", if i == 0 { "M" } else { " L" }, p.x, p.y);
+            }
+        }
+        if self.closed || self.rectangle {
+            d.push_str(" Z");
+        }
+        for hole in &self.holes {
+            for (i, p) in hole.iter().enumerate() {
+                d += &format!("{}{} {}", if i == 0 { " M" } else { " L" }, p[0], p[1]);
+            }
+            d.push_str(" Z");
+        }
+        d
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layer {
     pub name: String,
     pub visible: bool,
-    pub frames: Vec<Vec<Mark>>,
+    pub frames: SharedVec<SharedVec<Mark>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Document {
     pub version: u32,
     pub fps: u32,
-    pub layers: Vec<Layer>,
+    #[serde(default = "default_width", skip_serializing_if = "is_default_width")]
+    pub width: u32,
+    #[serde(default = "default_height", skip_serializing_if = "is_default_height")]
+    pub height: u32,
+    pub layers: SharedVec<Layer>,
+}
+fn default_width() -> u32 {
+    960
+}
+fn default_height() -> u32 {
+    540
+}
+fn is_default_width(v: &u32) -> bool {
+    *v == 960
+}
+fn is_default_height(v: &u32) -> bool {
+    *v == 540
 }
 impl Default for Document {
     fn default() -> Self {
         Self {
             version: 1,
             fps: 12,
+            width: 960,
+            height: 540,
             layers: vec![Layer {
                 name: "Capa 1".into(),
                 visible: true,
-                frames: vec![vec![]; 24],
-            }],
+                frames: vec![SharedVec::default(); 24].into(),
+            }]
+            .into(),
         }
     }
 }
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1
-            || !(1..=60).contains(&self.fps)
+            || !(1..=240).contains(&self.fps)
+            || !(1..=16384).contains(&self.width)
+            || !(1..=16384).contains(&self.height)
             || self.layers.is_empty()
             || self.layers.len() > 100
         {
@@ -53,9 +162,22 @@ impl Document {
                 if !mark.width.is_finite()
                     || mark.width <= 0.0
                     || mark.width > 100.0
+                    || !crate::width::validate(&mark.width_profile)
                     || mark
                         .points
                         .iter()
+                        .flatten()
+                        .any(|v| !v.is_finite() || v.abs() > 1e7)
+                    || mark
+                        .nodes
+                        .iter()
+                        .flat_map(|n| [n.position, n.in_handle, n.out_handle])
+                        .flatten()
+                        .any(|v| !v.is_finite() || v.abs() > 1e7)
+                    || mark
+                        .holes
+                        .iter()
+                        .flat_map(|r| r.iter())
                         .flatten()
                         .any(|v| !v.is_finite() || v.abs() > 1e7)
                 {
@@ -66,43 +188,40 @@ impl Document {
         Ok(())
     }
     pub fn svg(&self, frame: usize) -> String {
-        let mut out = String::from(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"960\" height=\"540\" viewBox=\"0 0 960 540\"><rect width=\"960\" height=\"540\" fill=\"white\"/>",
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"><rect width=\"{}\" height=\"{}\" fill=\"white\"/>",
+            self.width, self.height, self.width, self.height, self.width, self.height
         );
         for layer in self.layers.iter().filter(|l| l.visible) {
-            for m in &layer.frames[frame] {
-                let c = format!("rgb({},{},{})", m.color[0], m.color[1], m.color[2]);
-                let style = format!(
-                    "fill=\"none\" stroke=\"{c}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
-                    m.color[3] as f32 / 255.0,
-                    m.width
-                );
-                if m.rectangle && m.points.len() >= 2 {
-                    let a = m.points[0];
-                    let b = *m.points.last().unwrap();
-                    out += &format!(
-                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" {style}/>",
-                        a[0].min(b[0]),
-                        a[1].min(b[1]),
-                        (a[0] - b[0]).abs(),
-                        (a[1] - b[1]).abs()
-                    );
-                } else if m.points.len() == 1 {
-                    out += &format!(
-                        "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{c}\" fill-opacity=\"{}\"/>",
-                        m.points[0][0],
-                        m.points[0][1],
-                        m.width / 2.0,
-                        m.color[3] as f32 / 255.0
-                    );
-                } else {
-                    let points = m
-                        .points
-                        .iter()
-                        .map(|p| format!("{},{}", p[0], p[1]))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    out += &format!("<polyline points=\"{points}\" {style}/>");
+            for original in &layer.frames[frame] {
+                for m in crate::width::export_marks(original) {
+                    let c = format!("rgb({},{},{})", m.color[0], m.color[1], m.color[2]);
+                    let stroke = if m.stroke { c.as_str() } else { "none" };
+                    let (fill, alpha) = m
+                        .fill
+                        .map(|c| {
+                            (
+                                format!("rgb({},{},{})", c[0], c[1], c[2]),
+                                c[3] as f32 / 255.,
+                            )
+                        })
+                        .unwrap_or(("none".into(), 1.));
+                    if m.points.len() == 1 && m.nodes.is_empty() && m.stroke && !m.rectangle {
+                        out += &format!(
+                            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{c}\" fill-opacity=\"{}\"/>",
+                            m.points[0][0],
+                            m.points[0][1],
+                            m.width / 2.,
+                            m.color[3] as f32 / 255.
+                        );
+                    } else {
+                        out += &format!(
+                            "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{alpha}\" fill-rule=\"evenodd\" stroke=\"{stroke}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                            m.svg_path(),
+                            m.color[3] as f32 / 255.,
+                            m.width
+                        );
+                    }
                 }
             }
         }
@@ -116,10 +235,11 @@ mod tests {
     fn project_round_trip_and_validation() {
         let mut d = Document::default();
         d.layers[0].frames[0].push(Mark {
-            points: vec![[20., 30.]],
+            points: vec![[20., 30.]].into(),
             color: [0, 0, 0, 255],
             width: 4.,
             rectangle: false,
+            ..Mark::default()
         });
         let restored: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(restored.validate().is_ok());

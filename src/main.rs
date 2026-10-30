@@ -1,10 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod brush;
+mod bucket;
 mod canvas;
 mod design;
 mod document;
+mod editing;
 mod fla;
 mod fla_zip;
+mod inspector;
+mod paint;
+mod recovery;
+mod shared;
+mod tools_editor;
+mod vector;
+mod width;
 mod workspace;
 use document::{Document, Layer, Mark};
 use eframe::egui::{self, Color32};
@@ -18,8 +27,30 @@ struct Editor {
     frame: usize,
     layer: usize,
     color: Color32,
+    fill_color: Color32,
+    fill_enabled: bool,
+    stroke_enabled: bool,
     width: f32,
     smoothing: f32,
+    polygon_sides: usize,
+    polygon_star: bool,
+    star_ratio: f32,
+    zoom_out: bool,
+    wand_tolerance: f32,
+    style_selection: Vec<(usize, usize)>,
+    style_frame: usize,
+    style_transaction: bool,
+    width_profile: shared::SharedVec<width::WidthStop>,
+    width_preset: width::Preset,
+    profile_point: Option<usize>,
+    gap: bucket::Gap,
+    active_fill: bool,
+    document_settings: Option<inspector::DocumentSettings>,
+    timeline_duration: f32,
+    duration_editing: bool,
+    profile_transaction: bool,
+    renaming_layer: Option<usize>,
+    rename_focus: bool,
     tool: canvas::Tool,
     canvas: canvas::Canvas,
     onion: bool,
@@ -31,6 +62,7 @@ struct Editor {
     path: Option<PathBuf>,
     status: String,
     recovery: PathBuf,
+    recovery_writer: recovery::RecoveryWriter,
 }
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -55,8 +87,30 @@ impl Editor {
             frame: 0,
             layer: 0,
             color: Color32::from_rgb(89, 72, 220),
+            fill_color: Color32::from_rgb(89, 72, 220),
+            fill_enabled: true,
+            stroke_enabled: true,
             width: 4.,
             smoothing: 0.7,
+            polygon_sides: 5,
+            polygon_star: false,
+            star_ratio: 0.5,
+            zoom_out: false,
+            wand_tolerance: 0.,
+            style_selection: vec![],
+            style_frame: 0,
+            style_transaction: false,
+            width_profile: Default::default(),
+            width_preset: Default::default(),
+            profile_point: None,
+            gap: Default::default(),
+            active_fill: true,
+            document_settings: None,
+            timeline_duration: 2.,
+            duration_editing: false,
+            profile_transaction: false,
+            renaming_layer: None,
+            rename_focus: false,
             tool: canvas::Tool::Brush,
             canvas: canvas::Canvas::default(),
             onion: true,
@@ -68,6 +122,7 @@ impl Editor {
             path: None,
             status,
             recovery,
+            recovery_writer: recovery::RecoveryWriter::default(),
         }
     }
     fn checkpoint(&mut self) {
@@ -79,14 +134,11 @@ impl Editor {
         self.redo.clear();
     }
     fn recover(&mut self) {
-        if let Some(parent) = self.recovery.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = write_document(&self.recovery, &self.doc) {
-            self.status = format!("No se pudo recuperar sesión: {e}");
-        }
+        self.recovery_writer
+            .submit(self.recovery.clone(), self.doc.clone());
     }
     fn save_project(&mut self, save_as: bool) {
+        self.finish_pending_pen();
         let target = if save_as || self.path.is_none() {
             rfd::FileDialog::new()
                 .add_filter("Adobe Animate / LibreToon", &["fla"])
@@ -132,6 +184,8 @@ impl Editor {
                 Ok(d) => {
                     self.checkpoint();
                     self.canvas.clear_selection();
+                    self.canvas.cancel_drafts();
+                    self.draft = None;
                     self.doc = d;
                     self.frame = 0;
                     self.layer = 0;
@@ -164,6 +218,8 @@ impl Editor {
                 self.redo.push(self.doc.clone())
             };
             self.canvas.clear_selection();
+            self.canvas.cancel_drafts();
+            self.draft = None;
             self.doc = d;
             self.frame = self.frame.min(self.doc.layers[0].frames.len() - 1);
             self.layer = self.layer.min(self.doc.layers.len() - 1);
@@ -172,38 +228,58 @@ impl Editor {
     }
 }
 fn write_document(path: &std::path::Path, doc: &Document) -> Result<(), String> {
-    let bytes = if path
+    let temporary = path.with_extension("libretoon.tmp");
+    let file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
+    let mut writer = std::io::BufWriter::new(file);
+    if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
     {
-        fla::encode(doc)?
+        std::io::Write::write_all(&mut writer, &fla::encode(doc)?).map_err(|e| e.to_string())?;
     } else {
-        serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?
-    };
-    let temporary = path.with_extension("libretoon.tmp");
-    std::fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut writer, doc).map_err(|e| e.to_string())?;
+    }
+    std::io::Write::flush(&mut writer).map_err(|e| e.to_string())?;
+    drop(writer);
     std::fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if let Some(error) = self.recovery_writer.take_error() {
+            self.status = format!("No se pudo recuperar sesión: {error}");
+        }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_project(false);
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
-            self.history(false);
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
+        {
+            if !self.canvas.undo_pen() {
+                self.history(false);
+            }
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y)) {
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y))
+        {
             self.history(true);
+        }
+        if self.profile_transaction && !ctx.input(|i| i.pointer.primary_down()) {
+            self.profile_transaction = false;
+            self.recover();
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.finish_pending_pen();
         }
         if self.playing {
             let elapsed = self.tick.elapsed().as_secs_f64();
             let steps = (elapsed * self.doc.fps as f64).floor() as usize;
             if steps > 0 {
                 self.frame = (self.frame + steps) % self.doc.layers[0].frames.len();
-                self.tick = Instant::now();
+                self.tick += Duration::from_secs_f64(steps as f64 / self.doc.fps as f64);
             }
-            ctx.request_repaint_after(Duration::from_millis(8));
+            let period = Duration::from_secs_f64(1. / self.doc.fps as f64);
+            ctx.request_repaint_after(period.saturating_sub(self.tick.elapsed()));
         }
         self.workspace(ui);
         egui::CentralPanel::default()
@@ -229,4 +305,41 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| Ok(Box::new(Editor::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    #[test]
+    fn undo_redo_restore_geometry_after_shared_snapshot_edits() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx);
+        let mut editor = Editor::new(&cc);
+        editor.doc = Document::default();
+        let path =
+            std::env::temp_dir().join(format!("libretoon-history-{}.json", std::process::id()));
+        editor.recovery = path.clone();
+        editor.checkpoint();
+        editor.doc.layers[0].frames[0].push(Mark {
+            points: vec![[10., 20.], [30., 40.]].into(),
+            color: [0, 0, 0, 255],
+            width: 4.,
+            rectangle: false,
+            ..Mark::default()
+        });
+        editor.checkpoint();
+        editor.doc.layers[0].frames[0][0].points[0] = [50., 60.];
+        editor.history(false);
+        assert_eq!(editor.doc.layers[0].frames[0][0].points[0], [10., 20.]);
+        editor.history(false);
+        assert!(editor.doc.layers[0].frames[0].is_empty());
+        editor.history(true);
+        assert_eq!(editor.doc.layers[0].frames[0][0].points[0], [10., 20.]);
+        editor.history(true);
+        assert_eq!(editor.doc.layers[0].frames[0][0].points[0], [50., 60.]);
+        drop(editor);
+        let restored: Document = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.layers[0].frames[0][0].points[0], [50., 60.]);
+        std::fs::remove_file(path).unwrap();
+    }
 }
