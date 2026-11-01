@@ -175,3 +175,18 @@ Validación automatizada añadida: aislamiento de documentos/historial/vista/sí
 Los esqueletos y las retículas de pesos usan los mismos contenedores COW que el documento. Pintar copia solo las retículas afectadas; no cambia ni duplica las curvas fuente del símbolo. La evaluación y el exportador comparten la misma deformación vectorial. Solo se evalúa el fotograma solicitado y se reutilizan poses de huesos dentro del contexto; no se precalcula toda la animación al arrastrar. Los símbolos anidados tienen su propio contexto de rigging.
 
 La deformación activa genera contornos temporales y su teselación sigue teniendo coste proporcional a la geometría evaluada; no se promete coste cero ni una tasa de FPS. Se limita a 128 huesos, 512 instancias vinculadas y 32 pines por instancia. Cada retícula tiene 289 muestras, hasta cuatro influencias por muestra. IK usa como máximo 32 articulaciones y 32 iteraciones. Las curvas se subdividen adaptativamente con objetivo de error 0,02 unidades del documento y profundidad máxima 12. La visualización de pesos subdivide triángulos con un máximo de 32 pasos por arista. Las pruebas verifican aislamiento COW, mezcla continua, interpolación, IK, conservación de fuente y proyección vectorial exportada; no comparan rendimiento con otras aplicaciones.
+
+## Auditoría e importación FLA (noviembre de 2026)
+
+La apertura de proyectos solicitada desde Archivo/galería usa un único lector en segundo plano. Mantiene una petición pendiente reemplazable y un resultado; las solicitudes repetidas no crean trabajadores ilimitados. La restauración diferida de pestañas anteriores aún realiza su lectura al activarlas. El ZIP se indexa una vez por biblioteca y los fotogramas compartidos se deduplican al validar geometría y construir el grafo de símbolos. La profundidad se valida mediante el máximo de sus dependencias, sin depender del orden de los recursos.
+
+Se impone un presupuesto conservador de dos millones de puntos de control expandidos para evitar DAG de símbolos que multiplican exponencialmente el trabajo. Se calcula con máximos por capa/símbolo y puede rechazar proyectos patológicos antes de renderizar; no es una garantía de FPS ni un presupuesto global de RAM. Importación: hasta 256 MiB de archivo, 64 MiB por entrada ZIP y 128 MiB de XML de biblioteca. La geometría importada tiene un presupuesto adicional de 500.000 elementos/puntos contabilizados. El árbol XML y los diagnósticos también tienen límites. FFmpeg se drena continuamente pero solo conserva 64 KiB de mensajes.
+
+Medición sintética en este entorno Linux x86_64 (AMD EPYC 9V74, tres CPU visibles), Rust estable 1.99.1, perfil release predeterminado. Misma función de prueba en un worktree del commit base `fdc32ee` y en esta revisión: 200 trazos de cuatro puntos, compartidos durante 10.000 fotogramas, diez validaciones secuenciales. Una ejecución por versión, sin control de carga ni comparación estadística:
+
+| Validación del documento | Tiempo medio |
+| --- | --- |
+| Base `fdc32ee` | 59,79551 ms |
+| Validación con deduplicación y controles nuevos | 0,60235 ms |
+
+Comando: `cargo test --release --locked benchmark_audit_shared_validation -- --ignored --nocapture`. Mide CPU de validación, no lectura, renderizado, latencia de entrada ni FPS. No constituye una comparación con Animate. Los costes pendientes y la matriz de compatibilidad están en `AUDIT.md`.

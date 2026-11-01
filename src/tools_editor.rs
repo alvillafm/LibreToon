@@ -370,6 +370,7 @@ impl Editor {
         if self.tool == tool {
             return;
         }
+        self.finish_rig_gesture();
         if matches!(
             tool,
             Tool::Brush

@@ -64,71 +64,127 @@ pub fn pack(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     out
 }
 pub fn document(bytes: &[u8]) -> Result<String, String> {
-    String::from_utf8(
-        entry(bytes, b"DOMDocument.xml")?.ok_or("No se encuentra DOMDocument.xml en el FLA")?,
-    )
-    .map_err(|e| e.to_string())
+    xml_text(entry(bytes, b"DOMDocument.xml")?.ok_or("No se encuentra DOMDocument.xml en el FLA")?)
 }
-pub fn entry(bytes: &[u8], wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
-    let end=(bytes.len().saturating_sub(65557)..bytes.len().saturating_sub(3)).rev().find(|&i|bytes.get(i..i+4)==Some(&[0x50,0x4b,0x05,0x06])).ok_or("Este archivo no es un FLA moderno (CS5 o posterior). Los FLA binarios antiguos no están admitidos.")?;
-    if u16_at(bytes, end + 4)? != 0 || u16_at(bytes, end + 6)? != 0 {
-        return Err("ZIP dividido no admitido".into());
-    }
-    let count = u16_at(bytes, end + 10)?;
-    let mut p = u32_at(bytes, end + 16)? as usize;
-    for _ in 0..count {
-        if u32_at(bytes, p)? != 0x02014b50 {
-            return Err("Directorio FLA dañado".into());
+pub fn xml_text(data: Vec<u8>) -> Result<String, String> {
+    if data.starts_with(&[0xff, 0xfe]) || data.starts_with(&[0xfe, 0xff]) {
+        if data.len() % 2 != 0 {
+            return Err("XML UTF-16 truncado".into());
         }
+        let little = data[0] == 0xff;
+        let words = data[2..].chunks_exact(2).map(|c| {
+            if little {
+                u16::from_le_bytes([c[0], c[1]])
+            } else {
+                u16::from_be_bytes([c[0], c[1]])
+            }
+        });
+        let text = char::decode_utf16(words)
+            .collect::<Result<String, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(text
+            .replacen("encoding=\"UTF-16\"", "encoding=\"UTF-8\"", 1)
+            .replacen("encoding=\"utf-16\"", "encoding=\"utf-8\"", 1))
+    } else {
+        String::from_utf8(data).map_err(|e| e.to_string())
+    }
+}
+/// Central directory is indexed once when importing a library.
+pub struct Archive<'a> {
+    bytes: &'a [u8],
+    entries: std::collections::HashMap<Vec<u8>, usize>,
+}
+impl<'a> Archive<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        let end=(bytes.len().saturating_sub(65557)..bytes.len().saturating_sub(3)).rev().find(|&i|bytes.get(i..i+4)==Some(&[0x50,0x4b,0x05,0x06])&&u16_at(bytes,i+20).is_ok_and(|len|i+22+len as usize==bytes.len())).ok_or("Este archivo no es un FLA moderno (CS5 o posterior). Los FLA binarios antiguos no están admitidos.")?;
+        if u16_at(bytes, end + 4)? != 0 || u16_at(bytes, end + 6)? != 0 {
+            return Err("ZIP dividido no admitido".into());
+        }
+        let count = u16_at(bytes, end + 10)?;
+        if count != u16_at(bytes, end + 8)? {
+            return Err("Directorio ZIP incoherente".into());
+        }
+        let mut p = u32_at(bytes, end + 16)? as usize;
+        let stop = p
+            .checked_add(u32_at(bytes, end + 12)? as usize)
+            .filter(|s| *s <= end)
+            .ok_or("Directorio ZIP fuera de rango")?;
+        let mut entries = std::collections::HashMap::new();
+        for _ in 0..count {
+            if u32_at(bytes, p)? != 0x02014b50 {
+                return Err("Directorio FLA dañado".into());
+            }
+            let len = u16_at(bytes, p + 28)? as usize;
+            let extra = u16_at(bytes, p + 30)? as usize;
+            let comment = u16_at(bytes, p + 32)? as usize;
+            let name = bytes
+                .get(p + 46..p + 46 + len)
+                .ok_or("Nombre ZIP truncado")?;
+            if entries.insert(name.to_vec(), p).is_some() {
+                return Err("Entrada ZIP duplicada".into());
+            }
+            p = p
+                .checked_add(46 + len + extra + comment)
+                .filter(|p| *p <= stop)
+                .ok_or("Directorio ZIP truncado")?;
+        }
+        if p != stop {
+            return Err("Tamaño de directorio ZIP incoherente".into());
+        }
+        Ok(Self { bytes, entries })
+    }
+    pub fn entry(&self, wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let Some(&p) = self.entries.get(wanted) else {
+            return Ok(None);
+        };
+        let bytes = self.bytes;
+        let name = wanted;
         let flags = u16_at(bytes, p + 8)?;
         let method = u16_at(bytes, p + 10)?;
         let crc = u32_at(bytes, p + 16)?;
         let compressed = u32_at(bytes, p + 20)? as usize;
         let uncompressed = u32_at(bytes, p + 24)? as usize;
-        let name_len = u16_at(bytes, p + 28)? as usize;
-        let extra = u16_at(bytes, p + 30)? as usize;
-        let comment = u16_at(bytes, p + 32)? as usize;
         let local = u32_at(bytes, p + 42)? as usize;
-        let name = bytes
-            .get(p + 46..p + 46 + name_len)
-            .ok_or("Nombre ZIP truncado")?;
-        if name == wanted {
-            if flags & 1 != 0 || uncompressed > LIMIT || compressed > LIMIT {
-                return Err("FLA cifrado o demasiado grande".into());
-            }
-            if u32_at(bytes, local)? != 0x04034b50 {
-                return Err("Cabecera ZIP dañada".into());
-            }
-            let start = local
-                + 30
-                + u16_at(bytes, local + 26)? as usize
-                + u16_at(bytes, local + 28)? as usize;
-            let data = bytes
-                .get(start..start + compressed)
-                .ok_or("Contenido FLA truncado")?;
-            let decoded = match method {
-                0 => data.to_vec(),
-                8 => {
-                    let mut out = vec![];
-                    flate2::read::DeflateDecoder::new(data)
-                        .take((LIMIT + 1) as u64)
-                        .read_to_end(&mut out)
-                        .map_err(|e| e.to_string())?;
-                    out
-                }
-                _ => return Err("Compresión FLA no admitida".into()),
-            };
-            if decoded.len() != uncompressed || crc32fast::hash(&decoded) != crc {
-                return Err("DOMDocument.xml dañado".into());
-            }
-            return Ok(Some(decoded));
+        if flags & 1 != 0 || uncompressed > LIMIT || compressed > LIMIT {
+            return Err("FLA cifrado o demasiado grande".into());
         }
-        p = p
-            .checked_add(46 + name_len + extra + comment)
-            .ok_or("Directorio ZIP no válido")?;
+        if u32_at(bytes, local)? != 0x04034b50 {
+            return Err("Cabecera ZIP dañada".into());
+        }
+        let local_name_len = u16_at(bytes, local + 26)? as usize;
+        if u16_at(bytes, local + 6)? != flags
+            || u16_at(bytes, local + 8)? != method
+            || bytes.get(local + 30..local + 30 + local_name_len) != Some(name)
+        {
+            return Err("Cabecera local ZIP no coincide con el directorio".into());
+        }
+        let start =
+            local + 30 + u16_at(bytes, local + 26)? as usize + u16_at(bytes, local + 28)? as usize;
+        let data = bytes
+            .get(start..start + compressed)
+            .ok_or("Contenido FLA truncado")?;
+        let decoded = match method {
+            0 => data.to_vec(),
+            8 => {
+                let mut out = vec![];
+                flate2::read::DeflateDecoder::new(data)
+                    .take((LIMIT + 1) as u64)
+                    .read_to_end(&mut out)
+                    .map_err(|e| e.to_string())?;
+                out
+            }
+            _ => return Err("Compresión FLA no admitida".into()),
+        };
+        if decoded.len() != uncompressed || crc32fast::hash(&decoded) != crc {
+            return Err("DOMDocument.xml dañado".into());
+        }
+        Ok(Some(decoded))
     }
-    Ok(None)
 }
+pub fn entry(bytes: &[u8], wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    Archive::new(bytes)?.entry(wanted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

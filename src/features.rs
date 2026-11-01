@@ -128,6 +128,7 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    pub instance_color: Option<[f32; 8]>,
     pub guide: bool,
     pub text: Option<Box<crate::typography::TextSpec>>,
     pub track: u64,
@@ -169,7 +170,9 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    extras.rig.is_empty()
+    !extras.imported
+        && extras.import_warnings.is_empty()
+        && extras.rig.is_empty()
         && extras.library.is_empty()
         && extras.scenes.is_empty()
         && extras.active_scene == 0
@@ -231,6 +234,8 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    pub imported: bool,
+    pub import_warnings: SharedVec<String>,
     pub rig: crate::rig::Rig,
     pub library: crate::library::Library,
     pub scenes: SharedVec<crate::animation::Scene>,
@@ -393,7 +398,10 @@ fn expand(
             .iter()
             .find(|b| b.target == mark.style.track && b.symbol == instance.symbol);
         let deform = binding.map(|b| crate::rig::Deformer::new(b, poses, parent_frame));
-        for (_, _, m) in resolve_internal(&sub, frame, depth + 1, guides, clock) {
+        for (_, _, mut m) in resolve_internal(&sub, frame, depth + 1, guides, clock) {
+            if let Some(c) = mark.style.instance_color {
+                apply_color(&mut m, c);
+            }
             if let Some(d) = &deform {
                 out.extend(d.mark(&m, instance.matrix));
             } else {
@@ -614,12 +622,19 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         return Err("Only one mannequin per scene".into());
     }
     validate_resources(doc)?;
+    validate_expansion(doc)?;
     crate::animation::validate(doc)?;
+    let mut checked = std::collections::HashSet::new();
     for layer in &doc.layers {
         if !layer.options.opacity.is_finite() || !(0. ..=1.).contains(&layer.options.opacity) {
             return Err("Invalid layer opacity".into());
         }
-        for m in layer.frames.iter().flatten() {
+        for m in layer
+            .frames
+            .iter()
+            .filter(|f| checked.insert(f.identity()))
+            .flatten()
+        {
             if m.style.gradient.as_ref().is_some_and(|g| !g.valid()) {
                 return Err("Invalid gradient".into());
             }
@@ -714,6 +729,7 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
     }
     folders(&doc.extras.folders, &doc.layers)?;
     fn layers(layers: &[Layer], symbols: &[Symbol]) -> Result<(), String> {
+        let mut checked = std::collections::HashSet::new();
         for layer in layers {
             if layer.options.mannequin.as_ref().is_some_and(|m| !m.valid()) {
                 return Err("Invalid mannequin".into());
@@ -735,7 +751,19 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
             {
                 return Err("Invalid layer or exposure timeline".into());
             }
-            for mark in layer.frames.iter().flatten() {
+            for mark in layer
+                .frames
+                .iter()
+                .filter(|f| checked.insert(f.identity()))
+                .flatten()
+            {
+                if mark
+                    .style
+                    .instance_color
+                    .is_some_and(|c| c.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
+                {
+                    return Err("Invalid instance color transform".into());
+                }
                 if mark.style.text.as_ref().is_some_and(|t| !t.valid()) {
                     return Err("Invalid text".into());
                 }
@@ -779,36 +807,15 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
         layers(&symbol.layers, &doc.extras.symbols)?;
         folders(&symbol.folders, &symbol.layers)?;
     }
-    fn visit(
-        id: u64,
-        symbols: &[Symbol],
-        stack: &mut Vec<u64>,
-        done: &mut std::collections::HashSet<u64>,
-    ) -> Result<(), String> {
-        if stack.contains(&id) || stack.len() >= 8 {
-            return Err("Recursive symbol or excessive nesting".into());
-        }
-        if done.contains(&id) {
-            return Ok(());
-        }
-        stack.push(id);
-        if let Some(s) = symbols.iter().find(|s| s.id == id) {
-            for instance in s
-                .layers
-                .iter()
-                .flat_map(|l| l.frames.iter().flatten())
-                .filter_map(|m| m.style.instance.as_ref())
-            {
-                visit(instance.symbol, symbols, stack, done)?;
-            }
-        }
-        stack.pop();
-        done.insert(id);
-        Ok(())
-    }
-    let mut done = std::collections::HashSet::new();
-    for symbol in &doc.extras.symbols {
-        visit(symbol.id, &doc.extras.symbols, &mut vec![], &mut done)?;
+    let graph = symbol_graph(&doc.extras.symbols);
+    let mut memo = std::collections::HashMap::new();
+    for id in graph.keys() {
+        symbol_depth(
+            *id,
+            &graph,
+            &mut std::collections::HashSet::new(),
+            &mut memo,
+        )?;
     }
     unique.clear();
     for folder in &doc.extras.folders {
@@ -942,4 +949,121 @@ pub fn symbol_frame(i: &Instance, count: usize, frame: usize, clock: usize) -> u
         Playback::Once => offset.min(count - 1),
         Playback::Single => i.first.min(count - 1),
     }
+}
+
+pub fn apply_color(m: &mut Mark, c: [f32; 8]) {
+    let convert = |color: &mut [u8; 4]| {
+        for i in 0..4 {
+            color[i] = (color[i] as f32 * c[i] + c[i + 4]).round().clamp(0., 255.) as u8;
+        }
+    };
+    convert(&mut m.color);
+    if let Some(f) = m.fill.as_mut() {
+        convert(f);
+    }
+    if let Some(g) = m.style.gradient.as_mut() {
+        for s in &mut g.stops {
+            convert(&mut s.color);
+        }
+    }
+}
+
+/// Deduplicate held exposures and dependency edges before traversing the DAG.
+pub(crate) fn symbol_graph(symbols: &[Symbol]) -> std::collections::HashMap<u64, Vec<u64>> {
+    symbols
+        .iter()
+        .map(|s| {
+            let mut frames = std::collections::HashSet::new();
+            let mut edges = std::collections::BTreeSet::new();
+            for frame in s.layers.iter().flat_map(|l| l.frames.iter()) {
+                if frames.insert(frame.identity()) {
+                    for i in frame.iter().filter_map(|m| m.style.instance.as_ref()) {
+                        edges.insert(i.symbol);
+                    }
+                }
+            }
+            (s.id, edges.into_iter().collect())
+        })
+        .collect()
+}
+fn symbol_depth(
+    id: u64,
+    graph: &std::collections::HashMap<u64, Vec<u64>>,
+    active: &mut std::collections::HashSet<u64>,
+    memo: &mut std::collections::HashMap<u64, usize>,
+) -> Result<usize, String> {
+    if let Some(d) = memo.get(&id) {
+        return Ok(*d);
+    }
+    if active.len() >= 8 || !active.insert(id) {
+        return Err("Recursive symbol or excessive nesting".into());
+    }
+    let mut depth = 1;
+    for child in graph.get(&id).into_iter().flatten() {
+        depth = depth.max(1 + symbol_depth(*child, graph, active, memo)?);
+    }
+    active.remove(&id);
+    if depth > 8 {
+        return Err("Recursive symbol or excessive nesting".into());
+    }
+    memo.insert(id, depth);
+    Ok(depth)
+}
+
+/// Limit expanded geometry rather than counting shared resources only. A tiny
+/// recursive-free DAG can otherwise instantiate billions of paths in one frame.
+pub(crate) fn validate_expansion(doc: &Document) -> Result<(), String> {
+    fn layers_cost(
+        layers: &[Layer],
+        symbols: &[Symbol],
+        memo: &mut std::collections::HashMap<u64, usize>,
+    ) -> usize {
+        let mut total = 0usize;
+        for layer in layers {
+            let mut seen = std::collections::HashSet::new();
+            let mut max = 0usize;
+            for frame in &layer.frames {
+                if !seen.insert(frame.identity()) {
+                    continue;
+                }
+                let mut cost = 0usize;
+                for mark in frame {
+                    let value = if let Some(i) = &mark.style.instance {
+                        if let Some(cost) = memo.get(&i.symbol) {
+                            *cost
+                        } else if let Some(s) = symbols.iter().find(|s| s.id == i.symbol) {
+                            let cost = layers_cost(&s.layers, symbols, memo);
+                            memo.insert(s.id, cost);
+                            cost
+                        } else {
+                            1
+                        }
+                    } else {
+                        mark.points
+                            .len()
+                            .saturating_add(mark.nodes.len().saturating_mul(3))
+                            .saturating_add(mark.holes.iter().map(|h| h.len()).sum::<usize>())
+                            .max(1)
+                    };
+                    cost = cost.saturating_add(value).min(2_000_001);
+                    if cost > 2_000_000 {
+                        break;
+                    }
+                }
+                max = max.max(cost);
+            }
+            total = total.saturating_add(max).min(2_000_001);
+        }
+        total
+    }
+    let mut memo = std::collections::HashMap::new();
+    for s in &doc.extras.symbols {
+        if layers_cost(&s.layers, &doc.extras.symbols, &mut memo) > 2_000_000 {
+            return Err("Expanded symbol geometry exceeds 2000000 control points per frame".into());
+        }
+    }
+    if layers_cost(&doc.layers, &doc.extras.symbols, &mut memo) > 2_000_000 {
+        return Err("Expanded scene geometry exceeds 2000000 control points per frame".into());
+    }
+    Ok(())
 }

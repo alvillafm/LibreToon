@@ -45,6 +45,12 @@ impl Editor {
                             self.save_project(true);
                             ui.close();
                         }
+                        if !self.doc.extras.import_warnings.is_empty()
+                            && ui.button("Informe de importación FLA…").clicked()
+                        {
+                            self.import_report_open = true;
+                            ui.close();
+                        }
                         ui.separator();
                         if button(
                             ui,

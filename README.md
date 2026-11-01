@@ -53,13 +53,17 @@ The bundled `assets/tools/ffmpeg.exe` handles video and GIF and is automatically
 
 ## Interchange and limitations
 
-FLA support is limited to implemented vector geometry, colors, layers and frames. Unsupported XFL content is rejected rather than silently discarded. Native metadata is checked against visible XFL so external edits are not hidden. There is no general compatibility promise for arbitrary Animate files, symbols, scripts, rigs or effects.
+Modern Animate FLA (CS5 and later, ZIP/XFL) opens using a best-effort importer. It preserves scenes, layers, frame exposures and empty keys, nested graphic/movie-clip symbols, groups and affine transforms, solid/gradient vector fills, quadratic edges, and compatible classic motion tweens including instance RGBA changes. Buttons show their Up state. ActionScript/JavaScript is ignored and never executed; playback follows the timeline rather than script-driven navigation. Compressed and stored ZIP entries and UTF-8/UTF-16 XML are supported. Fractional FPS is rounded to the integer clock used by LibreToon. Colored stage backgrounds become a locked vector background layer.
+
+An import report opens with the document and can be reopened from File. Missing or unsupported elements are omitted individually, with diagnostics. Shape tweens, newer motion-object XML/path/rotation-count animation, masks, advanced blend modes/filters, bitmap/video/audio media, and TLF text are not fully reconstructed. Supported keys and exposures remain when a tween cannot be reproduced. Static/classic text is converted through available local fonts; layout and substitutions may differ. See [the audit and compatibility matrix](AUDIT.md).
+
+Importing opens a new editable project. Save asks for a destination copy on the first save, so a partially imported source is not silently overwritten. Imports run on one background reader with one replaceable pending request. Native LibreToon FLA metadata is used only if valid and exactly consistent with the visible XFL; stale/damaged metadata falls back to the visible content and is reported. Legacy binary CS4-and-earlier FLA, encrypted files, ZIP64 and decompressed standalone XFL folders are not supported. There is no general compatibility promise for arbitrary Animate files.
 
 Selection and Boolean operations approximate fill boundaries; stroke subdivisions preserve Bézier handles and variable-width profiles. Selection, shading and fill operations currently have no spatial index. See `PERFORMANCE.md` for measurements and their limits.
 
-Artwork bone rigging, shape/topology morphing, media import and general filters/effects remain future work.
+Shape/topology morphing, media import and general filters/effects remain future work. Artwork bones and Puppet are experimental.
 
-Advanced document data is retained in LibreToon's native metadata inside FLA. Standard XFL output concatenates scenes and bakes motion, symbols, bone/puppet deformations, cameras, clipping and layer opacity; gradients use a 24 × 24 polygon approximation in that interoperability projection. Native FLA retains editable gradients/symbols and SVG retains gradient definitions. The standard XFL projection is not an Adobe symbol library or camera layer. Unsupported external XFL content continues to be rejected.
+Advanced document data is retained in LibreToon's native metadata inside FLA. Standard XFL output concatenates scenes and bakes motion, symbols, bone/puppet deformations, cameras, clipping and layer opacity; gradients use a 24 × 24 polygon approximation in that interoperability projection. Native FLA retains editable gradients/symbols and SVG retains gradient definitions. The standard XFL projection is not an Adobe symbol library or camera layer. Unsupported external XFL elements are now skipped with an import report; malformed XML/containers and excessive complexity are rejected.
 
 ## Validate
 

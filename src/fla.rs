@@ -1,11 +1,7 @@
 //! Interoperable XFL subset: vector strokes and frame-by-frame animation.
-use crate::document::{Document, Layer, Mark};
+use crate::document::{Document, Mark};
 
-use std::collections::HashMap;
-use xml::{
-    attribute::OwnedAttribute,
-    reader::{EventReader, XmlEvent},
-};
+use xml::attribute::OwnedAttribute;
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -17,7 +13,7 @@ fn attr<'a>(a: &'a [OwnedAttribute], name: &str) -> Option<&'a str> {
         .find(|a| a.name.local_name == name)
         .map(|a| a.value.as_str())
 }
-fn number(a: &[OwnedAttribute], name: &str, default: f32) -> Result<f32, String> {
+pub(crate) fn number(a: &[OwnedAttribute], name: &str, default: f32) -> Result<f32, String> {
     match attr(a, name) {
         Some(s) => {
             let value = s
@@ -184,309 +180,25 @@ fn paths(edges: &str) -> Result<Vec<Vec<[f32; 2]>>, String> {
 }
 pub fn decode(bytes: &[u8]) -> Result<Document, String> {
     let xml = crate::fla_zip::document(bytes)?;
-    if let Some(native) = crate::fla_zip::entry(bytes, b"LIBRETOON/document.json")? {
-        let doc: Document = serde_json::from_slice(&native)
-            .map_err(|e| format!("Datos de edición LibreToon dañados: {e}"))?;
-        doc.validate()?;
-        // Exact canonical XML comparison prevents stale native data from masking
-        // edits made by Animate or unsupported content inserted by another app.
-        if document_xml(&doc) == xml {
-            return Ok(doc);
+    let native = crate::fla_zip::entry(bytes, b"LIBRETOON/document.json");
+    let mut stale = false;
+    if let Ok(Some(native)) = &native {
+        if let Ok(doc) = serde_json::from_slice::<Document>(native) {
+            if doc.validate().is_ok() && document_xml(&doc) == xml {
+                return Ok(doc);
+            }
         }
+        stale = true;
     }
-    let mut doc = Document {
-        extras: Default::default(),
-        version: 1,
-        fps: 12,
-        width: 960,
-        height: 540,
-        layers: Default::default(),
-    };
-    let mut timelines = 0;
-    let mut frame_index = 0;
-    let mut duration = 1;
-    let mut marks = vec![];
-    let mut styles: HashMap<String, (f32, [u8; 4])> = HashMap::new();
-    let mut stroke_index = String::new();
-    let mut width = 1.;
-    let mut color = [0, 0, 0, 255];
-    let mut fill_styles: HashMap<String, [u8; 4]> = HashMap::new();
-    let mut fill_edges: HashMap<String, Vec<Vec<[f32; 2]>>> = HashMap::new();
-    let mut shape_strokes = vec![];
-    let mut in_fill = false;
-    let mut fill_index = String::new();
-    let mut fill_color = [0, 0, 0, 255];
-    let mut in_shape = false;
-    let mut in_stroke = false;
-    let mut matrix = [1., 0., 0., 1., 0., 0.];
-    let mut root = false;
-    for event in EventReader::from_str(&xml) {
-        match event.map_err(|e| format!("XML FLA no válido: {e}"))? {
-            XmlEvent::StartElement {
-                name,
-                attributes: a,
-                ..
-            } => match name.local_name.as_str() {
-                "DOMDocument" => {
-                    root = true;
-                    let w = number(&a, "width", 550.)?;
-                    let h = number(&a, "height", 400.)?;
-                    if !(1.0..=16384.).contains(&w)
-                        || !(1.0..=16384.).contains(&h)
-                        || w.fract() != 0.
-                        || h.fract() != 0.
-                    {
-                        return Err("Dimensiones de escenario XFL no válidas".into());
-                    }
-                    doc.width = w as u32;
-                    doc.height = h as u32;
-                    let fps = number(&a, "frameRate", 24.)?;
-                    if fps.fract() != 0. || !(1.0..=240.0).contains(&fps) {
-                        return Err(unsupported(
-                            "velocidades de fotogramas fuera del rango 1–240 fps enteros",
-                        ));
-                    }
-                    doc.fps = fps as u32;
-                    if attr(&a, "backgroundColor").is_some_and(|c| c != "#FFFFFF" && c != "#ffffff")
-                    {
-                        return Err(unsupported("fondos de color"));
-                    }
-                }
-                "DOMTimeline" => {
-                    timelines += 1;
-                    if timelines > 1 {
-                        return Err(unsupported("varias escenas"));
-                    }
-                }
-                "DOMLayer" => {
-                    if doc.layers.len() >= 100 {
-                        return Err("Demasiadas capas en el proyecto".into());
-                    }
-                    if attr(&a, "layerType").is_some_and(|t| t != "normal") {
-                        return Err(unsupported("máscaras, guías o carpetas de capas"));
-                    }
-                    doc.layers.push(Layer {
-                        options: Default::default(),
-                        name: attr(&a, "name").unwrap_or("Capa").into(),
-                        visible: attr(&a, "visible") != Some("false"),
-                        frames: Default::default(),
-                    });
-                }
-                "DOMFrame" => {
-                    let index = number(&a, "index", 0.)?;
-                    let exposure = number(&a, "duration", 1.)?;
-                    if index < 0.
-                        || index.fract() != 0.
-                        || index > 10000.
-                        || exposure < 1.
-                        || exposure.fract() != 0.
-                        || exposure > 10000.
-                    {
-                        return Err("Duración XFL no válida".into());
-                    }
-                    frame_index = index as usize;
-                    duration = exposure as usize;
-                    if frame_index + duration > 10000 || duration == 0 {
-                        return Err("Duración XFL no válida".into());
-                    }
-                    if attr(&a, "tweenType").is_some_and(|t| t != "none")
-                        || attr(&a, "soundName").is_some()
-                    {
-                        return Err(unsupported("interpolaciones o audio"));
-                    }
-                    marks.clear();
-                }
-                "DOMShape" => {
-                    in_shape = true;
-                    styles.clear();
-                    fill_styles.clear();
-                    fill_edges.clear();
-                    shape_strokes.clear();
-                    matrix = [1., 0., 0., 1., 0., 0.];
-                }
-                "Matrix" if in_shape => {
-                    matrix = [
-                        number(&a, "a", 1.)?,
-                        number(&a, "b", 0.)?,
-                        number(&a, "c", 0.)?,
-                        number(&a, "d", 1.)?,
-                        number(&a, "tx", 0.)?,
-                        number(&a, "ty", 0.)?,
-                    ];
-                }
-                "StrokeStyle" => {
-                    in_stroke = true;
-                    stroke_index = attr(&a, "index").unwrap_or("1").into();
-                    width = 1.;
-                    color = [0, 0, 0, 255];
-                }
-                "SolidStroke" => {
-                    width = number(&a, "weight", 1.)?;
-                }
-                "FillStyle" => {
-                    in_fill = true;
-                    fill_index = attr(&a, "index").unwrap_or("1").into();
-                    fill_color = [0, 0, 0, 255];
-                }
-                "SolidColor" if in_stroke => {
-                    color = parse_color(&a)?;
-                }
-                "SolidColor" if in_fill => {
-                    fill_color = parse_color(&a)?;
-                }
-                "Edge" => {
-                    if attr(&a, "cubics").is_some() {
-                        return Err(unsupported("codificación de curvas cúbicas XFL"));
-                    }
-                    let stroke = attr(&a, "strokeStyle").unwrap_or("0");
-                    let left = attr(&a, "fillStyle0").unwrap_or("0");
-                    let right = attr(&a, "fillStyle1").unwrap_or("0");
-                    for shape in editable_paths(attr(&a, "edges").unwrap_or(""))? {
-                        let map = |p: eframe::egui::Pos2| {
-                            eframe::egui::Pos2::new(
-                                matrix[0] * p.x + matrix[2] * p.y + matrix[4],
-                                matrix[1] * p.x + matrix[3] * p.y + matrix[5],
-                            )
-                        };
-                        let valid = shape
-                            .points
-                            .iter()
-                            .copied()
-                            .chain(
-                                shape
-                                    .nodes
-                                    .iter()
-                                    .flat_map(|n| [n.position, n.in_handle, n.out_handle]),
-                            )
-                            .all(|p| {
-                                let p = map(crate::vector::pos(p));
-                                p.x.is_finite()
-                                    && p.y.is_finite()
-                                    && p.x.abs() <= 1e7
-                                    && p.y.abs() <= 1e7
-                            });
-                        if !valid {
-                            return Err("Transformación XFL fuera de rango".into());
-                        }
-                        let mut shape = crate::vector::transform(&shape, |p| {
-                            eframe::egui::Pos2::new(
-                                matrix[0] * p.x + matrix[2] * p.y + matrix[4],
-                                matrix[1] * p.x + matrix[3] * p.y + matrix[5],
-                            )
-                        });
-                        let mut points: Vec<_> = crate::vector::flatten(&shape, 0.04)
-                            .into_iter()
-                            .map(crate::vector::xy)
-                            .collect();
-                        if stroke != "0" {
-                            let (width, color) = *styles
-                                .get(stroke)
-                                .ok_or("Estilo de trazo XFL desconocido")?;
-                            shape.width = width;
-                            shape.color = color;
-                            shape_strokes.push(shape);
-                        }
-                        if left != right {
-                            if right != "0" {
-                                fill_edges
-                                    .entry(right.into())
-                                    .or_default()
-                                    .push(points.clone());
-                            }
-                            if left != "0" {
-                                points.reverse();
-                                fill_edges.entry(left.into()).or_default().push(points);
-                            }
-                        }
-                    }
-                }
-
-                "Include"
-                | "DOMBitmapItem"
-                | "DOMSoundItem"
-                | "DOMVideoItem"
-                | "DOMOvalObject"
-                | "DOMRectangleObject"
-                | "DOMTLFText"
-                | "RaggedStroke"
-                | "StippleStroke"
-                | "HatchedStroke"
-                | "ActionScript"
-                | "DOMSymbolInstance"
-                | "DOMBitmapInstance"
-                | "DOMStaticText"
-                | "DOMDynamicText"
-                | "DOMInputText"
-                | "DOMGroup"
-                | "LinearGradient"
-                | "RadialGradient"
-                | "BitmapFill"
-                | "DOMVideoInstance"
-                | "DOMComponentInstance"
-                | "filters"
-                | "script" => {
-                    return Err(unsupported(
-                        "símbolos, imágenes, textos, grupos, efectos o scripts",
-                    ));
-                }
-                _ => {}
-            },
-            XmlEvent::EndElement { name } => match name.local_name.as_str() {
-                "StrokeStyle" => {
-                    styles.insert(stroke_index.clone(), (width, color));
-                    in_stroke = false;
-                }
-                "FillStyle" => {
-                    fill_styles.insert(fill_index.clone(), fill_color);
-                    in_fill = false;
-                }
-                "DOMShape" => {
-                    for (index, edges) in fill_edges.drain() {
-                        let color = *fill_styles
-                            .get(&index)
-                            .ok_or("Estilo de relleno XFL desconocido")?;
-                        marks.extend(join_fill_rings(edges, color)?);
-                    }
-                    marks.append(&mut shape_strokes);
-                    in_shape = false;
-                }
-                "DOMFrame" => {
-                    let layer = doc.layers.last_mut().ok_or("Fotograma sin capa")?;
-                    layer
-                        .frames
-                        .resize(frame_index + duration, Default::default());
-                    let drawing: crate::shared::SharedVec<Mark> = marks.clone().into();
-                    layer.options.keys.resize(layer.frames.len(), false);
-                    layer.options.keys[0] = true;
-                    layer.options.keys[frame_index] = true;
-                    for f in frame_index..frame_index + duration {
-                        layer.frames[f] = drawing.clone();
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
+    let mut doc = crate::xfl::import(bytes, &xml)?;
+    if stale || native.is_err() {
+        doc.extras.import_warnings.push(
+            "Metadatos LibreToon desactualizados o dañados: se ha importado el XFL visible".into(),
+        );
     }
-    if !root || timelines != 1 || doc.layers.is_empty() {
-        return Err("Documento XFL incompleto".into());
-    }
-    let count = doc
-        .layers
-        .iter()
-        .map(|l| l.frames.len())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    for l in &mut doc.layers {
-        l.frames.resize(count, Default::default());
-        l.options.keys.resize(count, false);
-        l.options.keys[0] = true;
-    }
-    doc.layers.reverse();
-    doc.validate()?;
     Ok(doc)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,10 +237,17 @@ mod tests {
         );
     }
     #[test]
-    fn refuses_unsupported_content() {
+    fn skips_unavailable_symbols_and_reports_them() {
         let x = "<DOMDocument width=\"960\" height=\"540\"><timelines><DOMTimeline><layers><DOMLayer><frames><DOMFrame><elements><DOMSymbolInstance/></elements></DOMFrame></frames></DOMLayer></layers></DOMTimeline></timelines></DOMDocument>";
         let b = crate::fla_zip::pack(&[("DOMDocument.xml", x.as_bytes().to_vec())]);
-        assert!(decode(&b).err().unwrap().contains("símbolos"));
+        let d = decode(&b).unwrap();
+        assert!(d.layers[0].frames[0].is_empty());
+        assert!(
+            d.extras
+                .import_warnings
+                .iter()
+                .any(|s| s.contains("Símbolo"))
+        );
     }
     #[test]
     fn quadratic_curve_and_hex_coordinates() {
@@ -539,7 +258,7 @@ mod tests {
     }
 }
 
-fn parse_color(a: &[OwnedAttribute]) -> Result<[u8; 4], String> {
+pub(crate) fn parse_color(a: &[OwnedAttribute]) -> Result<[u8; 4], String> {
     let hex = attr(a, "color")
         .unwrap_or("#000000")
         .trim_start_matches('#');
@@ -554,7 +273,10 @@ fn parse_color(a: &[OwnedAttribute]) -> Result<[u8; 4], String> {
     color[3] = (number(a, "alpha", 1.)?.clamp(0., 1.) * 255.).round() as u8;
     Ok(color)
 }
-fn join_fill_rings(mut edges: Vec<Vec<[f32; 2]>>, color: [u8; 4]) -> Result<Vec<Mark>, String> {
+pub(crate) fn join_fill_rings(
+    mut edges: Vec<Vec<[f32; 2]>>,
+    color: [u8; 4],
+) -> Result<Vec<Mark>, String> {
     let close =
         |a: [f32; 2], b: [f32; 2]| crate::vector::pos(a).distance(crate::vector::pos(b)) < 0.001;
     edges.retain(|p| p.len() > 1);
@@ -701,7 +423,13 @@ mod vector_format_tests {
             ("DOMDocument.xml", unsupported.into_bytes()),
             ("LIBRETOON/document.json", native),
         ]);
-        assert!(decode(&bytes).is_err());
+        let d = decode(&bytes).unwrap();
+        assert!(
+            d.extras
+                .import_warnings
+                .iter()
+                .any(|s| s.contains("desactualizados"))
+        );
     }
 }
 // XFL stores quadratic edges. Subdivide cubics until degree reduction is within
@@ -730,7 +458,7 @@ fn quadratic_edges(curve: crate::vector::Cubic, out: &mut String, depth: u32) {
         quadratic_edges(right, out, depth + 1);
     }
 }
-fn editable_paths(edges: &str) -> Result<Vec<Mark>, String> {
+pub(crate) fn editable_paths(edges: &str) -> Result<Vec<Mark>, String> {
     use crate::vector::{Cubic, pos, xy};
     let mut separated = String::new();
     for c in edges.chars() {
@@ -762,6 +490,9 @@ fn editable_paths(edges: &str) -> Result<Vec<Mark>, String> {
     while at < tokens.len() {
         let command = tokens[at];
         at += 1;
+        if command.starts_with('S') && command[1..].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
         let count = match command {
             "!" | "|" => 2,
             "[" | "]" => 4,
