@@ -487,3 +487,23 @@ fn adaptive_vector_deformation_tracks_continuous_field_without_rasterization() {
         }
     }
 }
+#[test]
+fn weight_paint_respects_locked_and_hidden_instances() {
+    let mut e = setup();
+    e.add_bone(Pos2::new(0., 50.), Pos2::new(100., 50.), None);
+    let id = e.rigging.bone.unwrap();
+    e.rigging.strength = 1.;
+    e.doc.layers[0].options.locked = true;
+    e.paint_rig_weights(Pos2::new(50., 50.), true, false);
+    assert_eq!(
+        e.doc.extras.rig.bindings[0].weight(Pos2::new(50., 50.), id),
+        1.
+    );
+    e.doc.layers[0].options.locked = false;
+    e.doc.layers[0].visible = false;
+    e.paint_rig_weights(Pos2::new(50., 50.), true, false);
+    assert_eq!(
+        e.doc.extras.rig.bindings[0].weight(Pos2::new(50., 50.), id),
+        1.
+    );
+}

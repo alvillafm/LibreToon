@@ -661,7 +661,13 @@ impl Editor {
             return;
         };
         let mut curve = self.doc.layers[l].options.tweens[index].curve.clone();
-        curve_controls(ui, &mut curve, &mut self.animation.ease_handle);
+        let span = &self.doc.layers[l].options.tweens[index];
+        timing_controls(
+            ui,
+            &mut curve,
+            &mut self.animation.ease_handle,
+            span.end - span.start + 1,
+        );
         if curve != self.doc.layers[l].options.tweens[index].curve {
             let ids = self.canvas.selected.clone();
             self.checkpoint();
@@ -672,13 +678,6 @@ impl Editor {
     }
 }
 
-pub fn curve_controls(
-    ui: &mut egui::Ui,
-    curve: &mut crate::animation::Curve,
-    handle: &mut Option<usize>,
-) {
-    timing_controls(ui, curve, handle, 24);
-}
 /// One dot per frame; the two horizontal handles control endpoint speed for
 /// translation, rotation, scale, bone angles and puppet pins alike.
 pub fn timing_controls(

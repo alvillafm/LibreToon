@@ -649,10 +649,11 @@ impl Editor {
                 .changed();
             let old_curve = c.animation.curve.clone();
             ui.collapsing("Camera motion · easing / path", |ui| {
-                crate::visual_controls::curve_controls(
+                crate::visual_controls::timing_controls(
                     ui,
                     &mut c.animation.curve,
                     &mut self.animation.ease_handle,
+                    c.duration,
                 )
             });
             changed |= old_curve != c.animation.curve;

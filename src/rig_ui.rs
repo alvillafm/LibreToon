@@ -300,6 +300,8 @@ impl Editor {
             return;
         };
         let poses = self.doc.extras.rig.poses(self.frame);
+        let available: std::collections::HashSet<_> =
+            self.rig_targets().iter().map(|t| t.track).collect();
         let indices: Vec<_> = self
             .doc
             .extras
@@ -307,7 +309,7 @@ impl Editor {
             .bindings
             .iter()
             .enumerate()
-            .filter(|(_, b)| bone.targets.contains(&b.target))
+            .filter(|(_, b)| bone.targets.contains(&b.target) && available.contains(&b.target))
             .map(|(i, _)| i)
             .collect();
         for i in indices {
@@ -421,8 +423,15 @@ impl Editor {
                 }
             } else {
                 let mut found = None;
-                for b in &self.doc.extras.rig.bindings {
-                    let deformer = Deformer::new(b, &poses, self.frame);
+                let targets = self.rig_targets();
+                for b in self
+                    .doc
+                    .extras
+                    .rig
+                    .bindings
+                    .iter()
+                    .filter(|b| targets.iter().any(|t| t.track == b.target))
+                {
                     for p in &b.pins {
                         let current = rig::point(
                             self.binding_delta(b),
@@ -432,7 +441,6 @@ impl Editor {
                             found = Some((b.target, p.id));
                         }
                     }
-                    let _ = deformer;
                 }
                 if let Some((target, id)) = found {
                     self.rigging.target = Some(target);
@@ -616,7 +624,15 @@ impl Editor {
                 }
             }
         } else {
-            for b in &self.doc.extras.rig.bindings {
+            let targets = self.rig_targets();
+            for b in self
+                .doc
+                .extras
+                .rig
+                .bindings
+                .iter()
+                .filter(|b| targets.iter().any(|t| t.track == b.target))
+            {
                 for pin in &b.pins {
                     let world = rig::point(
                         self.binding_delta(b),
@@ -927,7 +943,14 @@ impl Editor {
             let frames = self.doc.extras.rig.bones[index]
                 .keys
                 .get(current + 1)
-                .map_or(20, |next| next.frame - key.frame + 1);
+                .map_or(
+                    self.doc.layers[0]
+                        .frames
+                        .len()
+                        .saturating_sub(key.frame)
+                        .max(1),
+                    |next| next.frame - key.frame + 1,
+                );
             crate::visual_controls::timing_controls(
                 ui,
                 &mut curve,
@@ -1057,10 +1080,14 @@ impl Editor {
         if let Some(key) = pin.keys.get(current) {
             let mut curve = key.curve.clone();
             let old = curve.clone();
-            let frames = pin
-                .keys
-                .get(current + 1)
-                .map_or(20, |next| next.frame - key.frame + 1);
+            let frames = pin.keys.get(current + 1).map_or(
+                self.doc.layers[0]
+                    .frames
+                    .len()
+                    .saturating_sub(key.frame)
+                    .max(1),
+                |next| next.frame - key.frame + 1,
+            );
             crate::visual_controls::timing_controls(
                 ui,
                 &mut curve,
