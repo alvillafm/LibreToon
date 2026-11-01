@@ -82,9 +82,72 @@ fn startup_always_uses_home_and_many_documents_are_scrollable() {
     }
     assert_eq!(e.hub.tabs.len(), 30);
     assert!(width <= 1100.);
+    assert!(e.hub.tab_extent.0 > e.hub.tab_extent.1 * 3.);
     e.activate_document(0);
     assert!(!e.hub.home);
     e.hub.home = true;
+    assert_eq!(e.hub.tabs.len(), 30);
+}
+
+#[test]
+fn recovered_documents_are_lazy_and_home_stays_selected() {
+    let mut e = editor();
+    e.add_document(crate::fresh_document(), None);
+    e.checkpoint();
+    e.doc.layers[0].frames[0].push(ink());
+    e.recover();
+    e.add_document(crate::fresh_document(), None);
+    e.checkpoint();
+    e.doc.layers[0].name = "Segundo documento".into();
+    e.recover();
+    e.persist_documents();
+    drop(e);
+    let ctx = egui::Context::default();
+    let mut restored = Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+    assert!(restored.hub.home);
+    assert!(restored.hub.active.is_none());
+    assert_eq!(restored.hub.tabs.len(), 2);
+    assert!(restored.doc.layers[0].frames[0].is_empty());
+    restored.activate_document(0);
+    assert_eq!(restored.doc.layers[0].frames[0].len(), 1);
+    restored.activate_document(1);
+    assert_eq!(restored.doc.layers[0].name, "Segundo documento");
+}
+
+#[test]
+fn horizontal_wheel_reaches_documents_beyond_the_visible_tabs() {
+    let mut e = editor();
+    for _ in 0..30 {
+        e.add_document(crate::fresh_document(), None);
+    }
+    e.activate_document(0);
+    let ctx = egui::Context::default();
+    for i in 0..8 {
+        let events = if i >= 3 {
+            vec![
+                egui::Event::PointerMoved(Pos2::new(500., 20.)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    delta: Vec2::new(-300., 0.),
+                    modifiers: Default::default(),
+                },
+            ]
+        } else {
+            vec![]
+        };
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100., 740.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.document_tabs(ui),
+        );
+        out.textures_delta.clear();
+    }
+    assert!(e.hub.tab_offset > 100., "offset {}", e.hub.tab_offset);
     assert_eq!(e.hub.tabs.len(), 30);
 }
 
@@ -293,6 +356,7 @@ fn render_studio_review_images() {
     let mut e = editor();
     let ctx = egui::Context::default();
     crate::design::theme(&ctx);
+    crate::i18n::set_language(true);
     e.add_document(crate::fresh_document(), None);
     e.doc.layers[0].frames[0].push(crate::drawing::rounded_rectangle(
         Pos2::new(80., 80.),

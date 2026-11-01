@@ -344,7 +344,7 @@ impl Editor {
                 .iter()
                 .any(|(doc, _, _, editing)| *editing == id || references(&doc.layers))
     }
-    fn symbol_insert_allowed(&self, id: u64) -> bool {
+    pub(crate) fn symbol_insert_allowed(&self, id: u64) -> bool {
         let mut pending = vec![id];
         let mut seen = std::collections::HashSet::new();
         while let Some(id) = pending.pop() {

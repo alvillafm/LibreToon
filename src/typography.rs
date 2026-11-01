@@ -383,7 +383,10 @@ impl Editor {
                     ui.selectable_value(&mut spec.font, p.to_string_lossy().into_owned(), name);
                 }
             });
-        if ui.small_button("＋ Cargar fuente TTF / OTF").clicked() {
+        if ui
+            .small_button(crate::i18n::tr("＋ Cargar fuente TTF / OTF"))
+            .clicked()
+        {
             if let Some(p) = rfd::FileDialog::new()
                 .add_filter("Fuentes", &["ttf", "otf"])
                 .pick_file()
@@ -394,14 +397,14 @@ impl Editor {
         egui::Grid::new("text-metrics")
             .num_columns(2)
             .show(ui, |ui| {
-                ui.label("Tamaño");
+                ui.label(crate::i18n::tr("Tamaño"));
                 ui.add(
                     egui::DragValue::new(&mut spec.size)
                         .range(1. ..=2048.)
                         .suffix(" px"),
                 );
                 ui.end_row();
-                ui.label("Interlineado");
+                ui.label(crate::i18n::tr("Interlineado"));
                 ui.add(
                     egui::DragValue::new(&mut spec.line_height)
                         .range(0.1..=10.)
@@ -409,14 +412,14 @@ impl Editor {
                         .suffix(" ×"),
                 );
                 ui.end_row();
-                ui.label("Caracteres");
+                ui.label(crate::i18n::tr("Caracteres"));
                 ui.add(
                     egui::DragValue::new(&mut spec.letter_spacing)
                         .range(-100. ..=500.)
                         .suffix(" px"),
                 );
                 ui.end_row();
-                ui.label("Palabras");
+                ui.label(crate::i18n::tr("Palabras"));
                 ui.add(
                     egui::DragValue::new(&mut spec.word_spacing)
                         .range(-100. ..=500.)
@@ -426,7 +429,7 @@ impl Editor {
             });
         ui.horizontal(|ui| {
             for (i, label) in ["Izquierda", "Centro", "Derecha"].into_iter().enumerate() {
-                ui.selectable_value(&mut spec.align, i, label);
+                ui.selectable_value(&mut spec.align, i, crate::i18n::tr(label));
             }
         });
         crate::design::category(ui, "RELLENO");
@@ -451,7 +454,7 @@ impl Editor {
         if spec.outline {
             ui.add(
                 egui::Slider::new(&mut spec.outline_width, 0.1..=100.)
-                    .text("Grosor")
+                    .text(crate::i18n::tr("Grosor"))
                     .suffix(" px"),
             );
             edit_color(ui, &mut spec.outline_color);

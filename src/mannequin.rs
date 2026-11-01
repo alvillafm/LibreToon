@@ -112,7 +112,9 @@ impl Editor {
     pub fn mannequin_properties(&mut self, ui: &mut egui::Ui) {
         let Some(l) = self.mannequin_layer() else {
             crate::design::category(ui, "REFERENCIA");
-            ui.small("Haz clic en el lienzo para colocar un maniquí articulado.");
+            ui.small(crate::i18n::tr(
+                "Haz clic en el lienzo para colocar un maniquí articulado.",
+            ));
             if crate::design::button(
                 ui,
                 crate::design::Icon::Mannequin,
@@ -136,10 +138,10 @@ impl Editor {
         ui.add_enabled_ui(!self.doc.layers[l].options.locked,|ui|{
             crate::design::category(ui,"PROPORCIONES");
             ui.horizontal_wrapped(|ui|{for heads in [8,7,6,4,3]{ui.selectable_value(&mut model.heads,heads,format!("{heads} cabezas"));}});
-            ui.add(egui::Slider::new(&mut model.breadth,0.4..=2.).text("Complexión"));
-            ui.add(egui::Slider::new(&mut model.unit,8. ..=150.).text("Escala"));
+            ui.add(egui::Slider::new(&mut model.breadth,0.4..=2.).text(crate::i18n::tr("Complexión")));
+            ui.add(egui::Slider::new(&mut model.unit,8. ..=150.).text(crate::i18n::tr("Escala")));
             crate::design::category(ui,"POSE");
-            ui.small("Arrastra las articulaciones para posar. El centro de la cadera mueve todo el maniquí.");
+            ui.small(crate::i18n::tr("Arrastra las articulaciones para posar. El centro de la cadera mueve todo el maniquí."));
             if crate::design::button(ui,crate::design::Icon::Rotate,"Restablecer pose","Conservar posición y proporciones",false,true).clicked(){model.angles=Mannequin::default().angles;}
         });
         if model != original {
@@ -250,7 +252,14 @@ impl Editor {
             for i in [5, 6, 8, 9, 11, 12, 14, 15] {
                 let a = points[PARENTS[i]];
                 let b = points[i];
-                let w = unit * if i >= 11 { 0.34 } else { 0.25 };
+                let w = unit
+                    * if i >= 11 {
+                        if i == 11 || i == 14 { 0.43 } else { 0.31 }
+                    } else if i == 5 || i == 8 {
+                        0.35
+                    } else {
+                        0.25
+                    };
                 p.line_segment([a, b], Stroke::new(w + 2., black));
                 p.line_segment([a, b], Stroke::new(w, white));
                 let side = crate::canvas::rotate((b - a).normalized(), std::f32::consts::FRAC_PI_2)
@@ -276,6 +285,32 @@ impl Editor {
                     unit * 0.40,
                     unit * 0.52,
                     angles[3] + std::f32::consts::FRAC_PI_2,
+                ),
+                (
+                    points[6] + Vec2::angled(angles[6]) * unit * 0.18,
+                    unit * 0.19,
+                    unit * 0.31,
+                    angles[6] + std::f32::consts::FRAC_PI_2,
+                ),
+                (
+                    points[9] + Vec2::angled(angles[9]) * unit * 0.18,
+                    unit * 0.19,
+                    unit * 0.31,
+                    angles[9] + std::f32::consts::FRAC_PI_2,
+                ),
+                (
+                    points[12]
+                        + crate::canvas::rotate(egui::vec2(unit * 0.22, unit * 0.10), angles[0]),
+                    unit * 0.39,
+                    unit * 0.18,
+                    angles[0],
+                ),
+                (
+                    points[15]
+                        + crate::canvas::rotate(egui::vec2(unit * 0.22, unit * 0.10), angles[0]),
+                    unit * 0.39,
+                    unit * 0.18,
+                    angles[0],
                 ),
             ] {
                 let ring: Vec<_> = (0..32)

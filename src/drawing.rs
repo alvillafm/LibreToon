@@ -222,7 +222,7 @@ impl Editor {
             crate::design::category(ui, "GEOMETRÍA");
             ui.add(
                 egui::Slider::new(&mut self.drawing.radius, 0. ..=500.)
-                    .text("Radio de esquina")
+                    .text(crate::i18n::tr("Radio de esquina"))
                     .suffix(" px"),
             );
         }
@@ -262,9 +262,15 @@ impl Editor {
         }
         if matches!(self.tool, Tool::Airbrush | Tool::SketchBrush) {
             crate::design::category(ui, "TINTA");
-            ui.add(egui::Slider::new(&mut self.drawing.opacity, 0.01..=1.).text("Opacidad"));
+            ui.add(
+                egui::Slider::new(&mut self.drawing.opacity, 0.01..=1.)
+                    .text(crate::i18n::tr("Opacidad")),
+            );
             if self.tool == Tool::Airbrush {
-                ui.add(egui::Slider::new(&mut self.drawing.hardness, 0. ..=1.).text("Dureza"));
+                ui.add(
+                    egui::Slider::new(&mut self.drawing.hardness, 0. ..=1.)
+                        .text(crate::i18n::tr("Dureza")),
+                );
             } else {
                 ui.colored_label(
                     Color32::from_rgb(170, 176, 196),

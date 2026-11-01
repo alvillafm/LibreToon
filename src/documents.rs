@@ -81,9 +81,12 @@ fn preview_frames(path: &std::path::Path) -> Result<PreviewFrames, String> {
     let samples = count.min(8);
     let ctx = egui::Context::default();
     let mut cache = Default::default();
-    let pixels = (0..samples)
+    let mut pixels: Vec<Vec<u8>> = (0..samples)
         .map(|i| crate::exporter::raster(&doc, i * count / samples, 192, 108, &ctx, &mut cache))
         .collect();
+    if pixels.iter().all(|p| p == &pixels[0]) {
+        pixels.truncate(1);
+    }
     Ok(PreviewFrames {
         pixels,
         duration: count as f64 / doc.fps as f64,
@@ -105,6 +108,8 @@ pub struct Hub {
     preview_clock: std::time::Instant,
     pub metadata_dirty: bool,
     live_cache: crate::paint::RenderCache,
+    pub tab_extent: (f32, f32),
+    pub tab_offset: f32,
 }
 fn catalogue_path() -> PathBuf {
     #[cfg(test)]
@@ -155,7 +160,6 @@ impl Default for Hub {
                 }
             }
         }
-        catalogue.recent.truncate(200);
         let (tx, requests) = mpsc::sync_channel::<PathBuf>(1);
         let (results, rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -182,10 +186,15 @@ impl Default for Hub {
             preview_clock: std::time::Instant::now(),
             metadata_dirty: false,
             live_cache: Default::default(),
+            tab_extent: (0., 0.),
+            tab_offset: 0.,
         }
     }
 }
 impl Hub {
+    pub fn has_sessions(&self) -> bool {
+        !self.catalogue.sessions.is_empty()
+    }
     pub fn dirty(&mut self) {
         if let Some(i) = self.active {
             self.tabs[i].record.dirty = true;
@@ -208,30 +217,19 @@ impl Hub {
     fn remember(&mut self, path: PathBuf) {
         self.catalogue.recent.retain(|p| p != &path);
         self.catalogue.recent.insert(0, path.clone());
-        self.catalogue.recent.truncate(200);
         self.previews.retain(|p| p.path != path);
     }
 }
 impl Editor {
     pub fn initialize_documents(&mut self, legacy_recovery: bool) {
         let records = std::mem::take(&mut self.hub.catalogue.sessions);
-        for r in records.into_iter().take(100) {
-            let doc = read_project(&r.recovery).or_else(|_| {
-                r.path
-                    .as_ref()
-                    .ok_or("No file".into())
-                    .and_then(|p| read_project(p))
+        for record in records {
+            self.hub.tabs.push(Tab {
+                record,
+                state: None,
             });
-            if let Ok(doc) = doc {
-                self.hub.tabs.push(Tab {
-                    state: Some(Session::new(doc, r.path.clone(), r.recovery.clone())),
-                    record: r,
-                });
-            }
         }
-        if !self.hub.tabs.is_empty() {
-            self.activate_document(0);
-        } else if legacy_recovery {
+        if self.hub.tabs.is_empty() && legacy_recovery {
             self.hub.tabs.push(Tab {
                 record: Record {
                     path: None,
@@ -265,6 +263,29 @@ impl Editor {
             return;
         }
         if self.hub.active != Some(i) {
+            if self.hub.tabs[i].state.is_none() {
+                let record = &self.hub.tabs[i].record;
+                let doc = read_project(&record.recovery).or_else(|_| {
+                    record
+                        .path
+                        .as_ref()
+                        .ok_or("No se encuentra el proyecto".into())
+                        .and_then(|p| read_project(p))
+                });
+                match doc {
+                    Ok(doc) => {
+                        self.hub.tabs[i].state = Some(Session::new(
+                            doc,
+                            record.path.clone(),
+                            record.recovery.clone(),
+                        ))
+                    }
+                    Err(e) => {
+                        self.status = format!("No se pudo recuperar el documento: {e}");
+                        return;
+                    }
+                }
+            }
             self.park_document();
             if let Some(mut session) = self.hub.tabs[i].state.take() {
                 session.exchange(self);
@@ -272,6 +293,10 @@ impl Editor {
             self.hub.active = Some(i);
         }
         self.hub.home = false;
+        self.drawing.scroll_to_tab = true;
+        self.style_transaction = false;
+        self.profile_transaction = false;
+        self.duration_editing = false;
         self.renaming_layer = None;
         self.document_settings = None;
     }
@@ -288,6 +313,7 @@ impl Editor {
             .unwrap_or_else(|| format!("Sin título {}", self.hub.tabs.len() + 1));
         let mut session = Session::new(doc, path.clone(), recovery.clone());
         session.exchange(self);
+        self.drawing.scroll_to_tab = true;
         self.hub.active = Some(self.hub.tabs.len());
         self.hub.home = false;
         self.hub.tabs.push(Tab {
@@ -348,7 +374,9 @@ impl Editor {
         if i >= self.hub.tabs.len() {
             return;
         }
-        if self.hub.active == Some(i) {
+        let was_active = self.hub.active == Some(i);
+        let was_home = self.hub.home;
+        if was_active {
             self.park_document();
         }
         let tab = self.hub.tabs.remove(i);
@@ -360,10 +388,10 @@ impl Editor {
                 *active -= 1;
             }
         }
-        if self.hub.active.is_none() && !self.hub.tabs.is_empty() {
+        if was_active && self.hub.active.is_none() && !self.hub.tabs.is_empty() {
             self.activate_document(i.min(self.hub.tabs.len() - 1));
         }
-        if self.hub.tabs.is_empty() {
+        if was_home || self.hub.tabs.is_empty() {
             self.hub.home = true;
         }
         self.hub.closing = None;
@@ -387,7 +415,7 @@ impl Editor {
                     )
                     .clicked();
                     ui.separator();
-                    egui::ScrollArea::horizontal()
+                    let scroll = egui::ScrollArea::horizontal()
                         .id_salt("open-document-tabs")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -452,11 +480,16 @@ impl Editor {
                                 }
                             });
                         });
+                    self.hub.tab_extent = (scroll.content_size.x, scroll.inner_rect.width());
+                    self.hub.tab_offset = scroll.state.clamped_offset().x;
                 });
             });
         self.drawing.scroll_to_tab = false;
         if home {
             self.finish_pending_pen();
+            if self.hub.active.is_some() {
+                self.recover();
+            }
             self.playing = false;
             self.hub.home = true;
         }
@@ -489,17 +522,17 @@ impl Editor {
                 .map(|t| t.record.name.clone())
                 .unwrap_or_default();
             egui::Modal::new(egui::Id::unique("close-document-confirm")).show(ctx, |ui| {
-                ui.heading("Guardar los cambios");
+                ui.heading(crate::i18n::tr("Guardar los cambios"));
                 ui.label(format!("«{name}» tiene cambios sin guardar."));
                 ui.horizontal(|ui| {
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(crate::i18n::tr("Cancelar")).clicked() {
                         self.hub.closing = None;
                         self.hub.quitting = false;
                     }
-                    if ui.button("Descartar").clicked() {
+                    if ui.button(crate::i18n::tr("Descartar")).clicked() {
                         self.close_document(i);
                     }
-                    if ui.button("Guardar y cerrar").clicked() {
+                    if ui.button(crate::i18n::tr("Guardar y cerrar")).clicked() {
                         self.activate_document(i);
                         self.save_project(false);
                         if !self.hub.tabs[i].record.dirty {
@@ -544,7 +577,7 @@ impl Editor {
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(24,26,32)).inner_margin(28.)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| { ui.heading(egui::RichText::new("Tu próximo movimiento").size(30.)); ui.label(egui::RichText::new("LIBRETOON  /  ESTUDIO DE ANIMACIÓN").small().color(crate::design::MUTED)); });
+                ui.vertical(|ui| { ui.heading(egui::RichText::new(crate::i18n::tr("Tu próximo movimiento")).size(30.)); ui.label(egui::RichText::new(crate::i18n::tr("LIBRETOON  /  ESTUDIO DE ANIMACIÓN")).small().color(crate::design::MUTED)); });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.add_document(crate::fresh_document(), None); }
                     if crate::design::button(ui, crate::design::Icon::Open, "Abrir", "Abrir proyecto", false, true).clicked() { self.open(); }
@@ -558,7 +591,7 @@ impl Editor {
                 });
             });
             ui.add_space(24.); crate::design::category(ui, "PROYECTOS");
-            ui.add(egui::TextEdit::singleline(&mut self.hub.search).hint_text("Buscar por nombre de archivo…").desired_width(320.));
+            ui.add(egui::TextEdit::singleline(&mut self.hub.search).hint_text(crate::i18n::tr("Buscar por nombre de archivo…")).desired_width(320.));
             ui.add_space(14.);
             let query = self.hub.search.to_lowercase();
             let paths: Vec<_> = self.hub.catalogue.recent.iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&query))).cloned().collect();
@@ -566,8 +599,8 @@ impl Editor {
             let width = (ui.available_width() - (columns - 1) as f32 * 14.) / columns as f32;
             let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
             let unsaved: Vec<_> = self.hub.tabs.iter().enumerate().filter(|(_,t)| (t.record.path.is_none() || t.record.dirty) && t.record.name.to_lowercase().contains(&query)).map(|(i,t)| {
-                let doc=if self.hub.active==Some(i) {self.project_document()} else {t.state.as_ref().unwrap().doc.clone()};
-                (i,t.record.name.clone(),doc)
+                let doc=if self.hub.active==Some(i) {Some(self.project_document())} else {t.state.as_ref().map(|s|s.doc.clone())};
+                (i,t.record.name.clone(),doc,t.record.recovery.clone())
             }).collect();
             let mut selected_tab=None;
             self.hub.live_cache.begin_frame();
@@ -575,15 +608,25 @@ impl Editor {
                 crate::design::category(ui,"EN CURSO");
                 egui::ScrollArea::vertical().id_salt("live-projects").max_height(440.).show_rows(ui,216.,unsaved.len().div_ceil(columns),|ui,rows| {
                     for row in rows {ui.horizontal(|ui| {
-                        for (i,name,doc) in unsaved.iter().skip(row*columns).take(columns) {
+                        for (i,name,doc,recovery) in unsaved.iter().skip(row*columns).take(columns) {
                             let (r,response)=ui.allocate_exact_size(Vec2::new(width,202.),egui::Sense::click());
                             ui.painter().rect_filled(r,10.,if response.hovered(){Color32::from_rgb(48,55,70)}else{Color32::from_rgb(34,37,46)});
                             let preview=Rect::from_min_max(r.min+Vec2::splat(8.),r.max-Vec2::new(8.,48.));
                             ui.painter().rect_filled(preview,5.,Color32::WHITE);
+                            if let Some(doc)=doc {
                             let count=animation::movie_count(doc).max(1);let f=(seconds*doc.fps as f64) as usize%count;
                             let view=crate::canvas::View{center:preview.center(),stage_center:Pos2::new(doc.width as f32/2.,doc.height as f32/2.),scale:(preview.width()/doc.width as f32).min(preview.height()/doc.height as f32),angle:0.};
                             let painter=ui.painter().with_clip_rect(preview);
                             for (_,_,m) in animation::resolve_movie(doc,f,true){crate::paint::draw(&painter,&m,view,false,false,Some(&mut self.hub.live_cache));}
+                            } else if let Some(preview_data)=self.hub.previews.iter().find(|p| &p.path==recovery) {
+                                if let Ok((textures,duration))=&preview_data.frames {
+                                    let index=((seconds%duration.max(0.01))/duration.max(0.01)*textures.len() as f64) as usize;
+                                    ui.painter().image(textures[index.min(textures.len()-1)].id(),preview,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.,1.)),Color32::WHITE);
+                                }
+                            } else {
+                                crate::design::draw(ui.painter(),preview,crate::design::Icon::Film,Color32::GRAY);
+                                if self.hub.pending.is_none() && self.hub.request.try_send(recovery.clone()).is_ok() {self.hub.pending=Some(recovery.clone());}
+                            }
                             caption(ui,r,name,width);
                             if response.clicked(){selected_tab=Some(*i);}
                         }
@@ -593,7 +636,7 @@ impl Editor {
             }
             if let Some(i)=selected_tab{self.activate_document(i);}
             let mut open = None;
-            if paths.is_empty() && unsaved.is_empty() { ui.add_space(50.); ui.label("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta."); }
+            if paths.is_empty() && unsaved.is_empty() { ui.add_space(50.); ui.label(crate::i18n::tr("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta.")); }
             let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
             egui::ScrollArea::vertical().show_rows(ui, 216., paths.len().div_ceil(columns), |ui, rows| {
                 for row in rows { ui.horizontal(|ui| {

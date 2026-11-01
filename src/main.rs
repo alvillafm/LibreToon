@@ -95,10 +95,15 @@ impl Editor {
             .unwrap_or_else(std::env::temp_dir)
             .join("Trazo")
             .join("recovery.json");
-        let recovered = std::fs::read(&recovery)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Document>(&b).ok())
-            .filter(|d| d.validate().is_ok());
+        let hub = documents::Hub::default();
+        let recovered = if hub.has_sessions() {
+            None
+        } else {
+            std::fs::read(&recovery)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Document>(&b).ok())
+                .filter(|d| d.validate().is_ok())
+        };
         let had_recovered = recovered.is_some();
         let status = if recovered.is_some() {
             "Sesión recuperada"
@@ -107,7 +112,7 @@ impl Editor {
         }
         .into();
         let mut editor = Self {
-            hub: Default::default(),
+            hub,
             drawing: Default::default(),
             feature: Default::default(),
             animation: Default::default(),
@@ -208,6 +213,7 @@ impl Editor {
             self.undo.pop()
         };
         if let Some(d) = entry {
+            self.hub.dirty();
             if redo {
                 self.undo.push(self.doc.clone())
             } else {
@@ -284,6 +290,9 @@ impl eframe::App for Editor {
         }
         if ctx.input(|i| i.viewport().close_requested()) {
             self.finish_pending_pen();
+            if self.hub.active.is_some() {
+                self.recover();
+            }
             self.persist_documents();
             if !self.hub.allow_quit && self.hub.tabs.iter().any(|t| t.record.dirty) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

@@ -156,3 +156,16 @@ Las pruebas cubren posición/giro/escala, fotograma de símbolo, aceleración, t
 Benchmark reproducible: `cargo test --release --locked benchmark_motion_resolution -- --ignored --nocapture`. Resuelve 200 rectángulos animados durante 200 iteraciones, sin teselación, GPU ni interfaz. El guardado FLA conserva las escenas editables en metadatos y concatena una proyección XFL de sus fotogramas; continúa siendo síncrono y puede ser costoso con películas grandes.
 
 Resultado local de una ejecución secuencial en perfil release predeterminado: **281,083 microsegundos por fotograma resuelto**. Este dato no mide FPS de la aplicación ni es comparable por sí solo con otros editores.
+
+
+## Inicio, documentos y referencias (noviembre de 2026)
+
+Cambiar de pestaña mueve el contexto completo de edición entre sesiones; el documento y el historial mantienen los contenedores SharedVec. Cada documento tiene recuperación independiente. El listado de proyectos contiene rutas explícitas y carpetas elegidas, sin recorrer el disco completo. Los fotogramas de las tarjetas guardadas se rasterizan fuera del hilo de interfaz con una petición pendiente como máximo. La caché conserva hasta 96 tarjetas de 8 imágenes de 192 × 108: aproximadamente 61 MiB de texeles como máximo, más la sobrecarga de texturas y la memoria temporal del proyecto que procesa el trabajador. Las tarjetas idénticas se reducen a un fotograma. No es un límite global de memoria de la aplicación.
+
+El maniquí tiene 16 articulaciones y una jerarquía de tamaño fijo. No recorre los fotogramas del proyecto para calcular la pose. Sus formas se generan solo en el lienzo y no forman parte del resolvedor de exportación. Las proporciones cambian longitudes, y las rotaciones conservan las longitudes de los huesos.
+
+Los glifos del texto se convierten en contornos al confirmar la edición. El renderizado posterior utiliza la caché geométrica existente, sin volver a cargar la fuente. Las operaciones booleanas sobre texto son atómicas o generan una proyección geométrica al aplicar máscaras. La composición y selección no destruyen el texto editable por fragmentos.
+
+El perfil de presión se limita a 128 puntos y el muestreo de la entrada a 2.048 muestras mediante reducción progresiva. El aerosol genera un máximo de 2.049 sellos por gesto; el grafito hasta cinco fragmentos por sello. La vista previa del aerosol depende de la longitud del gesto, y los documentos con muchas pinceladas translúcidas necesitan perfiles adicionales. No se afirma latencia constante ni una mejora global de FPS. La presión necesita un evento real del dispositivo o un controlador Wintab; no puede validarse físicamente sin tableta.
+
+Validación automatizada añadida: aislamiento de documentos/historial/vista/símbolos, pestañas, curvas redondeadas, persistencia de texto y referencias, exclusión de exportación de bocetos anidados, conservación de longitudes del maniquí, presión y renderizados de propiedades. `cargo test --locked render_studio_review_images -- --ignored --nocapture` genera imágenes PPM para revisión visual; `LIBRETOON_PREVIEWS` elige la carpeta de salida. Estos renderizados no sustituyen una sesión manual con Windows y tableta.

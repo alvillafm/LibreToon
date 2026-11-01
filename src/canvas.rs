@@ -926,6 +926,7 @@ impl Editor {
                         let before = (!*changed).then(|| self.doc.clone());
                         let did_change = self.erase_segment(*last, point);
                         if did_change && !*changed {
+                            self.hub.dirty();
                             self.undo.push(before.unwrap());
                             if self.undo.len() > 60 {
                                 self.undo.remove(0);

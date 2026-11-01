@@ -397,6 +397,39 @@ impl Editor {
                 self.fill_enabled = true;
             }
         }
+        if self.doc.layers[self.layer].options.mannequin.is_some()
+            && matches!(
+                tool,
+                Tool::Text
+                    | Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
+                    | Tool::VectorBrush
+                    | Tool::Pen
+                    | Tool::Rectangle
+                    | Tool::Line
+                    | Tool::Ellipse
+                    | Tool::Polygon
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
+                    | Tool::Bucket
+                    | Tool::Eraser
+            )
+        {
+            if let Some(l) = self
+                .doc
+                .layers
+                .iter()
+                .position(|l| l.options.mannequin.is_none() && l.visible && !l.options.locked)
+            {
+                self.layer = l;
+            }
+        }
+        if tool == Tool::SketchBrush {
+            self.color = Color32::from_rgb(125, 128, 139);
+            self.fill_color = self.color;
+        }
         self.drawing.text.editing = None;
         if tool == Tool::Ruler {
             self.studio.rulers = true;

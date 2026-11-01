@@ -426,6 +426,20 @@ impl Editor {
         {
             return;
         }
+        if self
+            .studio
+            .clipboard
+            .iter()
+            .filter_map(|m| m.style.instance.as_ref())
+            .any(|i| {
+                !self.doc.extras.symbols.iter().any(|s| s.id == i.symbol)
+                    || !self.symbol_insert_allowed(i.symbol)
+            })
+        {
+            self.status =
+                "No se pueden pegar símbolos ausentes o recursivos en este documento".into();
+            return;
+        }
         self.finish_pending_pen();
         self.checkpoint();
         let frame = &mut self.doc.layers[self.layer].frames[self.frame];
