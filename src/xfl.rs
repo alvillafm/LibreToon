@@ -108,6 +108,7 @@ fn parse(xml: &str) -> Result<Node, String> {
 struct Importer<'a> {
     archive: crate::fla_zip::Archive<'a>,
     names: HashMap<String, u64>,
+    kinds: HashMap<u64, String>,
     warnings: BTreeSet<String>,
     next_track: u64,
     total: usize,
@@ -153,7 +154,12 @@ impl Importer<'_> {
                     self.warn(format!("Símbolo no disponible: {name}"));
                     return Ok(vec![]);
                 };
-                let button = n.a("symbolType") == Some("button");
+                let kind = n
+                    .a("symbolType")
+                    .map(str::to_owned)
+                    .or_else(|| self.kinds.get(&id).cloned())
+                    .unwrap_or_else(|| "movie clip".into());
+                let button = kind == "button";
                 let mode = if button {
                     self.warn(
                         "Botones: se conserva el estado visual Up; se omiten interacción y código",
@@ -180,7 +186,7 @@ impl Importer<'_> {
                     mode,
                     first: integer(n, "firstFrame", 0, 9999)?,
                     born,
-                    clock: if n.a("symbolType") == Some("movie clip") {
+                    clock: if kind == "movie clip" {
                         SymbolClock::Independent
                     } else {
                         SymbolClock::Scene
@@ -653,6 +659,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     let mut imp = Importer {
         archive: crate::fla_zip::Archive::new(bytes)?,
         names: HashMap::new(),
+        kinds: HashMap::new(),
         warnings: BTreeSet::new(),
         next_track: 1,
         total: 0,
@@ -690,6 +697,8 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
                         }
                         let id = definitions.len() as u64 + 1;
                         imp.names.insert(name.clone(), id);
+                        imp.kinds
+                            .insert(id, n.a("symbolType").unwrap_or("movie clip").into());
                         definitions.push((id, name, n));
                     }
                     Ok(_) => imp.warn(format!("Recurso no válido: {href}")),
