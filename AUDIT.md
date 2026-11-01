@@ -42,6 +42,7 @@ No se ha recibido una colección de archivos reales del usuario. Las regresiones
 | Media | Entradas XML/proyectos y diagnósticos podían crecer demasiado antes de procesarse | Lectura de proyecto 256 MiB, entrada ZIP 64 MiB, biblioteca XML 128 MiB, límites de nodos/profundidad/entidades/atributos y avisos acotados |
 | Media | Texto completo de stderr de FFmpeg retenido sin límite | Se drena la tubería y solo se conservan los últimos 64 KiB; prueba de drenaje de 300.000 bytes |
 | Media | Consultar un fotograma fuera de rango o una capa vacía podía provocar un panic | Consulta defensiva y regresión de capa vacía/`usize::MAX` |
+| Media | Un movie clip anidado podía avanzar antes de aparecer su instancia padre | El reloj del hijo descuenta la entrada del padre; regresión de aparición tardía en escena |
 | Media | Un gesto de hueso/pin/pesos podía quedar activo al cambiar de herramienta, pestaña o deshacer | Se cierra o cancela el gesto en esas transiciones, sin reanudarlo al regresar |
 | Baja | Pruebas podían leer/escribir la recuperación de inicio del entorno general y alterar otras pruebas | Recuperación de inicio aislada por proceso/hilo durante pruebas |
 

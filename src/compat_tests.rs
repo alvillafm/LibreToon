@@ -571,3 +571,27 @@ fn legacy_native_json_with_fla_extension_remains_readable() {
     assert_eq!(crate::documents::read_project(&path).unwrap().fps, 37);
     std::fs::remove_file(path).unwrap();
 }
+#[test]
+fn nested_movie_clip_starts_when_its_parent_enters_the_scene() {
+    let child = timeline(
+        "Clip",
+        &(frame(0, 1, "", &shape("#FF0000")) + &frame(1, 1, "", &shape("#0000FF"))),
+    );
+    let parent = timeline(
+        "Parent",
+        &frame(0, 1, "", &inst("Clip", "symbolType=\"movie clip\"", "")),
+    );
+    let d = decode(archive(
+        &timeline(
+            "Main",
+            &frame(19, 2, "", &inst("Parent", "symbolType=\"graphic\"", "")),
+        ),
+        &[
+            ("Clip.xml", "Clip", child),
+            ("Parent.xml", "Parent", parent),
+        ],
+        "",
+    ));
+    assert!(crate::animation::movie_svg(&d, 19).contains("rgb(255,0,0)"));
+    assert!(crate::animation::movie_svg(&d, 20).contains("rgb(0,0,255)"));
+}

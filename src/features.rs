@@ -398,7 +398,15 @@ fn expand(
             .iter()
             .find(|b| b.target == mark.style.track && b.symbol == instance.symbol);
         let deform = binding.map(|b| crate::rig::Deformer::new(b, poses, parent_frame));
-        for (_, _, mut m) in resolve_internal(&sub, frame, depth + 1, guides, clock) {
+        for (_, _, mut m) in resolve_internal(
+            &sub,
+            frame,
+            depth + 1,
+            guides,
+            clock
+                .saturating_sub(instance.born)
+                .saturating_add(instance.first),
+        ) {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
             }
