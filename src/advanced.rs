@@ -61,8 +61,10 @@ impl Editor {
         for (parent, _, _, id) in self.feature.symbol_stack.iter().rev() {
             let mut next = parent.clone();
             next.extras.symbols = child.extras.symbols.clone();
+            next.extras.library = child.extras.library.clone();
             if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
                 s.layers = child.layers.clone();
+                s.rig = child.extras.rig.clone();
                 s.folders = child.extras.folders.clone();
                 s.perspective = child.extras.perspective.clone();
             }
@@ -82,14 +84,30 @@ impl Editor {
         let mut ids = self.canvas.selected.clone();
         ids.sort_unstable();
         ids.dedup();
-        let marks: Vec<_> = ids
+        let mut marks: Vec<_> = ids
             .iter()
-            .map(|&(l, m)| self.doc.layers[l].frames[self.frame][m].clone())
+            .map(|&(l, m)| crate::animation::marks(&self.doc.layers[l], self.frame)[m].clone())
             .collect();
+        for mark in &mut marks {
+            if let Some(i) = mark.style.instance.as_mut() {
+                i.first = i.first.saturating_add(self.frame.saturating_sub(i.born));
+                i.born = 0;
+            }
+        }
         let bounds = marks.iter().fold(Rect::NOTHING, |b, m| {
             b.union(crate::vector::control_bounds(m))
         });
-        let count = self.doc.layers[0].frames.len();
+        let selected_tracks = marks
+            .iter()
+            .map(|m| m.style.track)
+            .filter(|id| *id != 0)
+            .collect();
+        let rig = self
+            .doc
+            .extras
+            .rig
+            .snapshot_targets(&selected_tracks, self.frame);
+        let count = 1;
         let id = id();
         let number = self.doc.extras.symbols.len() + 1;
         self.checkpoint();
@@ -105,6 +123,8 @@ impl Editor {
             },
         };
         self.doc.extras.symbols.push(Symbol {
+            rig,
+            library_folder: None,
             folders: Default::default(),
             perspective: Default::default(),
             id,
@@ -125,6 +145,7 @@ impl Editor {
             ..Default::default()
         };
         mark.style.instance = Some(Instance {
+            clock: Default::default(),
             symbol: id,
             matrix: [1., 0., 0., 1., 0., 0.],
             mode: Playback::Loop,
@@ -150,12 +171,15 @@ impl Editor {
         let layers = symbol.layers.clone();
         let folders = symbol.folders.clone();
         let perspective = symbol.perspective.clone();
+        let rig = symbol.rig.clone();
         self.feature
             .symbol_stack
             .push((self.doc.clone(), self.frame, self.layer, id));
         self.animation.play_all = false;
         self.animation.picker = None;
         self.doc.layers = layers;
+        self.doc.extras.rig = rig;
+        self.rigging = Default::default();
         self.feature.selected_folder = None;
         self.feature.selected_camera = None;
         self.doc.extras.folders = folders;
@@ -173,12 +197,15 @@ impl Editor {
         self.finish_pending_pen();
         if let Some((mut parent, frame, layer, id)) = self.feature.symbol_stack.pop() {
             parent.extras.symbols = self.doc.extras.symbols.clone();
+            parent.extras.library = self.doc.extras.library.clone();
             if let Some(s) = parent.extras.symbols.iter_mut().find(|s| s.id == id) {
                 s.layers = self.doc.layers.clone();
+                s.rig = self.doc.extras.rig.clone();
                 s.folders = self.doc.extras.folders.clone();
                 s.perspective = self.doc.extras.perspective.clone();
             }
             self.doc = parent;
+            self.rigging = Default::default();
             self.feature.selected_folder = None;
             self.feature.selected_camera = None;
             self.style_selection.clear();
@@ -192,93 +219,9 @@ impl Editor {
         }
     }
     pub fn library_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading(tr("Biblioteca"));
-        ui.add_space(8.);
-        let mut edit = None;
-        let mut remove = None;
-        let mut insert = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.strong(tr("Símbolos"));
-            ui.separator();
-            let list = self.doc.extras.symbols.clone();
-            for symbol in &list {
-                ui.horizontal(|ui| {
-                    if self
-                        .symbol_thumbnail(ui, symbol.id, 0, egui::vec2(48., 40.))
-                        .double_clicked()
-                    {
-                        edit = Some(symbol.id);
-                    }
-                    let response = ui.selectable_label(
-                        self.feature.selected_symbol == Some(symbol.id),
-                        &symbol.name,
-                    );
-                    if response.clicked() {
-                        self.feature.selected_symbol = Some(symbol.id);
-                    }
-                    if response.double_clicked() {
-                        edit = Some(symbol.id);
-                    }
-                });
-            }
-            if let Some(id) = self.feature.selected_symbol {
-                if let Some(index) = self.doc.extras.symbols.iter().position(|s| s.id == id) {
-                    ui.separator();
-                    let mut name = self.doc.extras.symbols[index].name.clone();
-                    if ui.text_edit_singleline(&mut name).changed() {
-                        self.checkpoint();
-                        self.doc.extras.symbols[index].name = name;
-                        self.recover();
-                    }
-                    ui.horizontal(|ui| {
-                        if design::button(ui, Icon::Plus, "", tr("Insertar símbolo"), false, true)
-                            .clicked()
-                        {
-                            insert = Some(id);
-                        }
-                        if design::button(ui, Icon::Node, "", tr("Editar símbolo"), false, true)
-                            .clicked()
-                        {
-                            edit = Some(id);
-                        }
-                        if design::button(ui, Icon::Trash, "", tr("Eliminar símbolo"), false, true)
-                            .clicked()
-                        {
-                            remove = Some(id);
-                        }
-                    });
-                }
-            }
-            ui.add_space(20.);
-            ui.collapsing(tr("Imágenes"), |ui| {
-                ui.label(tr("Sin recursos"));
-            });
-            ui.collapsing(tr("Vídeos"), |ui| {
-                ui.label(tr("Sin recursos"));
-            });
-            ui.collapsing(tr("Sonidos"), |ui| {
-                ui.label(tr("Sin recursos"));
-            });
-        });
-        if let Some(id) = edit {
-            self.enter_symbol(id);
-        }
-        if let Some(id) = insert {
-            self.insert_symbol(id);
-        }
-        if let Some(id) = remove {
-            let used = self.symbol_in_use(id);
-            if used {
-                self.status = tr("El símbolo está en uso").into();
-            } else {
-                self.checkpoint();
-                self.doc.extras.symbols.retain(|s| s.id != id);
-                self.feature.selected_symbol = None;
-                self.recover();
-            }
-        }
+        self.asset_library_ui(ui);
     }
-    fn insert_symbol(&mut self, id: u64) {
+    pub(crate) fn insert_symbol(&mut self, id: u64) {
         if !self.symbol_insert_allowed(id) || self.doc.layers[self.layer].options.locked {
             return;
         }
@@ -305,6 +248,7 @@ impl Editor {
             ..Default::default()
         };
         m.style.instance = Some(Instance {
+            clock: Default::default(),
             symbol: id,
             matrix: [1., 0., 0., 1., 0., 0.],
             mode: Playback::Loop,
@@ -317,7 +261,7 @@ impl Editor {
         self.canvas.selected = vec![(self.layer, index)];
         self.recover();
     }
-    fn symbol_in_use(&self, id: u64) -> bool {
+    pub(crate) fn symbol_in_use(&self, id: u64) -> bool {
         let references = |layers: &[Layer]| {
             layers
                 .iter()
@@ -399,8 +343,26 @@ impl Editor {
                 .instance
                 .clone()
             {
-                ui.heading(tr("Símbolo gráfico"));
+                design::category(ui, "SÍMBOLO");
                 let mut settings = instance.clone();
+                egui::ComboBox::from_id_salt("symbol-clock")
+                    .selected_text(if settings.clock == SymbolClock::Scene {
+                        tr("Sincronizado con la escena")
+                    } else {
+                        tr("Línea de tiempo independiente")
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut settings.clock,
+                            SymbolClock::Scene,
+                            tr("Sincronizado con la escena"),
+                        );
+                        ui.selectable_value(
+                            &mut settings.clock,
+                            SymbolClock::Independent,
+                            tr("Línea de tiempo independiente"),
+                        );
+                    });
                 ui.horizontal(|ui| {
                     for (mode, icon, label) in [
                         (Playback::Loop, Icon::Loop, "Loop"),
@@ -1278,6 +1240,7 @@ mod tests {
         e.doc.extras.folders.clear();
         let mut mark = rect(0., [0, 0, 0, 255]);
         mark.style.instance = Some(Instance {
+            clock: Default::default(),
             symbol: 1,
             matrix: [1., 0., 0., 1., 0., 0.],
             mode: Playback::Loop,
@@ -1287,6 +1250,8 @@ mod tests {
         let mut l = e.doc.layers[0].clone();
         l.frames[0].push(mark);
         e.doc.extras.symbols.push(Symbol {
+            rig: Default::default(),
+            library_folder: None,
             folders: Default::default(),
             perspective: Default::default(),
             id: 1,
@@ -1313,6 +1278,7 @@ mod tests {
         e.doc.extras.symbols[1].layers[0].frames[0][0]
             .style
             .instance = Some(Instance {
+            clock: Default::default(),
             symbol: a,
             matrix: [1., 0., 0., 1., 0., 0.],
             mode: Playback::Loop,

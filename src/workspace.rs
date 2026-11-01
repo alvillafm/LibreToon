@@ -258,6 +258,7 @@ impl Editor {
                                 (Airbrush, SketchBrush),
                             ],
                         ),
+                        ("Rigging", vec![(Bones, Puppet)]),
                         ("TEXTO", vec![(Text, Text)]),
                         ("VECTORIAL", vec![(VectorBrush, Pen), (Node, Width)]),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),

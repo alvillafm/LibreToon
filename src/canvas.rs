@@ -7,6 +7,8 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, 
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
+    Bones,
+    Puppet,
     Text,
     Airbrush,
     SketchBrush,
@@ -45,6 +47,8 @@ pub enum Tool {
 impl Tool {
     pub fn name(self) -> &'static str {
         crate::i18n::tr(match self {
+            Self::Bones => "Huesos",
+            Self::Puppet => "Puppet",
             Self::Text => "Texto",
             Self::Airbrush => "Pincel difuminador",
             Self::SketchBrush => "Pincel borrador",
@@ -82,6 +86,8 @@ impl Tool {
     }
     pub fn icon(self) -> Icon {
         match self {
+            Self::Bones => Icon::Bones,
+            Self::Puppet => Icon::Puppet,
             Self::Text => Icon::Text,
             Self::Airbrush => Icon::Airbrush,
             Self::SketchBrush => Icon::SketchBrush,
@@ -445,7 +451,8 @@ impl Editor {
         let guide_handled = visual_handled
             | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
             | self.advanced_canvas_input(ui, area, view)
-            | self.mannequin_input(ui, area, view);
+            | self.mannequin_input(ui, area, view)
+            | self.rig_input(ui, area, view);
         let mut convert = false;
         response.context_menu(|ui| {
             if crate::design::button(
@@ -612,6 +619,8 @@ impl Editor {
                     | Tool::Perspective
                     | Tool::Camera
                     | Tool::Mannequin
+                    | Tool::Bones
+                    | Tool::Puppet
             ) || space
                 || middle_pressed)
             && (press_position
@@ -1430,9 +1439,18 @@ impl Editor {
                 }
             }
         }
-        let mut marks = crate::features::resolve(&self.doc, self.frame, false)
-            .into_iter()
-            .peekable();
+        let mut marks = crate::features::resolve_at(
+            &self.doc,
+            self.frame,
+            false,
+            if self.playing {
+                self.animation.clock
+            } else {
+                self.frame
+            },
+        )
+        .into_iter()
+        .peekable();
         for l in 0..self.doc.layers.len() {
             self.paint_mannequin_layer(&painter, view, l);
             while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
@@ -1505,6 +1523,7 @@ impl Editor {
         self.stage_mask(&painter, area, stage_view);
         self.advanced_overlays(&painter, area, view);
         self.visual_canvas_overlays(&painter, view, &state.selected);
+        self.rig_overlays(&painter, view);
         self.paint_guides(&painter, area, view);
         if self.tool == Tool::Width {
             for &(l, m) in &state.selected {

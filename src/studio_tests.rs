@@ -377,6 +377,22 @@ fn render_studio_review_images() {
         e.drawing.text.spec.size = 38.;
         e.commit_text();
     }
+    e.layer = 0;
+    e.canvas.selected = vec![(0, 0)];
+    e.convert_symbol();
+    e.add_bone(Pos2::new(90., 170.), Pos2::new(230., 170.), None);
+    let parent = e.rigging.bone;
+    e.add_bone(Pos2::new(230., 170.), Pos2::new(370., 170.), parent);
+    e.add_puppet_pin(0, 1, Pos2::new(120., 130.));
+    e.add_puppet_pin(0, 1, Pos2::new(320., 220.));
+    e.doc.extras.library.folders.push(crate::library::Folder {
+        id: 900,
+        name: "Personaje".into(),
+        parent: None,
+        color: [80, 190, 180, 255],
+        collapsed: false,
+    });
+    e.doc.extras.symbols[0].library_folder = Some(900);
     e.add_mannequin(Pos2::new(650., 280.));
     e.tool = Tool::Mannequin;
     let mut textures: HashMap<egui::TextureId, egui::ColorImage> = HashMap::new();
@@ -385,7 +401,13 @@ fn render_studio_review_images() {
         ("mannequin", false, Tool::Mannequin),
         ("text", false, Tool::Text),
         ("airbrush", false, Tool::Airbrush),
+        ("bones", false, Tool::Bones),
+        ("weights", false, Tool::Bones),
+        ("puppet", false, Tool::Puppet),
+        ("library", false, Tool::Select),
     ] {
+        e.rigging.paint = name == "weights";
+        e.feature.library = name == "library";
         e.hub.home = home;
         e.tool = tool;
         e.canvas.clear_selection();

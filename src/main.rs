@@ -17,9 +17,14 @@ mod fla;
 mod fla_zip;
 mod i18n;
 mod inspector;
+mod library;
 mod mannequin;
 mod paint;
 mod recovery;
+mod rig;
+#[cfg(test)]
+mod rig_tests;
+mod rig_ui;
 mod scenes;
 mod sequencer;
 mod shared;
@@ -41,6 +46,8 @@ use std::{
 };
 
 struct Editor {
+    rigging: rig_ui::RigEditor,
+    assets: library::LibraryState,
     hub: documents::Hub,
     drawing: drawing::Drawing,
     feature: features::FeatureState,
@@ -112,6 +119,8 @@ impl Editor {
         }
         .into();
         let mut editor = Self {
+            rigging: Default::default(),
+            assets: Default::default(),
             hub,
             drawing: Default::default(),
             feature: Default::default(),

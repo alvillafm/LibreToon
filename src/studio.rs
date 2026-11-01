@@ -45,6 +45,8 @@ pub const TOOLS: &[Tool] = &[
     Tool::Airbrush,
     Tool::SketchBrush,
     Tool::Mannequin,
+    Tool::Bones,
+    Tool::Puppet,
 ];
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Binding {
@@ -84,7 +86,7 @@ impl Default for Preferences {
     fn default() -> Self {
         let defaults = [
             "V", "", "L", "", "", "Q", "M", "B", "", "", "", "E", "K", "I", "Y", "P", "A", "W",
-            "N", "R", "O", "", "H", "Z", "", "", "S", "", "", "T", "", "", "",
+            "N", "R", "O", "", "H", "Z", "", "", "S", "", "", "T", "", "", "", "", "",
         ];
         Self {
             spanish: false,
