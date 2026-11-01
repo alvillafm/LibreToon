@@ -507,3 +507,76 @@ fn weight_paint_respects_locked_and_hidden_instances() {
         1.
     );
 }
+#[test]
+fn pointer_gestures_create_pose_and_move_puppet_pins() {
+    let mut e = setup();
+    let ctx = egui::Context::default();
+    let view = crate::canvas::View {
+        center: Pos2::ZERO,
+        stage_center: Pos2::ZERO,
+        angle: 0.,
+        scale: 1.,
+    };
+    let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(500.))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                e.rig_input(ui, ui.max_rect(), view);
+            },
+        );
+        out.textures_delta.clear();
+    };
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        pressed,
+        button: egui::PointerButton::Primary,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let drag = |e: &mut Editor, a: Pos2, b: Pos2| {
+        tick(e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+        tick(e, vec![egui::Event::PointerMoved(b)]);
+        tick(e, vec![button(b, false)]);
+    };
+    e.tool = Tool::Bones;
+    tick(&mut e, vec![]);
+    drag(&mut e, Pos2::new(10., 50.), Pos2::new(90., 50.));
+    assert_eq!(e.doc.extras.rig.bones.len(), 1);
+    assert_eq!(e.doc.extras.rig.bones[0].targets.len(), 2);
+    e.rigging.create = false;
+    drag(&mut e, Pos2::new(90., 50.), Pos2::new(10., 130.));
+    assert!((e.doc.extras.rig.bones[0].keys[0].angle - std::f32::consts::FRAC_PI_2).abs() < 0.01);
+    let id = e.rigging.bone.unwrap();
+    e.doc.extras.rig.set_bone_key(id, BoneKey::default());
+    e.tool = Tool::Puppet;
+    let pos = Pos2::new(50., 50.);
+    tick(
+        &mut e,
+        vec![egui::Event::PointerMoved(pos), button(pos, true)],
+    );
+    tick(&mut e, vec![button(pos, false)]);
+    assert_eq!(
+        e.doc
+            .extras
+            .rig
+            .bindings
+            .iter()
+            .map(|b| b.pins.len())
+            .sum::<usize>(),
+        1
+    );
+    drag(&mut e, pos, Pos2::new(80., 70.));
+    let b = e
+        .doc
+        .extras
+        .rig
+        .bindings
+        .iter()
+        .find(|b| !b.pins.is_empty())
+        .unwrap();
+    near(pin_value(&b.pins[0], 0), Pos2::new(80., 70.));
+    assert!(e.doc.validate().is_ok());
+}

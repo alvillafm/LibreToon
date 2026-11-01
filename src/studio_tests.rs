@@ -407,6 +407,7 @@ fn render_studio_review_images() {
         ("library", false, Tool::Select),
     ] {
         e.rigging.paint = name == "weights";
+        e.rigging.create = name == "bones";
         e.feature.library = name == "library";
         e.hub.home = home;
         e.tool = tool;

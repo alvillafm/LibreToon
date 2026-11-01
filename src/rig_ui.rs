@@ -890,9 +890,21 @@ impl Editor {
             ui.add(egui::Slider::new(&mut self.rigging.strength, 0.01..=1.).text(tr("Intensidad")));
             ui.small(tr("Clic añade · Ctrl quita · Mayús suaviza"));
             ui.horizontal(|ui| {
-                ui.colored_label(Color32::GRAY, "0 ■");
-                ui.label("──────");
-                ui.colored_label(Color32::WHITE, "■ 1");
+                ui.label("0");
+                let (r, _) = ui.allocate_exact_size(Vec2::new(140., 12.), egui::Sense::hover());
+                let mut mesh = egui::Mesh::default();
+                for (pos, color) in [
+                    (r.left_top(), Color32::BLACK),
+                    (r.right_top(), Color32::WHITE),
+                    (r.right_bottom(), Color32::WHITE),
+                    (r.left_bottom(), Color32::BLACK),
+                ] {
+                    mesh.colored_vertex(pos, color);
+                }
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(0, 2, 3);
+                ui.painter().add(mesh);
+                ui.label("1");
             });
         }
         if design::button(
