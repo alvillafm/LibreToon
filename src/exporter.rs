@@ -554,7 +554,7 @@ fn run_export(
     Ok(())
 }
 /// Rasterize the same tessellated geometry as the editor, with no UI or onion skin.
-fn raster(
+pub(crate) fn raster(
     doc: &Document,
     frame: usize,
     w: u32,

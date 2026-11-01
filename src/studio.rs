@@ -41,6 +41,10 @@ pub const TOOLS: &[Tool] = &[
     Tool::Symmetry,
     Tool::Perspective,
     Tool::Camera,
+    Tool::Text,
+    Tool::Airbrush,
+    Tool::SketchBrush,
+    Tool::Mannequin,
 ];
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Binding {
@@ -80,7 +84,7 @@ impl Default for Preferences {
     fn default() -> Self {
         let defaults = [
             "V", "", "L", "", "", "Q", "M", "B", "", "", "", "E", "K", "I", "Y", "P", "A", "W",
-            "N", "R", "O", "", "H", "Z", "", "", "S", "", "",
+            "N", "R", "O", "", "H", "Z", "", "", "S", "", "", "T", "", "", "",
         ];
         Self {
             spanish: false,
@@ -245,6 +249,8 @@ impl Editor {
                         Tool::FillBrush,
                         Tool::ShadeBrush,
                         Tool::LightBrush,
+                        Tool::Airbrush,
+                        Tool::SketchBrush,
                     ] {
                         let (r, row) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), 34.),
@@ -355,7 +361,12 @@ impl Editor {
             self.activate_tool(tool);
             if matches!(
                 tool,
-                Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
+                Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
             ) {
                 self.studio.brush = tool;
             }
@@ -408,7 +419,11 @@ impl Editor {
         }
     }
     pub fn paste_selection(&mut self) {
-        if self.studio.clipboard.is_empty() || !self.doc.layers[self.layer].visible {
+        if self.studio.clipboard.is_empty()
+            || !self.doc.layers[self.layer].visible
+            || self.doc.layers[self.layer].options.locked
+            || self.doc.layers[self.layer].options.mannequin.is_some()
+        {
             return;
         }
         self.finish_pending_pen();

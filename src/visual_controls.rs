@@ -565,6 +565,7 @@ impl Editor {
         if self.canvas.selected.is_empty() {
             return;
         }
+        crate::design::category(ui, "TRANSFORMACIÓN Y ANIMACIÓN");
         self.motion_transform_ui(ui);
         let has_motion = crate::animation::span(&self.doc.layers[self.layer], self.frame).is_some();
         ui.horizontal(|ui| {

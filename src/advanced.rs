@@ -367,6 +367,7 @@ impl Editor {
         true
     }
     pub fn gradient_ui(&mut self, ui: &mut egui::Ui) {
+        design::category(ui, "RELLENO Y DEGRADADO");
         let mut changed = ui
             .checkbox(&mut self.feature.gradient_on, tr("Degradado"))
             .changed();
@@ -586,7 +587,7 @@ impl Editor {
         self.recover();
     }
     pub fn camera_properties(&mut self, ui: &mut egui::Ui) {
-        ui.heading(tr("Cámara"));
+        design::category(ui, "CÁMARA");
         ui.horizontal(|ui| {
             if design::button(
                 ui,
@@ -743,6 +744,7 @@ impl Editor {
         }
     }
     fn perspective_properties(&mut self, ui: &mut egui::Ui) {
+        design::category(ui, "PERSPECTIVA");
         let mut p = self.doc.extras.perspective.clone();
         let mut changed = ui
             .checkbox(&mut p.enabled, tr("Mostrar perspectiva"))

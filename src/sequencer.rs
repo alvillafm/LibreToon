@@ -42,7 +42,9 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
 }
 impl Editor {
     pub fn timeline_edit(&mut self, action: usize) {
-        if self.doc.layers[self.layer].options.locked {
+        if self.doc.layers[self.layer].options.locked
+            || self.doc.layers[self.layer].options.mannequin.is_some()
+        {
             return;
         }
         self.finish_pending_pen();
@@ -601,7 +603,9 @@ impl Editor {
                                     painter.rect_filled(
                                         label,
                                         0.,
-                                        if l == self.layer {
+                                        if self.doc.layers[l].options.mannequin.is_some() {
+                                            Color32::from_rgb(69, 48, 91)
+                                        } else if l == self.layer {
                                             Color32::from_rgb(43, 65, 94)
                                         } else {
                                             Color32::from_gray(42)
@@ -737,7 +741,9 @@ impl Editor {
                                         );
                                         let key = self.doc.layers[l].key(f);
                                         let color =
-                                            if crate::animation::span(&self.doc.layers[l], f)
+                                            if self.doc.layers[l].options.mannequin.is_some() {
+                                                Color32::from_rgb(71, 49, 94)
+                                            } else if crate::animation::span(&self.doc.layers[l], f)
                                                 .is_some()
                                                 && f != self.frame
                                             {
@@ -756,7 +762,16 @@ impl Editor {
                                             Stroke::new(0.5, Color32::from_gray(30)),
                                             egui::StrokeKind::Inside,
                                         );
-                                        if key {
+                                        if self.doc.layers[l].options.mannequin.is_some() {
+                                            if f == 0 {
+                                                draw(
+                                                    &painter,
+                                                    rect.shrink(4.),
+                                                    Icon::Mannequin,
+                                                    crate::mannequin::COLOR,
+                                                );
+                                            }
+                                        } else if key {
                                             if self.doc.layers[l].frames[f].is_empty() {
                                                 painter.circle_stroke(
                                                     rect.center(),

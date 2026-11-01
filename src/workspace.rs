@@ -232,6 +232,12 @@ impl Editor {
                     });
                 });
             });
+        self.document_tabs(ui);
+        if self.hub.home {
+            self.home_ui(ui);
+            self.notice_ui(&ctx);
+            return;
+        }
         egui::Panel::left("tools")
             .exact_size(88.)
             .resizable(false)
@@ -244,12 +250,25 @@ impl Editor {
                             vec![(Select, Object), (Lasso, PolygonSelect), (Wand, Wand)],
                         ),
                         ("EDICIÓN", vec![(Transform, Mirror)]),
-                        ("PINTURA", vec![(Brush, Eraser), (Bucket, Eyedropper)]),
+                        (
+                            "PINTURA",
+                            vec![
+                                (Brush, Eraser),
+                                (Bucket, Eyedropper),
+                                (Airbrush, SketchBrush),
+                            ],
+                        ),
+                        ("TEXTO", vec![(Text, Text)]),
                         ("VECTORIAL", vec![(VectorBrush, Pen), (Node, Width)]),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),
                         (
                             "LIENZO",
-                            vec![(Pan, Zoom), (Ruler, Symmetry), (Perspective, Camera)],
+                            vec![
+                                (Pan, Zoom),
+                                (Ruler, Symmetry),
+                                (Perspective, Camera),
+                                (Mannequin, Mannequin),
+                            ],
                         ),
                     ] {
                         ui.add_space(7.);
@@ -482,20 +501,7 @@ impl Editor {
         self.notice_ui(&ctx);
     }
     fn new_document(&mut self) {
-        self.leave_symbol_context_for_document_change();
-        self.renaming_layer = None;
-        self.canvas.cancel_drafts();
-        self.draft = None;
-        self.checkpoint();
-        self.feature = crate::features::FeatureState::default();
-        self.animation = Default::default();
-        self.doc = crate::fresh_document();
-        self.clear_guides();
-        self.frame = 0;
-        self.layer = 0;
-        self.path = None;
-        self.playing = false;
-        self.recover();
+        self.add_document(crate::fresh_document(), None);
     }
 }
 
@@ -532,6 +538,7 @@ mod performance_tests {
 mod timeline_ui_tests {
     use super::*;
     fn draw_workspace(editor: &mut Editor, ctx: &egui::Context) -> usize {
+        editor.hub.home = false;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360., 860.))),
@@ -573,6 +580,7 @@ mod shortcut_regressions {
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let mut editor = Editor::new(&cc);
         editor.doc = Document::default();
+        editor.hub.home = false;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360., 860.))),

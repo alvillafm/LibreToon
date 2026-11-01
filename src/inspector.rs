@@ -238,6 +238,16 @@ impl Editor {
     pub fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);
+            design::category(ui, "HERRAMIENTA");
+            if self.tool == Tool::Text {
+                self.text_properties(ui);
+                return;
+            }
+            if self.tool == Tool::Mannequin {
+                self.mannequin_properties(ui);
+                return;
+            }
+            self.drawing_options(ui);
             self.tool_options_ui(ui);
             self.advanced_properties(ui);
             if self.canvas.selected.first().is_some_and(|&(l, m)| {
@@ -304,6 +314,8 @@ impl Editor {
             if matches!(
                 self.tool,
                 Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
                     | Tool::FillBrush
                     | Tool::ShadeBrush
                     | Tool::LightBrush
@@ -316,6 +328,7 @@ impl Editor {
                     | Tool::Polygon
                     | Tool::Eraser
             ) {
+                design::category(ui, "TRAZO");
                 ui.label(crate::i18n::tr("Grosor"));
                 let response = ui.add(egui::Slider::new(&mut self.width, 1.0..=80.).suffix(" px"));
                 if response.changed() && self.tool == Tool::Width {
@@ -331,12 +344,15 @@ impl Editor {
             if matches!(
                 self.tool,
                 Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
                     | Tool::FillBrush
                     | Tool::ShadeBrush
                     | Tool::LightBrush
                     | Tool::VectorBrush
             ) {
                 ui.add_space(10.);
+                design::category(ui, "SUAVIZADO");
                 ui.label(crate::i18n::tr("Suavizado"));
                 ui.add(
                     egui::Slider::new(&mut self.smoothing, 0.0..=1.)
@@ -344,6 +360,7 @@ impl Editor {
                 );
             }
             if self.tool == Tool::Bucket {
+                design::category(ui, "RELLENO");
                 ui.label(crate::i18n::tr("Cierre de huecos"));
                 egui::ComboBox::from_id_salt("bucket-gap")
                     .selected_text(self.gap.label())
@@ -380,7 +397,7 @@ impl Editor {
         });
     }
     pub(crate) fn width_profile_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(crate::i18n::tr("Perfil del contorno"));
+        design::category(ui, "PERFIL DEL CONTORNO");
         let previous = self.width_preset;
         let mut changed = false;
         let mut dragging = false;
