@@ -423,6 +423,23 @@ impl Editor {
                             Color32::WHITE,
                         );
                     }
+                    // Register the row above the thumbnail's click widget, so
+                    // dragging its preview behaves like dragging its name.
+                    // Keep the inline rename field interactive while editing.
+                    let response = if self
+                        .assets
+                        .rename
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == asset)
+                    {
+                        response
+                    } else {
+                        ui.interact(
+                            r,
+                            ui.scope_id().with(("library-row", row)),
+                            Sense::click_and_drag(),
+                        )
+                    };
                     if response.clicked() {
                         self.assets.selected = Some(asset);
                         if let Asset::Symbol(id) = asset {

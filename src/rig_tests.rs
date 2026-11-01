@@ -580,3 +580,69 @@ fn pointer_gestures_create_pose_and_move_puppet_pins() {
     near(pin_value(&b.pins[0], 0), Pos2::new(80., 70.));
     assert!(e.doc.validate().is_ok());
 }
+#[test]
+fn library_thumbnail_can_select_and_drag_a_symbol() {
+    let mut e = setup();
+    e.doc.extras.library.folders.push(crate::library::Folder {
+        id: 300,
+        name: "Assets".into(),
+        parent: None,
+        color: [80, 190, 180, 255],
+        collapsed: false,
+    });
+    let ctx = egui::Context::default();
+    let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(500., 600.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.asset_library_ui(ui),
+        );
+        out.textures_delta.clear();
+        out
+    };
+    let out = tick(&mut e, vec![]);
+    let label = out
+        .shapes
+        .iter()
+        .find_map(|s| {
+            if let egui::Shape::Text(t) = &s.shape {
+                (t.galley.job.text == "Symbol 1").then_some(t.pos)
+            } else {
+                None
+            }
+        })
+        .expect("symbol row label");
+    let p = Pos2::new(24., label.y + 8.);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        pressed,
+        button: egui::PointerButton::Primary,
+        modifiers: egui::Modifiers::NONE,
+    };
+    tick(&mut e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+    tick(&mut e, vec![button(p, false)]);
+    assert!(e.assets.selected == Some(crate::library::Asset::Symbol(1)));
+    let folder = out
+        .shapes
+        .iter()
+        .find_map(|s| {
+            if let egui::Shape::Text(t) = &s.shape {
+                (t.galley.job.text == "Assets").then_some(t.pos)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let q = Pos2::new(180., folder.y + 8.);
+    tick(&mut e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+    tick(
+        &mut e,
+        vec![egui::Event::PointerMoved(p + Vec2::new(20., 0.))],
+    );
+    tick(&mut e, vec![egui::Event::PointerMoved(q)]);
+    tick(&mut e, vec![button(q, false)]);
+    assert_eq!(e.doc.extras.symbols[0].library_folder, Some(300));
+}
