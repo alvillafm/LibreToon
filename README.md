@@ -1,69 +1,84 @@
+<p align="center"><img src="https://i.imgur.com/Y0voErz.png" align="center" width="200px"></p>
+
 # LibreToon
 
-LibreToon is a native 2D animation editor built with Rust and egui/eframe, inspired by Adobe Animate. It is an early development version.
+### Made by an animator, for animators.
 
-## Run and develop
+**LibreToon** is a free, open-source 2D animation software built entirely from scratch in Rust, without forks or existing application codebases.
 
-On Windows, open `Abrir-LibreToon.cmd` to run `target/release/libretoon.exe`. Build with `cargo build --release --locked` after source changes. `Desarrollar.cmd` runs the development workflow. Rust stable, MSVC and the Windows SDK are required to build.
+Inspired by the traditional workflow of Adobe Animate, LibreToon aims to combine familiar animation tools with modern features, greater flexibility, and creative freedom.
 
-## Project home, tabs and drawing references
+<p align="center"><img src="https://i.imgur.com/N5REuDb.jpeg" width="1000px"></p>
 
-The application always starts on **Home**. Home is permanent; document tabs can be closed and scroll horizontally when they exceed the window width. Each document keeps independent artwork, undo/redo, scene/symbol editing context, view, and recovery. Closing an edited document offers Save, Discard or Cancel. The previous document tabs are restored on the next launch while Home remains selected; each document loads when selected.
+### Built with AI. Driven by an animator.
 
-Home displays a gallery of opened/saved project paths and folders you add with **Folder**. It does not scan the entire disk. Visible saved cards load sampled animated previews on a single background worker; identical preview frames collapse to a static thumbnail. Open unsaved projects also appear as gallery cards. Symbol instances can be pasted only when their resources exist in the destination and the paste cannot create recursive references. The catalogue and session files are stored in `%LOCALAPPDATA%/LibreToon/`.
+LibreToon is a **vibe-coded project**, created by an animator. The idea is simple: instead of waiting for animation software to introduce the tools I've always wanted, I decided to build them myself, using AI-assisted coding to turn those ideas into reality.
 
-- **Rounded rectangles:** set the corner radius in tool properties. Rounded corners remain editable Bézier geometry.
-- **Text:** click the canvas to place text, type in Properties and choose Insert text. Click existing text with the Text tool to edit it and choose Apply changes. Supports installed TTF/OTF fonts, multiline text, size, line/character/word spacing, alignment, fill/gradient, outline color and width. Font outlines are saved as vectors, so display and export do not require the original font. Editing the wording again requires an available font. Complex script shaping, bidirectional text and color emoji are not implemented.
-- **Airbrush:** soft radial ink with hardness and opacity. This adds translucent paint; it does not blur existing artwork.
-- **Sketch brush:** deterministic rough gray graphite reference strokes, saved in the native project but excluded from video, GIF, SVG and the standard XFL projection, including inside symbols.
-- **Pen pressure:** the pen icon enables pressure-to-width for brushes. Real egui pen/touch pressure and Windows Wintab pressure are supported; mouse input has constant width. Wintab requires the tablet manufacturer's driver. No artificial pressure is inferred from pointer speed. Physical driver/tablet behavior still needs hardware validation.
-- **Mannequin:** choose the mannequin tool and click the canvas. Drag joints to pose and the pelvis to move it. The purple reference layer can be reordered, hidden, locked and removed. One mannequin per scene; 3, 4, 6, 7 and 8 head presets, build and scale. A fixed-size hierarchy keeps limb lengths; it is an editor reference and is never exported. It is not a rigging system for artwork.
+> **A note about Adobe Animate:** LibreToon follows a familiar animation-oriented workflow and supports `.FLA` files, but it is not an Adobe Animate clone. It focuses on 2D animation rather than interactive content or application development. ActionScript is not supported.
 
-Tool properties use labelled categories with separators. Home and all new tools have vector icons.
+---
 
-## Implemented
+## Features
 
-- Editable vector paths with Bézier anchors and handles; standard fill brush, vector brush, pen, shapes, eraser, paint bucket and variable stroke width.
-- Selection, partial fill selection, lasso, polygon selection, magic wand, object selection, free transform, mirror, and internal copy/cut/paste (`Ctrl+C/X/V`). Paste inserts into the active layer at the original coordinates.
-- Unified custom title bar with native minimize/maximize/close commands. Drag the empty header area to move the window; double-click it to maximize/restore.
-- Layers, frame-by-frame timeline, playback and onion skin with independent previous/next frame counts directly beside the onion icon.
-- Stage-only preview beside the rotate/fit controls. Artwork outside the stage remains in the document. Guides and editing overlays are not exported.
-- Rulers with draggable horizontal/vertical guides. Activate Ruler under Canvas, then drag from a ruler. Move guides with Ruler; drag outside the canvas to remove them. Units: px, cm, mm and inches, using configurable pixels per inch (default 96). Guides are session view settings, cleared on opening or creating a document.
-- Horizontal and vertical symmetry about the stage center, configurable under Symmetry. It affects committed brush strokes, shapes and pen paths; both axes generate four versions. It does not alter existing artwork.
-- Hold the paint brush button for 400 ms, or right-click it, to select standard, fill, shading and lighting brushes. Fill Brush clips ink to existing fills in the active frame/layer, including its preview. It adds no ink on an empty layer. Toon shading/lighting preserve contours and have independent per-region budgets, controlled by Toon levels (default 1, up to 16). A region at its limit is unchanged on subsequent strokes. Increasing the limit permits more passes. Counters survive cutting, undo and native save/load; explicit recoloring resets them. Blend, exposure and contrast modes offer adjustable strength. Results are committed when the stroke ends.
-- File > Document settings controls stage dimensions and FPS. File > Program preferences has the current Black theme, English (default), Spanish, and remappable tool shortcuts. Click a shortcut, then press a key combination; Escape cancels and Delete clears. Conflicting tool bindings are reassigned. Program commands such as copy/save/undo remain reserved. Preferences persist under `%LOCALAPPDATA%/LibreToon/preferences.json`.
-- Linear/radial gradients on selected fills and the paint bucket, with 2–32 color stops, per-stop opacity and editable start/end coordinates. Stroke start/end caps can independently be round, flat, square or triangular.
-- Gradient controls include draggable color stops, per-stop opacity, a rotation dial and on-stage start/end handles. Eyedropper preserves the selection and applies a sampled fill/gradient to it, mapping its coordinates to each target. Stroke caps use dedicated visual icon buttons.
-- Click the numbered scene breadcrumb to open Scene manager. Add scenes, double-click names to rename, drag the hand icon onto another name to reorder, and preview all scenes in export order. Deletion requires confirmation and keeps at least one scene. Video/GIF exports and SVG sequences use the ordered movie timeline. Symbols are shared across scenes; each scene keeps its own artwork, layers, folders, cameras and perspective guides.
-- Motion tweens interpolate position, shortest-path rotation, scale and a symbol instance’s selected frame. Transforming a held exposure at a later frame automatically creates a key and a span from the exposure’s first key. The motion icon also creates a span to the next populated key (or nine frames ahead). Editing inside a span materializes the evaluated pose as a new key. Purple timeline cells identify motion spans. Properties offers transform values, linear/ease-in/ease-out presets, a draggable timing graph and a Bézier path with on-stage handles. The trash icon removes the span. These are transform tweens, not path-topology morphs.
-- Perspective guides with a horizon, 1–3 draggable vanishing points and adjustable ray density, stored in the document.
-- Grouped timeline controls for layers, nested folders and keyframes. Drag layer names to reorder or onto folders to group; drop on the layer-name header to return to the root. Folder double-click collapses/expands, and its context menu renames it. Layer names rename on double-click. Visibility, locking and percentage opacity appear beside each layer. Clipping masks use the silhouette of the immediately underlying visible layer. Frame-number dragging scrubs; comma/period step backward/forward. Keyframes can be added, blanked, held longer, shortened or removed. New documents/layers start with a held blank keyframe across the initial duration.
-- Multiple cameras in an orange timeline row. Add them from the Camera tool. Cuts are adjacent, can be reordered by dragging, and have configurable durations, position, rotation and zoom. The white viewport stays fixed while the content follows the drag. Pan, Rotate and Zoom icon modes edit the selected camera and automatically record a local key at the current frame. Position, zoom and rotation interpolate between keys; the camera motion section controls easing and Bézier offsets. Playback, Stage-only preview and exports use the active cut.
-- Graphic symbols: select artwork and press F8 (or use Edit/the selection context menu). Double-click an instance with a selection tool to edit its own timeline; use Back to scene to return. The Properties/Library tabs manage instances and reusable definitions. Instances offer Loop, Play once and Single frame with a visual thumbnail frame picker. Playback modes use icon buttons; the Library displays a rendered preview of each symbol. Nested symbols are supported, without recursive references. Each symbol keeps its own layer folders. Editing contexts have separate undo histories. Library Images/Videos/Sounds sections reserve space for future media import; import is not implemented yet.
-- Undo/redo, asynchronous session recovery, native project metadata and limited FLA/XFL interchange.
+LibreToon combines traditional animation tools with features that go beyond what Adobe Animate currently offers.
 
-## Export
+### Drawing & Painting
+- **Classic Brush** — A familiar, traditional drawing experience inspired by Adobe Animate.
+- **Advanced Vector Brush** — Fully customizable strokes with editable curves, giving you much more control than standard brush presets.
+- **Symmetry & Mirror Tools** — Draw symmetrically without additional workarounds.
+- **Perspective Tool** — Create backgrounds and environments with perspective guides.
+- **Toon Shading & Lighting Brushes** — Dedicated tools for lighting and shading your artwork.
+- **Rulers & Guides** — For precise drawing and alignment.
+- **Independent Fill & Stroke Opacity** — Adjust both separately.
+- **Object Selection Tool** — Select and manipulate individual objects.
 
-File > Export video offers MP4 (H.264), SVG, MKV (H.264), AVI (MPEG-4) and MOV (ProRes 422 HQ). File > Export GIF offers palette size, dithering and loop settings. Choose a name and folder, dimensions, frame range and FPS. Export runs on a worker with progress and cancellation. SVG can export the current frame or a numbered frame sequence.
+### Animation & Scenes
+- **Scene Manager** — Rename, organize, and reorder scenes with drag-and-drop.
+- **Symbol Library** — Graphic symbols with looping, play-once, and single-frame playback modes.
+- **Clipping Masks** — Yes, actual clipping masks!
+- **Multiple Cameras** — Add as many cameras as you need and switch between shots without relying on camera keyframes.
+- **Bone Rigging** — Inspired by Unity's bone tools, with multiple symbols per bone and adjustable influence.
+- **Puppet Tool** — Inspired by After Effects, designed to preserve visual quality when deforming artwork.
+- **3D Poseable Mannequin** — An adjustable 3D reference figure with poseable joints.
 
-The bundled `assets/tools/ffmpeg.exe` handles video and GIF and is automatically detected when opening export. No download is needed. A different executable can be selected, or the bundled path restored, in the export dialog. Keep this folder with the application when packaging it. GIF is available only through Export GIF. See `assets/tools/THIRD_PARTY.md` for FFmpeg's origin and license. Output is silent, with a white background. Raster output is limited to 4096 × 4096; dimensions retain aspect ratio with letterboxing. YUV codecs pad odd dimensions to the next even value. GIF timing is quantized to hundredths of a second. Frame-rate conversion repeats/drops frames without interpolation. SVG remains vector output at document dimensions.
+### Export
+Export your animations to **GIF, MP4, AVI, MOV, MKV**, and other formats.
 
-## Interchange and limitations
+---
 
-FLA support is limited to implemented vector geometry, colors, layers and frames. Unsupported XFL content is rejected rather than silently discarded. Native metadata is checked against visible XFL so external edits are not hidden. There is no general compatibility promise for arbitrary Animate files, symbols, scripts, rigs or effects.
+## What's Coming Next?
 
-Selection and Boolean operations approximate fill boundaries; stroke subdivisions preserve Bézier handles and variable-width profiles. Selection, shading and fill operations currently have no spatial index. See `PERFORMANCE.md` for measurements and their limits.
+There is still a lot I want to add to LibreToon!
 
-Artwork bone rigging, shape/topology morphing, media import and general filters/effects remain future work.
+- **Concept Art Tool** — Manage references, pick colors directly from images, and more.
+- **Lip Sync Tool** — Support for phonemes, sounds, and multiple languages.
+- **Post-Processing Effects** — Additional visual effects and finishing tools.
+- **3D Transform Tool** — More possibilities for manipulating artwork in 3D space.
+- **Dedicated Video & Audio Tracks** — Work with video and sound in separate tracks instead of forcing everything into the traditional animation timeline.
+- **Improved Scene Editing** — More control over individual scenes and their contents.
+- **And much more!**
 
-Advanced document data is retained in LibreToon's native metadata inside FLA. Standard XFL output concatenates scenes and bakes motion, symbols, cameras, clipping and layer opacity; gradients use a 24 × 24 polygon approximation in that interoperability projection. Native FLA retains editable gradients/symbols and SVG retains gradient definitions. The standard XFL projection is not an Adobe symbol library or camera layer. Unsupported external XFL content continues to be rejected.
+---
 
-## Validate
+## Experimental Release — Expect Bugs!
 
-```powershell
-cargo fmt --all -- --check
-cargo test --locked
-cargo test --release --locked export_all_containers_with_ffmpeg -- --ignored --nocapture
-```
+**LibreToon is still in a very early, experimental stage of development.**
 
-The export integration test encodes all six formats and decodes raster formats to verify three colored frames and their order. It requires bundled FFmpeg or an executable in PATH. In a restricted environment, point TEMP, TMP and LOCALAPPDATA to isolated writable directories before running tests or the application.
+Some features may be incomplete, unstable, or behave unexpectedly. You will probably encounter bugs, crashes, and things that simply don't work as intended yet.
+
+This is an ongoing project, not a finished product. Please keep that in mind when trying it out!
+
+## Contributions & Feedback
+
+LibreToon is an open-source project, and **everyone is welcome to contribute**.
+
+Whether you're a developer, animator, or just someone interested in better 2D animation tools, your feedback is valuable.
+
+- Report bugs and unexpected behavior.
+- Suggest new features or improvements.
+- Contribute code and help improve existing tools.
+- Share your experience and ideas.
+
+Feel free to open an **Issue** or submit a **Pull Request** on GitHub.
+
+**LibreToon is just getting started. Let's see how far we can take it!**
