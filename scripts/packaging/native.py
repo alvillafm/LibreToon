@@ -172,7 +172,7 @@ def linux(dest):
     work.mkdir(parents=True, exist_ok=False)
     appdir = work / "LibreToon.AppDir"
     payload = appdir / "usr/lib/libretoon"
-    common(payload, candidate)
+    common(payload)
     desktop = "[Desktop Entry]\nType=Application\nName=LibreToon\nComment=2D animation editor\nExec=libretoon %F\nIcon=libretoon\nTerminal=false\nCategories=Graphics;2DGraphics;\n"
     (appdir / "usr/bin").mkdir(parents=True)
     (appdir / "usr/bin/libretoon").symlink_to("../lib/libretoon/libretoon")

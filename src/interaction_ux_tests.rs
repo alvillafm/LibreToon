@@ -840,3 +840,45 @@ fn ffmpeg_prompt_needs_consent_and_can_be_postponed_without_network() {
     assert!(!e.studio.ffmpeg_setup.prompt);
     assert!(e.studio.ffmpeg_setup.job.is_none());
 }
+
+#[test]
+fn export_quality_maximum_button_sets_100_without_starting_export_or_download() {
+    let mut e = editor();
+    let ctx = egui::Context::default();
+    e.open_export(false);
+    e.studio.ffmpeg_setup.prompt = false;
+    assert_eq!(e.studio.export.as_ref().unwrap().quality, 95);
+    let mut render = |events| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1366., 900.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.export_ui(ui.ctx()),
+        );
+        output.textures_delta.clear();
+        output
+    };
+    render(vec![]);
+    let out = render(vec![]);
+    let pos = out
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.job.text == crate::i18n::tr("Maximum") => {
+                Some(t.pos + t.galley.size() / 2.)
+            }
+            _ => None,
+        })
+        .unwrap();
+    render(vec![
+        egui::Event::PointerMoved(pos),
+        event(pos, true, egui::PointerButton::Primary, false),
+    ]);
+    render(vec![event(pos, false, egui::PointerButton::Primary, false)]);
+    drop(render);
+    assert_eq!(e.studio.export.as_ref().unwrap().quality, 100);
+    assert!(e.studio.export_job.is_none());
+    assert!(e.studio.ffmpeg_setup.job.is_none());
+}

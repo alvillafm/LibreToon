@@ -42,6 +42,7 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      LIBRETOON_TEST_FONT: ${{ github.workspace }}/assets/fonts/NotoSansCJK-Regular.ttc
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +65,15 @@ jobs:
       - name: Cache Rust compilation
         uses: Swatinem/rust-cache@v2
 
-      - name: Run application regression tests (no FFmpeg download)
+      - name: Install Python for packaging regression checks
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check lightweight package staging
+        run: python scripts/packaging/test_native.py
+
+      - name: Run application regression tests
         run: cargo test --locked
 
       - name: Build release
@@ -117,6 +126,7 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      LIBRETOON_TEST_FONT: ${{ github.workspace }}/assets/fonts/NotoSansCJK-Regular.ttc
       MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +166,11 @@ jobs:
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         uses: Swatinem/rust-cache@v2
 
-      - name: Run application regression tests (no FFmpeg download)
+      - name: Check lightweight package staging
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: python3 scripts/packaging/test_native.py
+
+      - name: Run application regression tests
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         run: cargo test --locked
 

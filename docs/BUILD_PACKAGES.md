@@ -51,3 +51,30 @@ by the installer workflow; no claim is made that old source-access limitations a
 
 No hosted run or push is initiated by editing this configuration. The first hosted
 packages still need installation checks on the target operating systems.
+
+## Native packaging and text-test fixes
+
+Linux and macOS use the same one-argument common(payload) staging function.
+A no-network regression executes the Linux AppImage/DEB staging path with mocked
+packaging tools and checks that assets/tools is excluded. It runs before Rust tests.
+This catches stale references left over from bundled-FFmpeg packaging.
+
+CI text tests use the existing licensed Noto Sans CJK collection through a test-only
+LIBRETOON_TEST_FONT setting. Production font discovery now scans the actual macOS
+system/user font directories, recursively finds Linux/user fonts, and supports TTC
+collections as well as TTF/OTF. Tests are not skipped when a runner lacks extra fonts.
+The step is simply named Run application regression tests; it never downloads FFmpeg.
+
+## Export quality
+
+The visible quality scale is now 1–100 (default 95), with a Maximum button.
+For MP4/MKV, 1–99 maps monotonically to H.264 CRF 40–10; 100 uses libx264rgb,
+RGB24 and CRF 0 to avoid both lossy compression and chroma subsampling.
+This lossless H.264 profile creates larger files and is not supported by all players.
+Use 99 for broadly compatible yuv420p output.
+
+AVI maps the scale to MPEG-4 quantizer 31–1. MOV maps it to the ProRes quantizer and,
+at 100, selects ProRes 4444 XQ with full 4:4:4 chroma. These formats do not promise
+exact RGB round trips. GIF remains palette-limited (up to 256 colors); SVG is vector.
+Maximum MP4/MKV is regression-tested by decoding two frames of one-pixel colored
+edges and comparing every RGB byte with LibreToon's renderer.

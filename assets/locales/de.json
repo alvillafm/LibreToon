@@ -1003,5 +1003,10 @@
   "FFmpeg executable": "FFmpeg executable",
   "Could not start FFmpeg. Configure it in the export dialog.": "Could not start FFmpeg. Configure it in the export dialog.",
   "Download cancelled": "Download cancelled",
-  "FFmpeg setup was interrupted": "FFmpeg setup was interrupted"
+  "FFmpeg setup was interrupted": "FFmpeg setup was interrupted",
+  "Export quality (1–100)": "Export quality (1–100)",
+  "Maximum": "Maximum",
+  "H.264 RGB · lossless": "H.264 RGB · lossless",
+  "Apple ProRes 4444 XQ": "Apple ProRes 4444 XQ",
+  "100 preserves RGB pixels without loss. Files are larger and some players may require quality 99.": "100 preserves RGB pixels without loss. Files are larger and some players may require quality 99."
 }

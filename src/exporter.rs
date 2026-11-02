@@ -57,6 +57,13 @@ impl ExportSettings {
         Ok(path)
     }
 }
+fn h264_crf(quality: u32) -> u32 {
+    if quality >= 100 {
+        0
+    } else {
+        40 - (quality.clamp(1, 99) - 1) * 30 / 98
+    }
+}
 fn hidden(_command: &mut Command) {
     #[cfg(windows)]
     {
@@ -113,7 +120,7 @@ impl Editor {
             } else {
                 self.doc.fps
             },
-            quality: 20,
+            quality: 95,
             loops: 0,
             colors: 256,
             dither: true,
@@ -349,13 +356,18 @@ impl Editor {
                         });
                         ui.end_row();
                     }
+                    if matches!(s.format,0|2|3|4) {
+                        ui.label(tr("Export quality (1–100)"));
+                        ui.horizontal(|ui|{
+                            ui.add(egui::Slider::new(&mut s.quality,1..=100));
+                            if ui.small_button(tr("Maximum")).clicked(){s.quality=100;}
+                        });
+                        ui.end_row();
+                    }
                     match s.format {
                         0 | 2 => {
-                            ui.label(tr("Calidad (CRF)"));
-                            ui.add(egui::Slider::new(&mut s.quality, 0..=40));
-                            ui.end_row();
                             ui.label(tr("Códec"));
-                            ui.label(crate::i18n::tr("H.264 / yuv420p"));
+                            ui.label(tr(if s.quality>=100 {"H.264 RGB · lossless"} else {"H.264 / yuv420p"}));
                             ui.end_row();
                         }
                         3 => {
@@ -365,7 +377,7 @@ impl Editor {
                         }
                         4 => {
                             ui.label(tr("Códec"));
-                            ui.label(crate::i18n::tr("Apple ProRes 422 HQ"));
+                            ui.label(tr(if s.quality>=100 {"Apple ProRes 4444 XQ"} else {"Apple ProRes 422 HQ"}));
                             ui.end_row();
                         }
                         5 => {
@@ -384,6 +396,9 @@ impl Editor {
                 });
             if s.format == 1 && !s.svg_sequence {
                 ui.label(tr("Exporta el fotograma actual como SVG vectorial."));
+            }
+            if matches!(s.format,0|2) && s.quality>=100 {
+                ui.label(tr("100 preserves RGB pixels without loss. Files are larger and some players may require quality 99."));
             }
             if s.format == 5 {
                 ui.label(tr(
@@ -562,13 +577,17 @@ fn run_export(
                 "-vf",
                 "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white",
                 "-c:v",
-                "libx264",
+                if s.quality >= 100 {
+                    "libx264rgb"
+                } else {
+                    "libx264"
+                },
                 "-pix_fmt",
-                "yuv420p",
+                if s.quality >= 100 { "rgb24" } else { "yuv420p" },
                 "-preset",
-                "medium",
+                "slow",
                 "-crf",
-                &s.quality.to_string(),
+                &h264_crf(s.quality).to_string(),
             ]);
             if s.format == 0 {
                 command.args(["-movflags", "+faststart"]);
@@ -581,7 +600,7 @@ fn run_export(
                 "-c:v",
                 "mpeg4",
                 "-q:v",
-                "3",
+                &(1 + (100 - s.quality.clamp(1, 100)) * 30 / 99).to_string(),
             ]);
         }
         4 => {
@@ -591,9 +610,15 @@ fn run_export(
                 "-c:v",
                 "prores_ks",
                 "-profile:v",
-                "3",
+                if s.quality >= 100 { "5" } else { "3" },
                 "-pix_fmt",
-                "yuv422p10le",
+                if s.quality >= 100 {
+                    "yuv444p10le"
+                } else {
+                    "yuv422p10le"
+                },
+                "-q:v",
+                &(1 + (100 - s.quality.clamp(1, 100)) * 30 / 99).to_string(),
             ]);
         }
         5 => {
@@ -922,6 +947,102 @@ mod tests {
         );
     }
     #[test]
+    fn quality_scale_increases_fidelity_and_keeps_lossless_at_100() {
+        assert_eq!(h264_crf(100), 0);
+        assert_eq!(h264_crf(1), 40);
+        assert!(h264_crf(95) < 20);
+        for q in 1..100 {
+            assert!(h264_crf(q + 1) <= h264_crf(q));
+        }
+    }
+    #[test]
+    #[ignore = "manual external FFmpeg test; verifies RGB pixels, not merely a quality label"]
+    fn maximum_mp4_and_mkv_preserve_every_rgb_pixel() {
+        let mut d = Document::default();
+        d.width = 96;
+        d.height = 64;
+        d.fps = 24;
+        for f in 0..2 {
+            for x in 4..92 {
+                let color = if (x + f) % 2 == 0 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                d.layers[0].frames[f].push(crate::document::Mark {
+                    points: vec![[x as f32, 4.], [x as f32 + 1., 60.]].into(),
+                    rectangle: true,
+                    closed: true,
+                    stroke: false,
+                    fill: Some(color),
+                    ..Default::default()
+                });
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut cache = crate::paint::RenderCache::default();
+        let expected: Vec<_> = (0..2)
+            .flat_map(|f| raster(&d, f, 96, 64, &ctx, &mut cache))
+            .collect();
+        let directory =
+            std::env::temp_dir().join(format!("libretoon-lossless-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for format in [0, 2] {
+            let settings = ExportSettings {
+                name: "rgb-lossless".into(),
+                folder: directory.to_string_lossy().into_owned(),
+                format,
+                first: 1,
+                last: 2,
+                width: 96,
+                height: 64,
+                fps: 24,
+                quality: 100,
+                loops: 0,
+                colors: 256,
+                dither: true,
+                svg_sequence: false,
+            };
+            let path = settings.target().unwrap();
+            run_export(
+                &d,
+                &settings,
+                0,
+                &path,
+                ffmpeg_path(""),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap();
+            let mut command = Command::new(ffmpeg_path(""));
+            hidden(&mut command);
+            let decoded = command
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args([
+                    "-fps_mode",
+                    "passthrough",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            assert_eq!(
+                decoded.stdout, expected,
+                "Maximum quality must preserve fine colored edges exactly"
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
     #[ignore]
     fn export_all_containers_with_ffmpeg() {
         let mut d = Document::default();
@@ -944,9 +1065,15 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("libretoon-export-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for format in 0..6 {
+        for (format, quality) in (0..6).flat_map(|f| {
+            if matches!(f, 0 | 2 | 3 | 4) {
+                vec![(f, 95), (f, 100)]
+            } else {
+                vec![(f, 95)]
+            }
+        }) {
             let s = ExportSettings {
-                name: "test".into(),
+                name: format!("test-quality-{quality}"),
                 folder: dir.to_string_lossy().into_owned(),
                 format,
                 first: 1,
@@ -954,7 +1081,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 fps: 24,
-                quality: 20,
+                quality,
                 loops: 0,
                 colors: 64,
                 dither: true,

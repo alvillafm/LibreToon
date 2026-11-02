@@ -310,7 +310,10 @@ fn validate(executable: &Path, scratch: &Path, cancel: &AtomicBool) -> Result<St
         return Err("The selected executable is not FFmpeg".into());
     }
     for (option, required) in [
-        ("-encoders", &["libx264", "mpeg4", "prores_ks", "gif"][..]),
+        (
+            "-encoders",
+            &["libx264", "libx264rgb", "mpeg4", "prores_ks", "gif"][..],
+        ),
         ("-muxers", &["mp4", "matroska", "avi", "mov", "gif"][..]),
         (
             "-filters",

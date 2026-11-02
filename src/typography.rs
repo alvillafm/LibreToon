@@ -87,7 +87,64 @@ impl Default for TextEditor {
         }
     }
 }
+fn fonts_in(roots: Vec<PathBuf>) -> Vec<(String, PathBuf)> {
+    let mut pending: Vec<_> = roots.into_iter().map(|p| (p, 0)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = vec![];
+    let mut visited = 0;
+    while let Some((root, depth)) = pending.pop() {
+        if let Ok(entries) = root.read_dir() {
+            for entry in entries.flatten() {
+                visited += 1;
+                if visited > 20_000 {
+                    break;
+                }
+                let p = entry.path();
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() && depth < 8 {
+                    pending.push((p, depth + 1));
+                } else if p.is_file()
+                    && p.extension().is_some_and(|e| {
+                        ["ttf", "otf", "ttc"]
+                            .iter()
+                            .any(|extension| e.eq_ignore_ascii_case(extension))
+                    })
+                {
+                    let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                    if seen.insert(canonical) {
+                        let name = p
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        out.push((name, p));
+                    }
+                }
+            }
+        }
+        if visited > 20_000 {
+            break;
+        }
+    }
+    out.sort_by(|a, b| {
+        a.0.to_lowercase()
+            .cmp(&b.0.to_lowercase())
+            .then(a.1.cmp(&b.1))
+    });
+    out
+}
 pub fn system_fonts() -> Vec<(String, PathBuf)> {
+    // Deterministic licensed fixture in CI, without overriding production discovery.
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("LIBRETOON_TEST_FONT").map(PathBuf::from) {
+        assert!(
+            path.is_file(),
+            "LIBRETOON_TEST_FONT must point to the checked-in fixture"
+        );
+        return vec![("Test font".into(), path)];
+    }
     let mut roots = vec![];
     if let Some(w) = std::env::var_os("WINDIR") {
         roots.push(PathBuf::from(w).join("Fonts"));
@@ -96,30 +153,24 @@ pub fn system_fonts() -> Vec<(String, PathBuf)> {
         roots.push(PathBuf::from(p).join("Microsoft/Windows/Fonts"));
     }
     roots.extend([
-        PathBuf::from("/usr/share/fonts/truetype/dejavu"),
-        PathBuf::from("/usr/share/fonts/truetype/liberation2"),
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+        PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/Library/Fonts"),
     ]);
-    let mut out = vec![];
-    for root in roots {
-        if let Ok(entries) = root.read_dir() {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
-                {
-                    let name = p
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    out.push((name, p));
-                }
-            }
-        }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        roots.extend([
+            home.join(".fonts"),
+            home.join(".local/share/fonts"),
+            home.join("Library/Fonts"),
+        ]);
     }
-    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-    out
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(PathBuf::from(data).join("fonts"));
+    }
+    fonts_in(roots)
 }
+
 struct Outline {
     contours: Vec<Vec<Node>>,
     current: Vec<Node>,
@@ -467,7 +518,7 @@ impl Editor {
             .clicked()
         {
             if let Some(p) = rfd::FileDialog::new()
-                .add_filter("Fuentes", &["ttf", "otf"])
+                .add_filter("Fuentes", &["ttf", "otf", "ttc"])
                 .pick_file()
             {
                 spec.font = p.to_string_lossy().into_owned();
@@ -711,5 +762,32 @@ impl Editor {
             self.commit_text();
             ui.ctx().request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod font_discovery_tests {
+    use super::*;
+    #[test]
+    fn nested_system_font_folders_and_collections_are_discovered_without_duplicate_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("libretoon-font-scan-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("Supplemental/Nested")).unwrap();
+        std::fs::write(
+            directory.join("Supplemental/Nested/Body.TTC"),
+            b"font path fixture",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("Supplemental/Latin.otf"),
+            b"font path fixture",
+        )
+        .unwrap();
+        std::fs::write(directory.join("README.txt"), b"not a font").unwrap();
+        let fonts = fonts_in(vec![directory.clone(), directory.join("Supplemental")]);
+        assert_eq!(fonts.len(), 2);
+        assert!(fonts.iter().any(|(name, _)| name == "Body"));
+        assert!(fonts.iter().any(|(name, _)| name == "Latin"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
