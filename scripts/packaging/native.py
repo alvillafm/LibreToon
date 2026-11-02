@@ -78,10 +78,12 @@ def mac(dest):
     work.mkdir(parents=True, exist_ok=False)
     app = work / "LibreToon.app"
     contents = app / "Contents"
-    payload = contents / "MacOS"
-    common(payload)
     resources = contents / "Resources"
-    resources.mkdir()
+    common(resources)
+    # Apple reserves MacOS for executable code; data belongs in Resources.
+    payload = contents / "MacOS"
+    payload.mkdir()
+    shutil.move(resources / "libretoon", payload / "libretoon")
     iconset = work / "LibreToon.iconset"
     iconset.mkdir()
     for size in [16, 32, 128, 256, 512]:
