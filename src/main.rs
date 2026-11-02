@@ -8,6 +8,8 @@ mod bucket;
 mod canvas;
 mod design;
 mod document;
+mod documents;
+mod drawing;
 mod editing;
 mod exporter;
 mod features;
@@ -15,13 +17,18 @@ mod fla;
 mod fla_zip;
 mod i18n;
 mod inspector;
+mod mannequin;
 mod paint;
 mod recovery;
 mod scenes;
 mod sequencer;
 mod shared;
 mod studio;
+#[cfg(test)]
+mod studio_tests;
+mod tablet;
 mod tools_editor;
+mod typography;
 mod vector;
 mod visual_controls;
 mod width;
@@ -34,6 +41,8 @@ use std::{
 };
 
 struct Editor {
+    hub: documents::Hub,
+    drawing: drawing::Drawing,
     feature: features::FeatureState,
     animation: animation::State,
     studio: studio::Studio,
@@ -86,17 +95,25 @@ impl Editor {
             .unwrap_or_else(std::env::temp_dir)
             .join("Trazo")
             .join("recovery.json");
-        let recovered = std::fs::read(&recovery)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Document>(&b).ok())
-            .filter(|d| d.validate().is_ok());
+        let hub = documents::Hub::default();
+        let recovered = if hub.has_sessions() {
+            None
+        } else {
+            std::fs::read(&recovery)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Document>(&b).ok())
+                .filter(|d| d.validate().is_ok())
+        };
+        let had_recovered = recovered.is_some();
         let status = if recovered.is_some() {
             "Sesión recuperada"
         } else {
             "Dibuja tu primer fotograma"
         }
         .into();
-        Self {
+        let mut editor = Self {
+            hub,
+            drawing: Default::default(),
             feature: Default::default(),
             animation: Default::default(),
             studio: studio::Studio::load(),
@@ -140,9 +157,12 @@ impl Editor {
             status,
             recovery,
             recovery_writer: recovery::RecoveryWriter::default(),
-        }
+        };
+        editor.initialize_documents(had_recovered);
+        editor
     }
     fn checkpoint(&mut self) {
+        self.hub.dirty();
         self.canvas.clear_selection();
         self.undo.push(self.doc.clone());
         if self.undo.len() > 60 {
@@ -151,6 +171,7 @@ impl Editor {
         self.redo.clear();
     }
     fn recover(&mut self) {
+        self.sync_text_styles();
         self.sync_exposures();
         self.recovery_writer
             .submit(self.recovery.clone(), self.project_document());
@@ -170,6 +191,7 @@ impl Editor {
                 Ok(()) => {
                     self.status = "Proyecto guardado".into();
                     self.path = Some(path);
+                    self.saved_document();
                 }
                 Err(e) => self.status = e,
             }
@@ -178,53 +200,10 @@ impl Editor {
     fn open(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Adobe Animate / LibreToon", &["fla"])
-            .add_filter("Proyectos Trazo anteriores", &["trazo"])
+            .add_filter("Proyectos anteriores", &["trazo"])
             .pick_file()
         {
-            let result = std::fs::read(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|b| {
-                    if b.starts_with(b"PK")
-                        || path
-                            .extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
-                    {
-                        fla::decode(&b)
-                    } else {
-                        serde_json::from_slice::<Document>(&b).map_err(|e| e.to_string())
-                    }
-                })
-                .and_then(|d| {
-                    d.validate()?;
-                    Ok(d)
-                });
-            match result {
-                Ok(d) => {
-                    self.leave_symbol_context_for_document_change();
-                    self.checkpoint();
-                    self.canvas.clear_selection();
-                    self.canvas.cancel_drafts();
-                    self.draft = None;
-                    self.feature = features::FeatureState::default();
-                    self.animation = Default::default();
-                    self.doc = d;
-                    self.frame = 0;
-                    self.layer = 0;
-                    self.path = if path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
-                    {
-                        Some(path)
-                    } else {
-                        None
-                    };
-                    self.playing = false;
-                    self.recover();
-                    self.clear_guides();
-                    self.status = "Proyecto abierto".into();
-                }
-                Err(e) => self.status = format!("No se pudo abrir: {e}"),
-            }
+            self.open_document_path(path);
         }
     }
     fn history(&mut self, redo: bool) {
@@ -234,6 +213,7 @@ impl Editor {
             self.undo.pop()
         };
         if let Some(d) = entry {
+            self.hub.dirty();
             if redo {
                 self.undo.push(self.doc.clone())
             } else {
@@ -275,16 +255,19 @@ fn write_document(path: &std::path::Path, doc: &Document) -> Result<(), String> 
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.drawing.pen.update(&ctx);
         if let Some(error) = self.recovery_writer.take_error() {
             self.status = format!("No se pudo recuperar sesión: {error}");
         }
-        if !self.studio.preferences_open
+        if !self.hub.home
+            && !self.studio.preferences_open
             && self.studio.export.is_none()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
         {
             self.save_project(false);
         }
-        if !self.studio.preferences_open
+        if !self.hub.home
+            && !self.studio.preferences_open
             && self.studio.export.is_none()
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
@@ -293,7 +276,8 @@ impl eframe::App for Editor {
                 self.history(false);
             }
         }
-        if !self.studio.preferences_open
+        if !self.hub.home
+            && !self.studio.preferences_open
             && self.studio.export.is_none()
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y))
@@ -306,6 +290,15 @@ impl eframe::App for Editor {
         }
         if ctx.input(|i| i.viewport().close_requested()) {
             self.finish_pending_pen();
+            if self.hub.active.is_some() {
+                self.recover();
+            }
+            self.persist_documents();
+            if !self.hub.allow_quit && self.hub.tabs.iter().any(|t| t.record.dirty) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hub.quitting = true;
+                self.hub.closing = self.hub.tabs.iter().position(|t| t.record.dirty);
+            }
         }
         if self.playing {
             let elapsed = self.tick.elapsed().as_secs_f64();
@@ -318,17 +311,25 @@ impl eframe::App for Editor {
             ctx.request_repaint_after(period.saturating_sub(self.tick.elapsed()));
         }
         crate::i18n::set_language(self.studio.prefs.spanish);
-        self.clipboard_shortcuts(&ctx);
+        if !self.hub.home {
+            self.clipboard_shortcuts(&ctx);
+        }
+        let was_home = self.hub.home;
         self.workspace(ui);
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(29, 30, 34))
-                    .inner_margin(0.),
-            )
-            .show(ui, |ui| {
-                self.canvas_ui(ui);
-            });
+        if was_home != self.hub.home {
+            ctx.request_repaint();
+        }
+        if !self.hub.home && !was_home {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(29, 30, 34))
+                        .inner_margin(0.),
+                )
+                .show(ui, |ui| {
+                    self.canvas_ui(ui);
+                });
+        }
     }
 }
 fn main() -> eframe::Result {

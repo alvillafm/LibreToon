@@ -176,7 +176,7 @@ pub fn split_area(mark: &Mark, cutter: &Polygon<f64>) -> (Vec<Mark>, Vec<Mark>) 
     if !vector::control_bounds(mark).intersects(bounds) {
         return (vec![mark.clone()], vec![]);
     }
-    if mark.style.instance.is_some() {
+    if mark.style.instance.is_some() || mark.style.text.is_some() {
         return (vec![], vec![mark.clone()]);
     }
     let mut outside = vec![];
@@ -255,6 +255,10 @@ pub fn crossing_parts(mark: &Mark, others: &[Mark]) -> Vec<Mark> {
 pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
     let mut result = existing.to_vec();
     for new in incoming {
+        if new.style.text.is_some() {
+            result.push(new);
+            continue;
+        }
         let Some(color) = new.fill else {
             result.push(new);
             continue;
@@ -263,7 +267,7 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
         let mut next = vec![];
         let mut touched = false;
         for old in &result {
-            if old.style.instance.is_some() {
+            if old.style.instance.is_some() || old.style.text.is_some() {
                 next.push(old.clone());
                 continue;
             }

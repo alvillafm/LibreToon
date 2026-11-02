@@ -6,6 +6,21 @@ LibreToon is a native 2D animation editor built with Rust and egui/eframe, inspi
 
 On Windows, open `Abrir-LibreToon.cmd` to run `target/release/libretoon.exe`. Build with `cargo build --release --locked` after source changes. `Desarrollar.cmd` runs the development workflow. Rust stable, MSVC and the Windows SDK are required to build.
 
+## Project home, tabs and drawing references
+
+The application always starts on **Home**. Home is permanent; document tabs can be closed and scroll horizontally when they exceed the window width. Each document keeps independent artwork, undo/redo, scene/symbol editing context, view, and recovery. Closing an edited document offers Save, Discard or Cancel. The previous document tabs are restored on the next launch while Home remains selected; each document loads when selected.
+
+Home displays a gallery of opened/saved project paths and folders you add with **Folder**. It does not scan the entire disk. Visible saved cards load sampled animated previews on a single background worker; identical preview frames collapse to a static thumbnail. Open unsaved projects also appear as gallery cards. Symbol instances can be pasted only when their resources exist in the destination and the paste cannot create recursive references. The catalogue and session files are stored in `%LOCALAPPDATA%/LibreToon/`.
+
+- **Rounded rectangles:** set the corner radius in tool properties. Rounded corners remain editable Bézier geometry.
+- **Text:** click the canvas to place text, type in Properties and choose Insert text. Click existing text with the Text tool to edit it and choose Apply changes. Supports installed TTF/OTF fonts, multiline text, size, line/character/word spacing, alignment, fill/gradient, outline color and width. Font outlines are saved as vectors, so display and export do not require the original font. Editing the wording again requires an available font. Complex script shaping, bidirectional text and color emoji are not implemented.
+- **Airbrush:** soft radial ink with hardness and opacity. This adds translucent paint; it does not blur existing artwork.
+- **Sketch brush:** deterministic rough gray graphite reference strokes, saved in the native project but excluded from video, GIF, SVG and the standard XFL projection, including inside symbols.
+- **Pen pressure:** the pen icon enables pressure-to-width for brushes. Real egui pen/touch pressure and Windows Wintab pressure are supported; mouse input has constant width. Wintab requires the tablet manufacturer's driver. No artificial pressure is inferred from pointer speed. Physical driver/tablet behavior still needs hardware validation.
+- **Mannequin:** choose the mannequin tool and click the canvas. Drag joints to pose and the pelvis to move it. The purple reference layer can be reordered, hidden, locked and removed. One mannequin per scene; 3, 4, 6, 7 and 8 head presets, build and scale. A fixed-size hierarchy keeps limb lengths; it is an editor reference and is never exported. It is not a rigging system for artwork.
+
+Tool properties use labelled categories with separators. Home and all new tools have vector icons.
+
 ## Implemented
 
 - Editable vector paths with Bézier anchors and handles; standard fill brush, vector brush, pen, shapes, eraser, paint bucket and variable stroke width.
@@ -39,7 +54,7 @@ FLA support is limited to implemented vector geometry, colors, layers and frames
 
 Selection and Boolean operations approximate fill boundaries; stroke subdivisions preserve Bézier handles and variable-width profiles. Selection, shading and fill operations currently have no spatial index. See `PERFORMANCE.md` for measurements and their limits.
 
-Bone rigging, shape/topology morphing, media import and general filters/effects remain future work.
+Artwork bone rigging, shape/topology morphing, media import and general filters/effects remain future work.
 
 Advanced document data is retained in LibreToon's native metadata inside FLA. Standard XFL output concatenates scenes and bakes motion, symbols, cameras, clipping and layer opacity; gradients use a 24 × 24 polygon approximation in that interoperability projection. Native FLA retains editable gradients/symbols and SVG retains gradient definitions. The standard XFL projection is not an Adobe symbol library or camera layer. Unsupported external XFL content continues to be rejected.
 

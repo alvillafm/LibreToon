@@ -7,6 +7,10 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, 
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
+    Text,
+    Airbrush,
+    SketchBrush,
+    Mannequin,
     #[default]
     Brush,
     VectorBrush,
@@ -41,6 +45,10 @@ pub enum Tool {
 impl Tool {
     pub fn name(self) -> &'static str {
         crate::i18n::tr(match self {
+            Self::Text => "Texto",
+            Self::Airbrush => "Pincel difuminador",
+            Self::SketchBrush => "Pincel borrador",
+            Self::Mannequin => "Maniquí",
             Self::Brush => "Pincel Estándar",
             Self::VectorBrush => "Pincel Vectorial",
             Self::FillBrush => "Pincel de relleno",
@@ -74,6 +82,10 @@ impl Tool {
     }
     pub fn icon(self) -> Icon {
         match self {
+            Self::Text => Icon::Text,
+            Self::Airbrush => Icon::Airbrush,
+            Self::SketchBrush => Icon::SketchBrush,
+            Self::Mannequin => Icon::Mannequin,
             Self::Brush => Icon::Brush,
             Self::VectorBrush => Icon::VectorBrush,
             Self::FillBrush => Icon::FillBrush,
@@ -260,7 +272,13 @@ impl Canvas {
     }
 }
 pub fn vertices(m: &Mark) -> Vec<Pos2> {
-    crate::vector::flatten(m, 0.1)
+    let mut points = crate::vector::flatten(m, 0.1);
+    if m.style.text.is_some() {
+        for ring in &m.holes {
+            points.extend(ring.iter().copied().map(crate::vector::pos));
+        }
+    }
+    points
 }
 fn handles(r: Rect) -> [Pos2; 8] {
     [
@@ -426,7 +444,8 @@ impl Editor {
         let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
         let guide_handled = visual_handled
             | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
-            | self.advanced_canvas_input(ui, area, view);
+            | self.advanced_canvas_input(ui, area, view)
+            | self.mannequin_input(ui, area, view);
         let mut convert = false;
         response.context_menu(|ui| {
             if crate::design::button(
@@ -587,7 +606,12 @@ impl Editor {
         if !guide_handled
             && (!matches!(
                 self.tool,
-                Tool::Ruler | Tool::Symmetry | Tool::Mirror | Tool::Perspective | Tool::Camera
+                Tool::Ruler
+                    | Tool::Symmetry
+                    | Tool::Mirror
+                    | Tool::Perspective
+                    | Tool::Camera
+                    | Tool::Mannequin
             ) || space
                 || middle_pressed)
             && (press_position
@@ -607,6 +631,12 @@ impl Editor {
                 view = self.camera_view(state.view(area));
                 state.pan += screen - view.screen(old);
                 view = self.camera_view(state.view(area));
+            } else if !self.playing
+                && self.tool == Tool::Text
+                && !self.doc.layers[self.layer].options.locked
+                && self.doc.layers[self.layer].options.mannequin.is_none()
+            {
+                self.text_at(world);
             } else if !self.playing && self.tool == Tool::Eyedropper {
                 self.sample_apply_at(&state.selected, world, 3. / view.scale);
             } else if !self.playing && self.tool == Tool::Wand {
@@ -633,6 +663,7 @@ impl Editor {
                 && self.tool == Tool::Eraser
                 && self.doc.layers[self.layer].visible
                 && !self.doc.layers[self.layer].options.locked
+                && self.doc.layers[self.layer].options.mannequin.is_none()
             {
                 state.clear_selection();
                 state.drag = Some(Drag::Erase {
@@ -654,12 +685,14 @@ impl Editor {
                 && self.tool == Tool::Pen
                 && self.doc.layers[self.layer].visible
                 && !self.doc.layers[self.layer].options.locked
+                && self.doc.layers[self.layer].options.mannequin.is_none()
             {
                 self.begin_pen(&mut state, world, view);
             } else if !self.playing
                 && self.tool == Tool::Bucket
                 && self.doc.layers[self.layer].visible
                 && !self.doc.layers[self.layer].options.locked
+                && self.doc.layers[self.layer].options.mannequin.is_none()
             {
                 self.bucket_at(&mut state, world);
             } else if !self.playing && self.tool == Tool::Width {
@@ -670,6 +703,8 @@ impl Editor {
                 && matches!(
                     self.tool,
                     Tool::Brush
+                        | Tool::Airbrush
+                        | Tool::SketchBrush
                         | Tool::FillBrush
                         | Tool::ShadeBrush
                         | Tool::LightBrush
@@ -681,12 +716,19 @@ impl Editor {
                 )
                 && self.doc.layers[self.layer].visible
                 && !self.doc.layers[self.layer].options.locked
+                && self.doc.layers[self.layer].options.mannequin.is_none()
                 && match self.tool {
-                    Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush => true,
+                    Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush => true,
                     Tool::VectorBrush | Tool::Line => self.stroke_enabled,
                     _ => self.fill_enabled || self.stroke_enabled,
                 }
             {
+                self.drawing.start(world);
                 self.draft = Some(Mark {
                     points: vec![[world.x, world.y]].into(),
                     width: self.width,
@@ -700,7 +742,12 @@ impl Editor {
                     },
                     color: if matches!(
                         self.tool,
-                        Tool::Brush | Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
+                        Tool::Brush
+                            | Tool::Airbrush
+                            | Tool::SketchBrush
+                            | Tool::FillBrush
+                            | Tool::ShadeBrush
+                            | Tool::LightBrush
                     ) {
                         self.fill_color.to_array()
                     } else {
@@ -879,6 +926,7 @@ impl Editor {
                         let before = (!*changed).then(|| self.doc.clone());
                         let did_change = self.erase_segment(*last, point);
                         if did_change && !*changed {
+                            self.hub.dirty();
                             self.undo.push(before.unwrap());
                             if self.undo.len() > 60 {
                                 self.undo.remove(0);
@@ -1075,13 +1123,13 @@ impl Editor {
                                 self.star_ratio,
                                 m,
                             );
-                        } else if m.rectangle {
-                            let p = crate::vector::xy(world);
-                            if m.points.len() == 1 {
-                                m.points.push(p);
-                            } else {
-                                m.points[1] = p;
-                            }
+                        } else if *tool == Tool::Rectangle {
+                            *m = crate::drawing::rounded_rectangle(
+                                smoother.last(),
+                                world,
+                                self.drawing.radius,
+                                m,
+                            );
                         } else {
                             let samples = ctx.input(|i| {
                                 let first = if pressed {
@@ -1119,12 +1167,14 @@ impl Editor {
                                 let p = crate::vector::xy(view.world(screen));
                                 if smoother.last().distance(crate::vector::pos(p)) > 0.08 {
                                     smoother.push(p, &mut m.points);
+                                    self.drawing.sample(crate::vector::pos(p));
                                 }
                             }
                         }
                     }
                     if released || !primary_down {
                         if let Some(mut m) = self.draft.take() {
+                            m.width_profile = self.drawing.profile(&m.width_profile);
                             let mut parts = vec![];
                             if matches!(
                                 *tool,
@@ -1137,9 +1187,18 @@ impl Editor {
                                 if !curves.is_empty() {
                                     m = crate::vector::from_cubics(&curves, &m);
                                 }
-                                if matches!(
+                                if matches!(*tool, Tool::Airbrush | Tool::SketchBrush) {
+                                    parts = crate::drawing::airbrush(
+                                        &m,
+                                        self.drawing.opacity,
+                                        self.drawing.hardness,
+                                        *tool == Tool::SketchBrush,
+                                    );
+                                } else if matches!(
                                     *tool,
                                     Tool::Brush
+                                        | Tool::Airbrush
+                                        | Tool::SketchBrush
                                         | Tool::FillBrush
                                         | Tool::ShadeBrush
                                         | Tool::LightBrush
@@ -1164,7 +1223,13 @@ impl Editor {
                                     self.fill_brush(parts);
                                 } else {
                                     let parts = self.prepare_style(parts);
-                                    self.commit_paint(self.layer, self.frame, parts);
+                                    if matches!(*tool, Tool::Airbrush | Tool::SketchBrush) {
+                                        self.materialize_motion(&[(self.layer, 0)]);
+                                        self.doc.layers[self.layer].frames[self.frame]
+                                            .extend(parts);
+                                    } else {
+                                        self.commit_paint(self.layer, self.frame, parts);
+                                    }
                                 }
                                 self.recover();
                             }
@@ -1327,6 +1392,8 @@ impl Editor {
             } else if matches!(
                 self.tool,
                 Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
                     | Tool::FillBrush
                     | Tool::ShadeBrush
                     | Tool::LightBrush
@@ -1363,18 +1430,27 @@ impl Editor {
                 }
             }
         }
-        for (l, m, mark) in crate::features::resolve(&self.doc, self.frame, false) {
-            paint_mark(
-                &painter,
-                &mark,
-                view,
-                false,
-                state.selected.contains(&(l, m)),
-                Some(&mut state.cache),
-            );
+        let mut marks = crate::features::resolve(&self.doc, self.frame, false)
+            .into_iter()
+            .peekable();
+        for l in 0..self.doc.layers.len() {
+            self.paint_mannequin_layer(&painter, view, l);
+            while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
+                let (layer, m, mark) = marks.next().unwrap();
+                paint_mark(
+                    &painter,
+                    &mark,
+                    view,
+                    false,
+                    state.selected.contains(&(layer, m)),
+                    Some(&mut state.cache),
+                );
+            }
         }
         if let Some(mark) = &self.draft {
-            let previews = self.symmetry_marks(vec![mark.clone()]);
+            let mut mark = mark.clone();
+            mark.width_profile = self.drawing.profile(&mark.width_profile);
+            let previews = self.symmetry_marks(vec![mark]);
             if matches!(
                 self.tool,
                 Tool::FillBrush | Tool::ShadeBrush | Tool::LightBrush
@@ -1407,6 +1483,17 @@ impl Editor {
                         for part in crate::features::clip_to(&ink, &mask) {
                             paint_mark(&painter, &part, view, false, false, None);
                         }
+                    }
+                }
+            } else if matches!(self.tool, Tool::Airbrush | Tool::SketchBrush) {
+                for preview in previews {
+                    for m in crate::drawing::airbrush(
+                        &preview,
+                        self.drawing.opacity,
+                        self.drawing.hardness,
+                        self.tool == Tool::SketchBrush,
+                    ) {
+                        paint_mark(&painter, &m, view, false, false, None);
                     }
                 }
             } else {
@@ -1566,6 +1653,8 @@ impl Editor {
             && matches!(
                 self.tool,
                 Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
                     | Tool::FillBrush
                     | Tool::ShadeBrush
                     | Tool::LightBrush

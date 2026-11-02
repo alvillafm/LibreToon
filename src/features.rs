@@ -119,6 +119,8 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    pub guide: bool,
+    pub text: Option<Box<crate::typography::TextSpec>>,
     pub track: u64,
     pub gradient: Option<Gradient>,
     pub shade: u8,
@@ -130,6 +132,7 @@ pub struct MarkStyle {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
+    pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
     pub locked: bool,
     pub opacity: f32,
@@ -140,6 +143,7 @@ pub struct LayerOptions {
 impl Default for LayerOptions {
     fn default() -> Self {
         Self {
+            mannequin: None,
             locked: false,
             tweens: Default::default(),
             opacity: 1.,
@@ -290,6 +294,38 @@ pub fn styled(polys: geo::MultiPolygon<f64>, color: [u8; 4], style: &MarkStyle) 
     marks
 }
 pub fn clip_to(m: &Mark, area: &geo::MultiPolygon<f64>) -> Vec<Mark> {
+    if m.style.text.is_some() {
+        let mut style = m.style.clone();
+        style.text = None;
+        let mut out = vec![];
+        if let Some(color) = m.fill {
+            out.extend(styled(
+                crate::vector::text_ink(m).intersection(area),
+                color,
+                &style,
+            ));
+        }
+        if m.stroke {
+            let mut line = m.clone();
+            line.style.text = None;
+            line.fill = None;
+            for ring in std::iter::once(crate::vector::flatten(m, 0.04)).chain(
+                m.holes
+                    .iter()
+                    .map(|r| r.iter().copied().map(crate::vector::pos).collect()),
+            ) {
+                line.nodes = Default::default();
+                line.holes = Default::default();
+                line.points = ring.into_iter().map(crate::vector::xy).collect();
+                out.extend(styled(
+                    crate::width::outline(&line).intersection(area),
+                    m.color,
+                    &style,
+                ));
+            }
+        }
+        return out;
+    }
     let mut out = vec![];
     for polygon in &area.0 {
         let (_, parts) = crate::editing::split_area(m, polygon);
@@ -297,6 +333,7 @@ pub fn clip_to(m: &Mark, area: &geo::MultiPolygon<f64>) -> Vec<Mark> {
     }
     out
 }
+
 pub fn affine(m: &Mark, matrix: [f32; 6]) -> Mark {
     crate::vector::transform(m, |p| {
         Pos2::new(
@@ -305,7 +342,17 @@ pub fn affine(m: &Mark, matrix: [f32; 6]) -> Mark {
         )
     })
 }
-fn expand(doc: &Document, mark: &Mark, frame: usize, depth: usize, out: &mut Vec<Mark>) {
+fn expand(
+    doc: &Document,
+    mark: &Mark,
+    frame: usize,
+    depth: usize,
+    out: &mut Vec<Mark>,
+    guides: bool,
+) {
+    if mark.style.guide && !guides {
+        return;
+    }
     if depth > 16 {
         return;
     }
@@ -323,7 +370,7 @@ fn expand(doc: &Document, mark: &Mark, frame: usize, depth: usize, out: &mut Vec
         let mut sub = doc.clone();
         sub.layers = symbol.layers.clone();
         sub.extras.cameras = Default::default();
-        for (_, _, m) in resolve_internal(&sub, frame, depth + 1) {
+        for (_, _, m) in resolve_internal(&sub, frame, depth + 1, guides) {
             out.push(affine(&m, instance.matrix));
         }
     } else {
@@ -340,7 +387,11 @@ pub fn ink(marks: &[Mark]) -> geo::MultiPolygon<f64> {
                 .as_ref()
                 .is_some_and(|g| g.stops.iter().any(|s| s.color[3] > 0))
         {
-            pieces.push(geo::MultiPolygon(vec![crate::vector::polygon(mark)]));
+            pieces.push(if mark.style.text.is_some() {
+                crate::vector::text_ink(mark)
+            } else {
+                geo::MultiPolygon(vec![crate::vector::polygon(mark)])
+            });
         }
         if mark.stroke && mark.color[3] > 0 {
             pieces.push(crate::width::outline(mark));
@@ -348,10 +399,18 @@ pub fn ink(marks: &[Mark]) -> geo::MultiPolygon<f64> {
     }
     geo::algorithm::bool_ops::unary_union(&pieces)
 }
-fn resolve_internal(doc: &Document, frame: usize, depth: usize) -> Vec<(usize, usize, Mark)> {
+fn resolve_internal(
+    doc: &Document,
+    frame: usize,
+    depth: usize,
+    guides: bool,
+) -> Vec<(usize, usize, Mark)> {
     let mut output = vec![];
     let mut below = vec![];
     for (l, layer) in doc.layers.iter().enumerate() {
+        if layer.options.mannequin.is_some() {
+            continue;
+        }
         if !layer.visible {
             below.clear();
             continue;
@@ -367,7 +426,7 @@ fn resolve_internal(doc: &Document, frame: usize, depth: usize) -> Vec<(usize, u
             .enumerate()
         {
             let mut expanded = vec![];
-            expand(doc, mark, frame, depth, &mut expanded);
+            expand(doc, mark, frame, depth, &mut expanded, guides);
             for original in expanded {
                 let parts = mask
                     .as_ref()
@@ -393,7 +452,18 @@ fn resolve_internal(doc: &Document, frame: usize, depth: usize) -> Vec<(usize, u
     output
 }
 pub fn resolve(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
-    let mut marks = resolve_internal(doc, frame, 0);
+    resolve_mode(doc, frame, camera, true)
+}
+pub fn resolve_export(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
+    resolve_mode(doc, frame, camera, false)
+}
+fn resolve_mode(
+    doc: &Document,
+    frame: usize,
+    camera: bool,
+    guides: bool,
+) -> Vec<(usize, usize, Mark)> {
+    let mut marks = resolve_internal(doc, frame, 0, guides);
     if camera {
         if let Some(c) = doc
             .extras
@@ -420,12 +490,12 @@ pub fn baked(doc: &Document) -> Document {
         && doc.layers.iter().all(|l| {
             l.options.tweens.is_empty()
                 && l.options.tweens.is_empty()
+                && l.options.mannequin.is_none()
                 && l.options.opacity == 1.
                 && !l.options.clip
-                && l.frames
-                    .iter()
-                    .flatten()
-                    .all(|m| m.style.gradient.is_none() && m.style.instance.is_none())
+                && l.frames.iter().flatten().all(|m| {
+                    !m.style.guide && m.style.gradient.is_none() && m.style.instance.is_none()
+                })
         })
     {
         return doc.clone();
@@ -441,7 +511,11 @@ pub fn baked(doc: &Document) -> Document {
         for (_, _, mark) in crate::animation::resolve_movie(doc, f, true) {
             if let Some(g) = &mark.style.gradient {
                 let bounds = crate::vector::control_bounds(&mark);
-                let source = geo::MultiPolygon(vec![crate::vector::polygon(&mark)]);
+                let source = if mark.style.text.is_some() {
+                    crate::vector::text_ink(&mark)
+                } else {
+                    geo::MultiPolygon(vec![crate::vector::polygon(&mark)])
+                };
                 for y in 0..24 {
                     for x in 0..24 {
                         let a = bounds.min
@@ -484,6 +558,15 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     }
     if doc.layers.is_empty() || doc.layers.len() > 100 {
         return Err("Invalid layers".into());
+    }
+    if doc
+        .layers
+        .iter()
+        .filter(|l| l.options.mannequin.is_some())
+        .count()
+        > 1
+    {
+        return Err("Only one mannequin per scene".into());
     }
     validate_resources(doc)?;
     crate::animation::validate(doc)?;
@@ -587,6 +670,9 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
     folders(&doc.extras.folders, &doc.layers)?;
     fn layers(layers: &[Layer], symbols: &[Symbol]) -> Result<(), String> {
         for layer in layers {
+            if layer.options.mannequin.as_ref().is_some_and(|m| !m.valid()) {
+                return Err("Invalid mannequin".into());
+            }
             if layer
                 .options
                 .tweens
@@ -605,6 +691,9 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
                 return Err("Invalid layer or exposure timeline".into());
             }
             for mark in layer.frames.iter().flatten() {
+                if mark.style.text.as_ref().is_some_and(|t| !t.valid()) {
+                    return Err("Invalid text".into());
+                }
                 if !mark.width.is_finite()
                     || mark.width <= 0.
                     || mark.width > 100.
@@ -717,7 +806,7 @@ pub fn svg(doc: &Document, frame: usize) -> String {
         doc.width, doc.height, doc.width, doc.height, doc.width, doc.height
     );
     let mut index = 0;
-    for (_, _, original) in resolve(doc, frame, true) {
+    for (_, _, original) in resolve_export(doc, frame, true) {
         for mark in crate::width::export_marks(&original) {
             let mut fill = mark
                 .fill

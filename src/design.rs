@@ -5,6 +5,12 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Home,
+    Text,
+    Airbrush,
+    SketchBrush,
+    Pressure,
+    Mannequin,
     Loop,
     Tween,
     CapRound,
@@ -137,6 +143,74 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::Home => {
+            path(&[(2., 9.), (10., 2.), (18., 9.)]);
+            path(&[
+                (4., 8.),
+                (4., 18.),
+                (8., 18.),
+                (8., 12.),
+                (12., 12.),
+                (12., 18.),
+                (16., 18.),
+                (16., 8.),
+            ]);
+        }
+        Icon::Text => {
+            line((3., 3.), (17., 3.));
+            line((10., 3.), (10., 18.));
+            line((6., 18.), (14., 18.));
+            line((3., 3.), (3., 6.));
+            line((17., 3.), (17., 6.));
+        }
+        Icon::Airbrush => {
+            path(&[
+                (4., 17.),
+                (8., 10.),
+                (13., 7.),
+                (10., 4.),
+                (7., 9.),
+                (2., 15.),
+            ]);
+            for (x, y) in [(14., 3.), (17., 2.), (17., 6.), (19., 4.), (15., 8.)] {
+                p.circle_filled(pt(x, y), 0.8, c);
+            }
+        }
+        Icon::SketchBrush => {
+            path(&[
+                (2., 18.),
+                (4., 12.),
+                (14., 2.),
+                (18., 6.),
+                (8., 16.),
+                (2., 18.),
+            ]);
+            line((5., 12.), (9., 16.));
+            line((11., 18.), (18., 18.));
+        }
+        Icon::Pressure => {
+            path(&[
+                (3., 15.),
+                (6., 10.),
+                (14., 2.),
+                (18., 6.),
+                (10., 14.),
+                (3., 15.),
+            ]);
+            line((3., 19.), (17., 19.));
+            line((10., 15.), (10., 18.));
+        }
+        Icon::Mannequin => {
+            p.circle_stroke(pt(10., 3.), 2.5, s);
+            line((10., 6.), (10., 12.));
+            line((4., 8.), (16., 8.));
+            line((10., 12.), (5., 19.));
+            line((10., 12.), (15., 19.));
+            for (x, y) in [(4., 8.), (16., 8.), (10., 12.)] {
+                p.circle_filled(pt(x, y), 1.5, c);
+            }
+        }
+
         Icon::Loop => {
             path(&[(16., 5.), (12., 2.), (5., 2.), (2., 6.), (2., 12.)]);
             path(&[(4., 15.), (8., 18.), (15., 18.), (18., 14.), (18., 8.)]);
@@ -151,6 +225,74 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         Icon::CapRound | Icon::CapFlat | Icon::CapSquare | Icon::CapTriangle => {
             p.line_segment([pt(2., 10.), pt(12., 10.)], Stroke::new(5., c));
             match icon {
+                Icon::Home => {
+                    path(&[(2., 9.), (10., 2.), (18., 9.)]);
+                    path(&[
+                        (4., 8.),
+                        (4., 18.),
+                        (8., 18.),
+                        (8., 12.),
+                        (12., 12.),
+                        (12., 18.),
+                        (16., 18.),
+                        (16., 8.),
+                    ]);
+                }
+                Icon::Text => {
+                    line((3., 3.), (17., 3.));
+                    line((10., 3.), (10., 18.));
+                    line((6., 18.), (14., 18.));
+                    line((3., 3.), (3., 6.));
+                    line((17., 3.), (17., 6.));
+                }
+                Icon::Airbrush => {
+                    path(&[
+                        (4., 17.),
+                        (8., 10.),
+                        (13., 7.),
+                        (10., 4.),
+                        (7., 9.),
+                        (2., 15.),
+                    ]);
+                    for (x, y) in [(14., 3.), (17., 2.), (17., 6.), (19., 4.), (15., 8.)] {
+                        p.circle_filled(pt(x, y), 0.8, c);
+                    }
+                }
+                Icon::SketchBrush => {
+                    path(&[
+                        (2., 18.),
+                        (4., 12.),
+                        (14., 2.),
+                        (18., 6.),
+                        (8., 16.),
+                        (2., 18.),
+                    ]);
+                    line((5., 12.), (9., 16.));
+                    line((11., 18.), (18., 18.));
+                }
+                Icon::Pressure => {
+                    path(&[
+                        (3., 15.),
+                        (6., 10.),
+                        (14., 2.),
+                        (18., 6.),
+                        (10., 14.),
+                        (3., 15.),
+                    ]);
+                    line((3., 19.), (17., 19.));
+                    line((10., 15.), (10., 18.));
+                }
+                Icon::Mannequin => {
+                    p.circle_stroke(pt(10., 3.), 2.5, s);
+                    line((10., 6.), (10., 12.));
+                    line((4., 8.), (16., 8.));
+                    line((10., 12.), (5., 19.));
+                    line((10., 12.), (15., 19.));
+                    for (x, y) in [(4., 8.), (16., 8.), (10., 12.)] {
+                        p.circle_filled(pt(x, y), 1.5, c);
+                    }
+                }
+
                 Icon::CapRound => {
                     p.circle_filled(pt(12., 10.), 4., c);
                 }
@@ -789,4 +931,16 @@ mod icon_tests {
             output.textures_delta.clear();
         }
     }
+}
+
+pub fn category(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(12.);
+    ui.label(
+        egui::RichText::new(crate::i18n::tr(title))
+            .size(10.)
+            .strong()
+            .color(MUTED),
+    );
+    ui.separator();
+    ui.add_space(4.);
 }

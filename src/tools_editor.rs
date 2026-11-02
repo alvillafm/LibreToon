@@ -76,6 +76,7 @@ impl Editor {
         self.recover();
     }
     pub fn selection_properties_ui(&mut self, ui: &mut egui::Ui) {
+        crate::design::category(ui, "SELECCIÓN");
         ui.strong(format!(
             "{} · {}",
             crate::i18n::tr("Selección"),
@@ -93,6 +94,7 @@ impl Editor {
             .iter()
             .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].stroke);
         if fill {
+            crate::design::category(ui, "RELLENO");
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::tr("Relleno"));
                 if ui.color_edit_button_srgba(&mut self.fill_color).changed() {
@@ -101,6 +103,7 @@ impl Editor {
             });
         }
         if stroke {
+            crate::design::category(ui, "CONTORNO");
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::tr("Contorno"));
                 if ui.color_edit_button_srgba(&mut self.color).changed() {
@@ -133,7 +136,7 @@ impl Editor {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.visible && !l.options.locked)
         {
             let mut marks = vec![];
             let mut layer_changed = false;
@@ -238,7 +241,7 @@ impl Editor {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.visible && !l.options.locked)
             .find_map(|(l, layer)| {
                 layer.frames[self.frame]
                     .iter()
@@ -370,6 +373,8 @@ impl Editor {
         if matches!(
             tool,
             Tool::Brush
+                | Tool::Airbrush
+                | Tool::SketchBrush
                 | Tool::FillBrush
                 | Tool::ShadeBrush
                 | Tool::LightBrush
@@ -392,6 +397,40 @@ impl Editor {
                 self.fill_enabled = true;
             }
         }
+        if self.doc.layers[self.layer].options.mannequin.is_some()
+            && matches!(
+                tool,
+                Tool::Text
+                    | Tool::Brush
+                    | Tool::Airbrush
+                    | Tool::SketchBrush
+                    | Tool::VectorBrush
+                    | Tool::Pen
+                    | Tool::Rectangle
+                    | Tool::Line
+                    | Tool::Ellipse
+                    | Tool::Polygon
+                    | Tool::FillBrush
+                    | Tool::ShadeBrush
+                    | Tool::LightBrush
+                    | Tool::Bucket
+                    | Tool::Eraser
+            )
+        {
+            if let Some(l) = self
+                .doc
+                .layers
+                .iter()
+                .position(|l| l.options.mannequin.is_none() && l.visible && !l.options.locked)
+            {
+                self.layer = l;
+            }
+        }
+        if tool == Tool::SketchBrush {
+            self.color = Color32::from_rgb(125, 128, 139);
+            self.fill_color = self.color;
+        }
+        self.drawing.text.editing = None;
         if tool == Tool::Ruler {
             self.studio.rulers = true;
         }
@@ -447,6 +486,10 @@ impl Editor {
         (id.0, id.1 + closest)
     }
     pub fn commit_paint(&mut self, layer: usize, frame: usize, marks: Vec<Mark>) {
+        if self.doc.layers[layer].options.mannequin.is_some() {
+            return;
+        }
+        self.materialize_motion(&[(layer, 0)]);
         let composed = crate::editing::compose(&self.doc.layers[layer].frames[frame], marks);
         self.doc.layers[layer].frames[frame] = composed.into();
     }

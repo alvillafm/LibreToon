@@ -184,7 +184,7 @@ pub fn movie_offset(doc: &Document, local: usize) -> usize {
 }
 pub fn resolve_movie(doc: &Document, f: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
     let (i, f) = locate(doc, f);
-    crate::features::resolve(&scene_doc(doc, i), f, camera)
+    crate::features::resolve_export(&scene_doc(doc, i), f, camera)
 }
 pub fn movie_svg(doc: &Document, f: usize) -> String {
     let (i, f) = locate(doc, f);
@@ -464,7 +464,10 @@ impl Editor {
     }
     pub fn create_motion(&mut self) {
         let l = self.layer;
-        if self.doc.layers[l].options.locked || self.doc.layers[l].frames[self.frame].is_empty() {
+        if self.doc.layers[l].options.locked
+            || self.doc.layers[l].options.mannequin.is_some()
+            || self.doc.layers[l].frames[self.frame].is_empty()
+        {
             return;
         }
         let ids = self.canvas.selected.clone();

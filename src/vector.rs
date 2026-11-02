@@ -113,6 +113,11 @@ pub fn control_bounds(mark: &Mark) -> Rect {
     for p in &mark.points {
         r.extend_with(pos(*p));
     }
+    for hole in &mark.holes {
+        for p in hole {
+            r.extend_with(pos(*p));
+        }
+    }
     for n in &mark.nodes {
         for p in [n.position, n.in_handle, n.out_handle] {
             r.extend_with(pos(p));
@@ -324,6 +329,9 @@ pub fn polygons_to_marks(polys: MultiPolygon<f64>, color: [u8; 4]) -> Vec<Mark> 
         .collect()
 }
 pub fn brush_fill(center: &Mark, color: [u8; 4]) -> Vec<Mark> {
+    if !center.width_profile.is_empty() {
+        return polygons_to_marks(crate::width::outline(center), color);
+    }
     let points = flatten(center, 0.06);
     let polys = if points.len() == 1 {
         geo::Point::new(points[0].x as f64, points[0].y as f64).buffer(center.width as f64 / 2.)
@@ -344,6 +352,15 @@ pub fn inside_ring(points: &[Pos2], p: Pos2) -> bool {
     inside
 }
 pub fn contains_fill(mark: &Mark, p: Pos2) -> bool {
+    if mark.style.text.is_some() {
+        let mut inside = inside_ring(&flatten(mark, 0.1), p);
+        for ring in &mark.holes {
+            if inside_ring(&ring.iter().copied().map(pos).collect::<Vec<_>>(), p) {
+                inside = !inside;
+            }
+        }
+        return mark.fill.is_some() && inside;
+    }
     mark.fill.is_some()
         && inside_ring(&flatten(mark, 0.15), p)
         && !mark
@@ -474,7 +491,7 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
     if rect.contains_rect(bounds) {
         return (vec![], vec![mark.clone()]);
     }
-    if mark.style.instance.is_some() {
+    if mark.style.instance.is_some() || mark.style.text.is_some() {
         return (vec![], vec![mark.clone()]);
     }
     let mut outside = vec![];
@@ -514,6 +531,17 @@ pub fn transform(mark: &Mark, mut f: impl FnMut(Pos2) -> Pos2) -> Mark {
     if let Some(g) = out.style.gradient.as_mut() {
         g.start = xy(f(pos(g.start)));
         g.end = xy(f(pos(g.end)));
+    }
+    if let Some(text) = out.style.text.as_mut() {
+        let m = text.matrix;
+        let origin = f(Pos2::new(m[4], m[5]));
+        let x = f(Pos2::new(m[4] + m[0], m[5] + m[1])) - origin;
+        let y = f(Pos2::new(m[4] + m[2], m[5] + m[3])) - origin;
+        text.matrix = [x.x, x.y, y.x, y.y, origin.x, origin.y];
+        if let Some(g) = text.gradient.as_mut() {
+            g.start = xy(f(pos(g.start)));
+            g.end = xy(f(pos(g.end)));
+        }
     }
     if let Some(i) = out.style.instance.as_mut() {
         let origin = f(Pos2::new(i.matrix[4], i.matrix[5]));
@@ -725,4 +753,17 @@ mod tests {
             start.elapsed()
         );
     }
+}
+
+/// Even-odd text contours may be disjoint outer rings as well as counters.
+pub fn text_ink(mark: &Mark) -> MultiPolygon<f64> {
+    let mut ink = MultiPolygon(vec![]);
+    for points in std::iter::once(flatten(mark, 0.04)).chain(
+        mark.holes
+            .iter()
+            .map(|r| r.iter().copied().map(pos).collect()),
+    ) {
+        ink = ink.xor(&Polygon::new(ring(points), vec![]));
+    }
+    ink
 }
