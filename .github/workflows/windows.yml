@@ -29,7 +29,7 @@ jobs:
   windows:
     name: Windows tests and release
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -54,14 +54,31 @@ jobs:
       - name: Cache Rust compilation
         uses: Swatinem/rust-cache@v2
 
+      - name: Build owned FFmpeg and complete corresponding source
+        shell: pwsh
+        run: ./scripts/build-ffmpeg.ps1 -WorkDirectory work/ffmpeg-owned-final
+
+      - name: Reproduce FFmpeg in an independent clean directory
+        shell: pwsh
+        run: ./scripts/build-ffmpeg.ps1 -WorkDirectory work/ffmpeg-reproduced -ToolDirectory work/ffmpeg-owned-final/tools
+
+      - name: Validate formats, dimensions, colours, frames and quality
+        shell: pwsh
+        run: ./scripts/test-ffmpeg.ps1 -CandidateDirectory work/ffmpeg-owned-final/output
+
       - name: Run regression tests
         run: cargo test --locked
 
       - name: Build release
         run: cargo build --release --locked
 
-      - name: Test video and GIF export with bundled FFmpeg
-        run: cargo test --release --locked export_all_containers_with_ffmpeg -- --ignored --nocapture
+      - name: Test video and GIF export with candidate in isolation
+        shell: pwsh
+        run: ./scripts/test-ffmpeg-app.ps1 -CandidateDirectory work/ffmpeg-owned-final/output
+
+      - name: Review sources, link inventory, tests and reproduction
+        shell: pwsh
+        run: ./scripts/review-ffmpeg.ps1 -CandidateDirectory work/ffmpeg-owned-final/output -ReproducedDirectory work/ffmpeg-reproduced/output
 
       - name: Package Windows application
         shell: pwsh
@@ -72,12 +89,24 @@ jobs:
           # CJK font data is embedded in the EXE; retain its license, avoid a second copy.
           Remove-Item dist/assets/fonts/NotoSansCJK-Regular.ttc
           Copy-Item LICENSE dist/
+          # Stage the reviewed candidate; never alter the checked-in fallback during CI.
+          Copy-Item work/ffmpeg-owned-final/output/ffmpeg.exe dist/assets/tools/ffmpeg.exe -Force
+          Copy-Item work/ffmpeg-owned-final/output/THIRD-PARTY-NOTICES.txt dist/assets/tools/THIRD_PARTY.md -Force
+          Copy-Item work/ffmpeg-owned-final/output/licenses/* dist/assets/tools/licenses/ -Force
+          Copy-Item work/ffmpeg-owned-final/output/SOURCE_STATUS.json dist/assets/tools/ -Force
+          Copy-Item work/ffmpeg-owned-final/output/REVIEW.json dist/assets/tools/BUILD_EVIDENCE.json -Force
           @"
           LibreToon for Windows x64
           Extract the entire ZIP and open libretoon.exe.
           Keep the assets folder beside the executable; it includes FFmpeg.
+          Third-party notices: assets/THIRD_PARTY_NOTICES.md
+          FFmpeg source and licensing: SOURCE-ACCESS.txt
           Build commit: ${{ github.sha }}
           "@ | Set-Content dist/LEEME.txt
+
+      - name: Require reviewed FFmpeg corresponding source and include it
+        shell: pwsh
+        run: ./scripts/check-ffmpeg-distribution.ps1 -Destination dist -ManifestPath work/ffmpeg-owned-final/output/SOURCE_STATUS.json -BinaryPath dist/assets/tools/ffmpeg.exe
 
       - name: Upload Windows application
         uses: actions/upload-artifact@v4

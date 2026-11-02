@@ -401,18 +401,29 @@ impl Editor {
                 if self.rigging.paint && self.rigging.bone.is_some() {
                     self.checkpoint();
                     self.rigging.drag = Some(Gesture::Paint { last: world });
-                } else if self.rigging.create {
+                } else if self.rigging.create
+                    || (!self.rigging.paint
+                        && poses.values().any(|p| {
+                            (view.screen(p.end) + Vec2::new(12., -12.)).distance(screen) < 9.
+                        }))
+                {
                     let parent = poses
                         .iter()
-                        .filter(|(_, p)| view.screen(p.end).distance(screen) < 12.)
+                        .filter(|(_, p)| {
+                            view.screen(p.end).distance(screen)
+                                < if self.rigging.create { 12. } else { 26. }
+                        })
                         .min_by(|(_, a), (_, b)| {
                             a.end
                                 .distance_sq(world)
                                 .total_cmp(&b.end.distance_sq(world))
                         })
                         .map(|(id, _)| *id);
+                    let start = parent
+                        .and_then(|id| poses.get(&id))
+                        .map_or(world, |p| p.end);
                     self.rigging.drag = Some(Gesture::Create {
-                        start: world,
+                        start,
                         end: world,
                         parent,
                     });
@@ -607,6 +618,18 @@ impl Editor {
                 ));
                 p.circle(a, 4., Color32::from_gray(30), Stroke::new(1.5, c));
                 p.circle(z, 5., Color32::from_gray(30), Stroke::new(1.5, c));
+                if !self.rigging.paint
+                    && self.rigging.drag.is_none()
+                    && p.ctx()
+                        .input(|i| i.pointer.hover_pos().is_some_and(|q| q.distance(z) < 28.))
+                {
+                    p.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    let z = z + Vec2::new(12., -12.);
+                    p.circle_filled(z, 9., crate::themes::panel());
+                    p.circle_stroke(z, 9., Stroke::new(2., c));
+                    p.line_segment([z - Vec2::X * 5., z + Vec2::X * 5.], Stroke::new(2., c));
+                    p.line_segment([z - Vec2::Y * 5., z + Vec2::Y * 5.], Stroke::new(2., c));
+                }
                 p.text(
                     a + Vec2::new(8., -16.),
                     egui::Align2::LEFT_TOP,
@@ -865,21 +888,7 @@ impl Editor {
                     self.doc.extras.rig.auto_weights(track);
                 }
             } else {
-                self.doc.extras.rig.bones[index]
-                    .targets
-                    .retain(|id| *id != t.track);
-                if let Some(binding) = self
-                    .doc
-                    .extras
-                    .rig
-                    .bindings
-                    .iter_mut()
-                    .find(|b| b.target == t.track)
-                {
-                    for c in &mut binding.cells {
-                        c.set(bone.id, 0.);
-                    }
-                }
+                self.doc.extras.rig.detach(bone.id, t.track);
             }
             self.recover();
         }

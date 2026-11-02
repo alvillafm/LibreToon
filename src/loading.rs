@@ -85,7 +85,9 @@ impl Editor {
                         self.status = "Proyecto abierto".into();
                     }
                 }
-                Err(e) => self.status = format!("No se pudo abrir: {e}"),
+                Err(e) => {
+                    self.status = crate::i18n::message("No se pudo abrir: {error}", &[("error", e)])
+                }
             }
         }
         if self.loader.busy() {

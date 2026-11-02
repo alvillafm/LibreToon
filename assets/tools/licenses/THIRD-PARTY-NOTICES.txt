@@ -1,0 +1,12 @@
+FFmpeg 7.1.5 + x264 + zlib, built for LibreToon as a separate GPLv3-or-later program.
+LibreToon's own code and build orchestration remain MIT (recipe/LICENSE).
+FFmpeg: Copyright (c) 2000-2026 the FFmpeg developers; see original source headers.
+x264: see x264-HEADER-NOTICE.txt and x264-COPYING.
+zlib: see zlib-LICENSE.
+LLVM/compiler-rt and MinGW-w64 CRT/import libraries: see their notices and complete source archives.
+This software is based in part on the work of the Independent JPEG Group.
+FFmpeg libjpeg-derived source files have no project source patches.
+All distributed source archives preserve their original notices and individual file licenses.
+Build tools (compiler/MSYS2/make/pkgconf/diffutils/NASM) are not shipped as runtime programs.
+Their versions, binary hashes and official download locations are recorded in sources.lock.json.
+Only normal Windows system DLLs may be imported; the review step checks the actual PE imports.

@@ -143,7 +143,7 @@ impl Default for Document {
             height: 540,
             layers: vec![Layer {
                 options: Default::default(),
-                name: "Capa 1".into(),
+                name: "Layer 1".into(),
                 visible: true,
                 frames: vec![SharedVec::default(); 24].into(),
             }]

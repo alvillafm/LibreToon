@@ -69,12 +69,18 @@ fn bezier_path_and_acceleration_change_timing_without_moving_endpoints() {
     close(p.y, -75.);
 }
 #[test]
-fn automatic_transform_keys_preserve_source_and_undo() {
+fn explicitly_enabled_motion_preserves_source_and_undo() {
     let mut e = editor();
     let a = rect();
     for f in &mut e.doc.layers[0].frames {
         *f = vec![a.clone()].into();
     }
+    e.doc.layers[0].options.keys[10] = true;
+    e.doc.layers[0].options.tweens.push(Tween {
+        start: 0,
+        end: 10,
+        curve: Default::default(),
+    });
     e.frame = 10;
     e.checkpoint();
     e.autokey_motion(&[(0, 0)]);

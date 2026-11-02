@@ -393,14 +393,17 @@ fn render_studio_review_images() {
         collapsed: false,
     });
     e.doc.extras.symbols[0].library_folder = Some(900);
-    e.add_mannequin(Pos2::new(650., 280.));
+    e.add_mannequin(Pos2::new(1300., 580.));
     e.tool = Tool::Mannequin;
     let mut textures: HashMap<egui::TextureId, egui::ColorImage> = HashMap::new();
     for (name, home, tool) in [
         ("home", true, Tool::Select),
         ("mannequin", false, Tool::Mannequin),
+        ("mannequin-3d", false, Tool::Mannequin),
+        ("text-box", false, Tool::Text),
+        ("new-project", true, Tool::Select),
         ("text", false, Tool::Text),
-        ("airbrush", false, Tool::Airbrush),
+        ("sketch-brush", false, Tool::SketchBrush),
         ("bones", false, Tool::Bones),
         ("weights", false, Tool::Bones),
         ("puppet", false, Tool::Puppet),
@@ -432,18 +435,53 @@ fn render_studio_review_images() {
         crate::themes::ensure(&ctx, theme);
         crate::i18n::set_locale(language);
         crate::i18n::ensure_fonts(&ctx, language);
+        e.document_settings = None;
+        if let Some(l) = e.mannequin_layer() {
+            let m = e.doc.layers[l].options.mannequin.as_mut().unwrap();
+            m.rotation = if name == "mannequin-3d" {
+                [0.3, 0.85, 0.1]
+            } else {
+                [0.; 3]
+            };
+            m.depth_angles[5] = if name == "mannequin-3d" { 0.8 } else { 0. };
+        }
+        if name == "new-project" {
+            e.new_document();
+        }
+        if name == "text-box" {
+            if let Some((index, spec)) = e.doc.layers[0].frames[0]
+                .iter()
+                .enumerate()
+                .find_map(|(i, m)| m.style.text.as_ref().map(|s| (i, (**s).clone())))
+            {
+                e.drawing.text.spec = spec;
+                e.drawing.text.spec.content = "Editable text box\nLive properties".into();
+                e.drawing.text.spec.box_size = Some([650., 240.]);
+                e.drawing.text.spec.matrix = [1., 0., 0., 1., 450., 500.];
+                e.drawing.text.editing = Some((0, index, 0));
+                e.layer = 0;
+                e.drawing.text.transaction = false;
+                e.drawing.text.canvas_edit = true;
+                e.commit_text();
+            }
+        }
         e.studio.preferences_open = name == "preferences-paper";
+        e.drawing.reference_joint = if name == "mannequin-3d" { 4 } else { 0 };
         e.rigging.paint = name == "weights";
         e.rigging.create = name == "bones";
         e.feature.library = name == "library";
         e.hub.home = home;
         e.tool = tool;
         e.canvas.clear_selection();
-        let frames = if name == "preferences-paper" { 12 } else { 3 };
+        let frames = if matches!(name, "preferences-paper" | "new-project") {
+            12
+        } else {
+            3
+        };
         for frame in 0..frames {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440., 960.))),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1366., 768.))),
                     ..Default::default()
                 },
                 |ui| {
@@ -480,7 +518,7 @@ fn render_studio_review_images() {
             if frame + 1 != frames {
                 continue;
             }
-            let mut rgb = vec![24u8; 1440 * 960 * 3];
+            let mut rgb = vec![24u8; 1366 * 768 * 3];
             for primitive in ctx.tessellate(output.shapes, output.pixels_per_point) {
                 let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else {
                     continue;
@@ -501,10 +539,10 @@ fn render_studio_review_images() {
                     let bounds = Rect::from_min_max(a.min(b).min(c), a.max(b).max(c))
                         .intersect(primitive.clip_rect);
                     for y in (bounds.top().floor().max(0.) as usize)
-                        ..(bounds.bottom().ceil().max(0.) as usize).min(960)
+                        ..(bounds.bottom().ceil().max(0.) as usize).min(768)
                     {
                         for x in (bounds.left().floor().max(0.) as usize)
-                            ..(bounds.right().ceil().max(0.) as usize).min(1440)
+                            ..(bounds.right().ceil().max(0.) as usize).min(1366)
                         {
                             let p = Pos2::new(x as f32 + 0.5, y as f32 + 0.5);
                             let w = [
@@ -532,7 +570,7 @@ fn render_studio_review_images() {
                                 })
                                 .unwrap_or([255; 4]);
                             let alpha = color[3] * sample[3] as f32 / 255.;
-                            let at = (y * 1440 + x) * 3;
+                            let at = (y * 1366 + x) * 3;
                             for ch in 0..3 {
                                 rgb[at + ch] = (color[ch] * sample[ch] as f32
                                     + rgb[at + ch] as f32 * (1. - alpha))
@@ -544,7 +582,7 @@ fn render_studio_review_images() {
                 }
             }
             let mut file = std::fs::File::create(folder.join(format!("{name}.ppm"))).unwrap();
-            write!(file, "P6\n1440 960\n255\n").unwrap();
+            write!(file, "P6\n1366 768\n255\n").unwrap();
             file.write_all(&rgb).unwrap();
         }
     }
@@ -584,4 +622,116 @@ fn preferences_render_from_home() {
         "Home must render the language controls in Preferences"
     );
     assert!(e.hub.home);
+}
+
+#[test]
+fn laptop_toolbar_keeps_color_controls_visible_and_preserves_category_order() {
+    let mut e = editor();
+    e.hub.home = false;
+    crate::i18n::set_locale(crate::i18n::Language::English);
+    let ctx = egui::Context::default();
+    for height in [720., 768.] {
+        let mut texts = vec![];
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1366., height))),
+                    ..Default::default()
+                },
+                |ui| e.workspace(ui),
+            );
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|s| {
+                    if let egui::Shape::Text(t) = &s.shape {
+                        (t.pos.x < 76.).then_some((t.galley.job.text.clone(), t.pos.y, s.clip_rect))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            out.textures_delta.clear();
+        }
+        let categories = [
+            "SELECTION",
+            "EDIT",
+            "PAINT",
+            "VECTOR",
+            "SHAPES",
+            "TEXT",
+            "CANVAS",
+            "Rigging",
+            "COLOR",
+        ];
+        let mut previous = 0.;
+        for category in categories {
+            let (_, y, clip) = texts
+                .iter()
+                .find(|(text, _, _)| text == category)
+                .unwrap_or_else(|| panic!("Missing {category}: {texts:?}"));
+            assert!(*y >= previous);
+            assert!(
+                *y < clip.bottom(),
+                "{category} is clipped at height {height}"
+            );
+            previous = *y;
+        }
+        assert!(
+            previous + 85. < height,
+            "Color controls must fit at height {height}"
+        );
+    }
+}
+
+#[test]
+fn timeline_and_properties_resize_with_pointer_drags() {
+    let mut e = editor();
+    e.hub.home = false;
+    let ctx = egui::Context::default();
+    let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+        let mut panels = [Rect::NOTHING; 2];
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1366., 768.))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                e.workspace(ui);
+                for (i, name) in ["timeline", "properties"].into_iter().enumerate() {
+                    panels[i] =
+                        egui::containers::panel::PanelState::load(&ctx, ui.scope_id().with(name))
+                            .unwrap()
+                            .outer_rect;
+                }
+            },
+        );
+        out.textures_delta.clear();
+        panels
+    };
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        pressed,
+        button: egui::PointerButton::Primary,
+        modifiers: egui::Modifiers::NONE,
+    };
+    tick(&mut e, vec![]);
+    let panels = tick(&mut e, vec![]);
+    let a = Pos2::new(panels[0].center().x, panels[0].top());
+    let b = a - Vec2::new(0., 70.);
+    tick(&mut e, vec![egui::Event::PointerMoved(a)]);
+    tick(&mut e, vec![button(a, true)]);
+    tick(&mut e, vec![egui::Event::PointerMoved(b)]);
+    tick(&mut e, vec![button(b, false)]);
+    let resized = tick(&mut e, vec![]);
+    assert!(resized[0].height() > panels[0].height() + 40.);
+    let a = Pos2::new(resized[1].left(), resized[1].center().y);
+    let b = a - Vec2::new(80., 0.);
+    tick(&mut e, vec![egui::Event::PointerMoved(a)]);
+    tick(&mut e, vec![button(a, true)]);
+    tick(&mut e, vec![egui::Event::PointerMoved(b)]);
+    tick(&mut e, vec![button(b, false)]);
+    let final_panels = tick(&mut e, vec![]);
+    assert!(final_panels[1].width() > resized[1].width() + 40.);
 }

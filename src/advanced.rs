@@ -647,6 +647,9 @@ impl Editor {
                         .prefix(tr("Duración: ")),
                 )
                 .changed();
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.animation.timing_transaction = false;
+            }
             let old_curve = c.animation.curve.clone();
             ui.collapsing(crate::i18n::tr("Camera motion · easing / path"), |ui| {
                 crate::visual_controls::timing_controls(
@@ -656,9 +659,14 @@ impl Editor {
                     c.duration,
                 )
             });
-            changed |= old_curve != c.animation.curve;
+            let timing_changed = old_curve != c.animation.curve;
+            changed |= timing_changed;
             if changed {
-                self.checkpoint();
+                if !timing_changed || !self.animation.timing_transaction {
+                    self.checkpoint();
+                }
+                self.animation.timing_transaction =
+                    timing_changed && self.animation.ease_handle.is_some();
                 let key = crate::animation::CameraKey {
                     frame: self.frame.saturating_sub(c.start).min(c.duration - 1),
                     center: c.center,

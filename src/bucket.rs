@@ -130,7 +130,12 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         ]),
         vec![],
     );
-    let ink = geo::algorithm::bool_ops::unary_union(&obstacles);
+    let mut ink = geo::algorithm::bool_ops::unary_union(&obstacles);
+    if gap != Gap::None {
+        let radius = gap.distance() as f64 / 2.;
+        let closed = ink.buffer(radius).buffer(-radius);
+        ink = ink.union(&closed);
+    }
     let free = outer.difference(&ink);
     let point = geo::Point::new(click.x as f64, click.y as f64);
     let region = free
@@ -202,5 +207,29 @@ mod tests {
             .is_ok()
         );
         assert_eq!(m.points[4], [0., 8.]);
+    }
+}
+
+#[cfg(test)]
+mod painted_gap_regressions {
+    use super::*;
+    #[test]
+    fn gaps_between_filled_brush_silhouettes_close_without_rewriting_contours() {
+        let axis = Mark {
+            points: vec![[0., 8.], [0., 100.], [100., 100.], [100., 0.], [0., 0.]].into(),
+            width: 4.,
+            ..Default::default()
+        };
+        let ink = vector::brush_fill(&axis, [0, 0, 0, 255]);
+        let original = serde_json::to_vec(&ink).unwrap();
+        assert!(fill(&ink, Pos2::new(50., 50.), Gap::None, [200, 0, 0, 255]).is_err());
+        let result = fill(&ink, Pos2::new(50., 50.), Gap::Medium, [200, 0, 0, 255]).unwrap();
+        assert!(
+            result
+                .iter()
+                .any(|m| vector::contains_fill(m, Pos2::new(50., 50.)))
+        );
+        assert_eq!(original, serde_json::to_vec(&ink).unwrap());
+        assert!(fill(&ink, Pos2::new(200., 200.), Gap::Large, [200, 0, 0, 255]).is_err());
     }
 }

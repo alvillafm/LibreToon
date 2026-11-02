@@ -21,6 +21,8 @@ mod fla;
 mod fla_zip;
 mod i18n;
 mod inspector;
+#[cfg(test)]
+mod interaction_ux_tests;
 mod library;
 mod loading;
 mod mannequin;
@@ -36,6 +38,8 @@ mod shared;
 mod studio;
 #[cfg(test)]
 mod studio_tests;
+#[cfg(test)]
+mod studio_v2_tests;
 mod tablet;
 mod themes;
 mod tools_editor;
@@ -268,6 +272,9 @@ impl Editor {
 }
 fn fresh_document() -> Document {
     let mut doc = Document::default();
+    doc.width = 1920;
+    doc.height = 1080;
+    doc.fps = 24;
     let mut keys = vec![false; doc.layers[0].frames.len()];
     keys[0] = true;
     doc.layers[0].options.keys = keys.into();
@@ -295,10 +302,12 @@ impl eframe::App for Editor {
         self.poll_open(&ctx);
         self.drawing.pen.update(&ctx);
         if let Some(error) = self.recovery_writer.take_error() {
-            self.status = format!("No se pudo recuperar sesión: {error}");
+            self.status =
+                crate::i18n::message("No se pudo recuperar sesión: {error}", &[("error", error)]);
         }
         if !self.hub.home
             && !self.studio.preferences_open
+            && self.document_settings.is_none()
             && self.studio.export.is_none()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
         {
@@ -306,6 +315,7 @@ impl eframe::App for Editor {
         }
         if !self.hub.home
             && !self.studio.preferences_open
+            && self.document_settings.is_none()
             && self.studio.export.is_none()
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
@@ -316,6 +326,7 @@ impl eframe::App for Editor {
         }
         if !self.hub.home
             && !self.studio.preferences_open
+            && self.document_settings.is_none()
             && self.studio.export.is_none()
             && !ctx.egui_wants_keyboard_input()
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y))

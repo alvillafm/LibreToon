@@ -153,6 +153,9 @@ fn skin_weights_blend_continuously_and_leave_unweighted_points_in_place() {
         bone(2, None, [0., 0.], [100., 0.]),
     ]
     .into();
+    for b in &mut r.bones {
+        b.targets = vec![10].into();
+    }
     r.set_bone_key(
         1,
         BoneKey {
@@ -579,6 +582,20 @@ fn pointer_gestures_create_pose_and_move_puppet_pins() {
         .unwrap();
     near(pin_value(&b.pins[0], 0), Pos2::new(80., 70.));
     assert!(e.doc.validate().is_ok());
+    e.tool = Tool::Bones;
+    let parent = e.doc.extras.rig.bones[0].id;
+    let tip = e.doc.extras.rig.poses(0)[&parent].end;
+    drag(
+        &mut e,
+        tip + Vec2::new(12., -12.),
+        tip + Vec2::new(80., 50.),
+    );
+    assert_eq!(e.doc.extras.rig.bones.len(), 2);
+    assert_eq!(e.doc.extras.rig.bones[1].parent, Some(parent));
+    near(
+        e.doc.extras.rig.poses(0)[&e.doc.extras.rig.bones[1].id].start,
+        tip,
+    );
 }
 #[test]
 fn library_thumbnail_can_select_and_drag_a_symbol() {
@@ -645,4 +662,113 @@ fn library_thumbnail_can_select_and_drag_a_symbol() {
     tick(&mut e, vec![egui::Event::PointerMoved(q)]);
     tick(&mut e, vec![button(q, false)]);
     assert_eq!(e.doc.extras.symbols[0].library_folder, Some(300));
+    let out = tick(&mut e, vec![]);
+    let label = out
+        .shapes
+        .iter()
+        .find_map(|s| {
+            if let egui::Shape::Text(t) = &s.shape {
+                (t.galley.job.text == "Symbol 1").then_some(t.pos)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let p = Pos2::new(65., label.y + 8.);
+    let outside_folder = Pos2::new(300., 400.);
+    tick(&mut e, vec![egui::Event::PointerMoved(p), button(p, true)]);
+    let preview = tick(&mut e, vec![egui::Event::PointerMoved(outside_folder)]);
+    assert!(
+        preview
+            .shapes
+            .iter()
+            .any(|s| if let egui::Shape::Text(t) = &s.shape {
+                t.galley.job.text.contains("→")
+            } else {
+                false
+            })
+    );
+    tick(&mut e, vec![button(outside_folder, false)]);
+    assert_eq!(e.doc.extras.symbols[0].library_folder, None);
+}
+
+#[test]
+fn detaching_discards_weights_without_reweighting_other_bones_and_ignores_stale_data() {
+    let mut e = setup();
+    e.add_bone(Pos2::new(0., 50.), Pos2::new(100., 50.), None);
+    let first = e.rigging.bone.unwrap();
+    e.add_bone(Pos2::new(0., 60.), Pos2::new(100., 60.), None);
+    let second = e.rigging.bone.unwrap();
+    let source = e.doc.extras.symbols[0].layers[0].frames[0].identity();
+    let old = e.doc.clone();
+    let previous = e.doc.extras.rig.bindings[0].cells[0].weight(second);
+    e.doc.extras.rig.detach(first, 10);
+    assert!(!e.doc.extras.rig.bones[0].targets.contains(&10));
+    for cell in &e.doc.extras.rig.bindings[0].cells {
+        assert_eq!(cell.weight(first), 0.);
+    }
+    assert_eq!(
+        e.doc.extras.rig.bindings[0].cells[0].weight(second),
+        previous
+    );
+    assert!(old.extras.rig.bindings[0].cells[0].weight(first) > 0.);
+    e.rigging.bone = Some(first);
+    e.paint_rig_weights(Pos2::new(50., 50.), false, false);
+    assert_eq!(e.doc.extras.rig.bindings[0].cells[0].weight(first), 0.);
+    e.doc.extras.rig.detach(second, 10);
+    // Simulate old saved weights that disagree with the attachment list.
+    for cell in &mut e.doc.extras.rig.bindings[0].cells {
+        cell.set(first, 1.);
+    }
+    e.doc.extras.rig.set_bone_key(
+        first,
+        BoneKey {
+            translation: [100., 50.],
+            ..Default::default()
+        },
+    );
+    let poses = e.doc.extras.rig.poses(0);
+    let d = Deformer::new(&e.doc.extras.rig.bindings[0], &poses, 0);
+    near(d.point(Pos2::new(50., 50.)), Pos2::new(50., 50.));
+    assert!(!d.active);
+    assert_eq!(
+        e.doc.extras.symbols[0].layers[0].frames[0].identity(),
+        source
+    );
+}
+
+#[test]
+fn timeline_cell_actions_edit_the_clicked_layer_even_with_bones_selected_and_undo() {
+    let mut e = setup();
+    e.tool = Tool::Bones;
+    let before = e.doc.layers[0].frames[8].identity();
+    e.timeline_cell_action(0, 8, 1);
+    assert!(e.doc.layers[0].key(8));
+    assert!(e.doc.layers[0].frames[8].is_empty());
+    assert!(e.doc.layers[0].frames[7].len() > 0);
+    e.history(false);
+    assert_eq!(e.doc.layers[0].frames[8].identity(), before);
+    e.timeline_cell_action(0, 8, 0);
+    assert!(e.doc.layers[0].key(8));
+    e.timeline_cell_action(0, 8, 5);
+    assert!(crate::animation::span(&e.doc.layers[0], 9).is_some());
+    e.timeline_cell_action(0, 9, 6);
+    assert!(crate::animation::span(&e.doc.layers[0], 9).is_none());
+    e.doc.layers[0].options.locked = true;
+    let locked = e.doc.layers[0].frames[10].identity();
+    e.timeline_cell_action(0, 10, 1);
+    assert_eq!(e.doc.layers[0].frames[10].identity(), locked);
+}
+
+#[test]
+fn weight_paint_changes_only_the_selected_bone() {
+    let mut c = Cell::default();
+    c.set(1, 0.5);
+    c.set(2, 0.5);
+    c.set(1, 0.1);
+    assert_eq!(c.weight(2), 0.5);
+    assert_eq!(c.weight(1), 0.1);
+    c.set(1, 1.);
+    assert_eq!(c.weight(2), 0.5);
+    assert_eq!(c.weight(1), 0.5);
 }

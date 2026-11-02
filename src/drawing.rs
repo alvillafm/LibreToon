@@ -11,19 +11,27 @@ pub struct Drawing {
     pub pen: crate::tablet::PenInput,
     samples: Vec<(Pos2, f32)>,
     pub reference_drag: Option<(usize, usize)>,
+    pub reference_gizmo: Option<crate::mannequin::GizmoDrag>,
+    pub reference_orbit: Option<(usize, Pos2, [f32; 3])>,
+    pub reference_rotate: bool,
+    pub reference_joint: usize,
 }
 impl Default for Drawing {
     fn default() -> Self {
         Self {
             radius: 0.,
             pressure: true,
-            opacity: 0.3,
+            opacity: 1.,
             hardness: 0.3,
             scroll_to_tab: true,
             text: Default::default(),
             pen: Default::default(),
             samples: vec![],
             reference_drag: None,
+            reference_gizmo: None,
+            reference_orbit: None,
+            reference_rotate: false,
+            reference_joint: 0,
         }
     }
 }
@@ -31,7 +39,13 @@ impl Drawing {
     pub fn cancel(&mut self) {
         self.samples.clear();
         self.reference_drag = None;
+        self.reference_gizmo = None;
+        self.reference_orbit = None;
         self.text.editing = None;
+        self.text.canvas_edit = false;
+        self.text.box_drag = None;
+        self.text.focus = false;
+        self.text.transaction = false;
     }
     pub fn start(&mut self, p: Pos2) {
         self.samples.clear();

@@ -29,12 +29,12 @@ impl Editor {
             self.fill_enabled = mark.fill.is_some();
             self.stroke_enabled = mark.stroke;
             if let Some(c) = mark.fill {
-                self.fill_color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                self.fill_color = Color32::from_rgb(c[0], c[1], c[2]);
                 self.active_fill = true;
             }
             if mark.stroke {
                 let c = mark.color;
-                self.color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                self.color = Color32::from_rgb(c[0], c[1], c[2]);
                 self.width = mark.width;
                 self.width_profile = mark.width_profile.clone();
                 self.width_preset = crate::width::Preset::Custom;
@@ -367,10 +367,20 @@ impl Editor {
         (id.0, id.1 + chosen)
     }
     pub fn activate_tool(&mut self, tool: Tool) {
+        let tool = if tool == Tool::Airbrush {
+            Tool::Brush
+        } else {
+            tool
+        };
         if self.tool == tool {
             return;
         }
         self.finish_rig_gesture();
+        if self.drawing.reference_gizmo.take().is_some() {
+            self.recover();
+        }
+        self.drawing.reference_drag = None;
+        self.drawing.reference_orbit = None;
         if matches!(
             tool,
             Tool::Brush
@@ -432,6 +442,9 @@ impl Editor {
             self.fill_color = self.color;
         }
         self.drawing.text.editing = None;
+        self.drawing.text.canvas_edit = false;
+        self.drawing.text.box_drag = None;
+        self.drawing.text.transaction = false;
         if tool == Tool::Ruler {
             self.studio.rulers = true;
         }

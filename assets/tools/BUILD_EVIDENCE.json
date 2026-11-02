@@ -1,0 +1,211 @@
+{
+  "lockSha256": "5b54739b6177d7c0d84a65b755b34461be0ec4bc808426c34934787f6d25aec3",
+  "reproducedBinarySha256": "48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055",
+  "exportValidationSha256": "f2fb6e716a20e1f52f0fec366dadcb728bb0b25b2bc2ec4df4c78cdbb9c2f318",
+  "imports": [
+    "api-ms-win-crt-conio-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-private-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+    "bcrypt.dll",
+    "kernel32.dll",
+    "shell32.dll",
+    "ws2_32.dll"
+  ],
+  "sourceCoverage": [
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libadvapi32.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libavcodec.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libavdevice.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libavfilter.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libavformat.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libavutil.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libbcrypt.a"
+    },
+    {
+      "sourceArchive": "llvm-project-18.1.8.tar.gz",
+      "sourceSha256": "09c08693a9afd6236f27a2ebae62cda656eba19021ef3f94d59e931d662d4856",
+      "sourceComponent": "llvm-source",
+      "library": "libclang_rt.builtins-x86_64.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libkernel32.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libm.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libmingw32.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libmingwex.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libmoldname.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libmsvcrt.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libole32.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libpostproc.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libpsapi.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libshell32.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libswresample.a"
+    },
+    {
+      "sourceArchive": "ffmpeg-7.1.5-source.tar.gz",
+      "sourceSha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "sourceComponent": "ffmpeg",
+      "library": "libswscale.a"
+    },
+    {
+      "sourceArchive": "llvm-project-18.1.8.tar.gz",
+      "sourceSha256": "09c08693a9afd6236f27a2ebae62cda656eba19021ef3f94d59e931d662d4856",
+      "sourceComponent": "llvm-source",
+      "library": "libunwind.dll.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libuser32.a"
+    },
+    {
+      "sourceArchive": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "sourceSha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "sourceComponent": "mingw-source",
+      "library": "libws2_32.a"
+    },
+    {
+      "sourceArchive": "x264-btbn.tar.gz",
+      "sourceSha256": "d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50",
+      "sourceComponent": "x264",
+      "library": "libx264.a"
+    },
+    {
+      "sourceArchive": "zlib-1.3.1.tar.gz",
+      "sourceSha256": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+      "sourceComponent": "zlib",
+      "library": "libz.a"
+    }
+  ],
+  "scope": "Locked source coverage, link/import inventory, reproducibility and declared tests. Not a legal originality certificate or exhaustive visual study.",
+  "sourceSha256": "80b97d400e04ba34f373ee305ef27c7dd63d575b35b8ac9a2a16b893427bb2d7",
+  "staticArchives": [
+    "libadvapi32.a",
+    "libavcodec.a",
+    "libavdevice.a",
+    "libavfilter.a",
+    "libavformat.a",
+    "libavutil.a",
+    "libbcrypt.a",
+    "libclang_rt.builtins-x86_64.a",
+    "libkernel32.a",
+    "libm.a",
+    "libmingw32.a",
+    "libmingwex.a",
+    "libmoldname.a",
+    "libmsvcrt.a",
+    "libole32.a",
+    "libpostproc.a",
+    "libpsapi.a",
+    "libshell32.a",
+    "libswresample.a",
+    "libswscale.a",
+    "libunwind.dll.a",
+    "libuser32.a",
+    "libws2_32.a",
+    "libx264.a",
+    "libz.a"
+  ],
+  "traceRecipeSha256": "287cfaa11c25037049c14782f031c66b9c3c3922941cde3961984d9bf6246c8b",
+  "policySha256": "abe8aad88592b060cab6d8415ee4f7a442efa1c786427dce3a99d6fcc5abbd83",
+  "status": "passed",
+  "applicationTestSha256": "fe54e570d36c76bab79aeca098e12bd95d8894cbecb919ffa640962df0bf46dc",
+  "binarySha256": "48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055",
+  "recipeSha256": "a83282d7ada4e328f6ab855339caaec03a82012feebb110afb542789cf1e8446"
+}

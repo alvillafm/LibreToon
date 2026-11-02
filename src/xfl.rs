@@ -498,7 +498,7 @@ impl Importer<'_> {
                 continue;
             }
             let mut layer = Layer {
-                name: node.a("name").unwrap_or("Capa").into(),
+                name: node.a("name").unwrap_or("Layer").into(),
                 visible: node.a("visible") != Some("false") && kind != "guide" && kind != "mask",
                 frames: vec![SharedVec::default()].into(),
                 options: Default::default(),
@@ -606,7 +606,7 @@ impl Importer<'_> {
         }
         if layers.is_empty() {
             layers.push(Layer {
-                name: "Capa".into(),
+                name: "Layer".into(),
                 visible: true,
                 frames: vec![SharedVec::default()].into(),
                 options: Default::default(),
@@ -664,6 +664,9 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         next_track: 1,
         total: 0,
     };
+    if imp.archive.directory_size_recovered() {
+        imp.warn("Directorio ZIP de Animate con tamaño declarado incorrecto: recuperado a partir de los registros del directorio");
+    }
     if fps.fract() != 0. {
         imp.warn(format!("FPS fraccionarios {fps} redondeados a {}", doc.fps));
     }
@@ -727,7 +730,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
             None => {
                 imp.warn(format!("Símbolo sin línea de tiempo: {name}"));
                 vec![Layer {
-                    name: "Capa".into(),
+                    name: "Layer".into(),
                     visible: true,
                     frames: vec![SharedVec::default()].into(),
                     options: Default::default(),

@@ -12,6 +12,8 @@ pub struct Curve {
     pub pace: [f32; 2],
     pub ease: [[f32; 2]; 2],
     pub path: [[f32; 2]; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Vec<[f32; 2]>>,
 }
 impl Default for Curve {
     fn default() -> Self {
@@ -19,15 +21,102 @@ impl Default for Curve {
             pace: [1. / 3., 1. / 3.],
             ease: [[1. / 3., 1. / 3.], [2. / 3., 2. / 3.]],
             path: [[0., 0.], [0., 0.]],
+            timing: None,
         }
     }
 }
 impl Curve {
     pub fn time(&self, t: f32) -> f32 {
+        if let Some(points) = &self.timing {
+            return self.direct_time(t, points);
+        }
         let t = self.ease_time(t);
         3. * (1. - t).powi(2) * t * self.pace[0]
             + 3. * (1. - t) * t * t * (1. - self.pace[1])
             + t * t * t
+    }
+
+    /// Explicit graph editing uses a monotone Hermite curve. Old documents keep
+    /// their original composed easing until the timing curve is edited.
+    pub fn edit_timing(&mut self) {
+        if self.timing.is_none() {
+            let points = if self.ease != Self::default().ease {
+                (1..8)
+                    .map(|i| {
+                        let x = i as f32 / 8.;
+                        [x, self.time(x).clamp(0., 1.)]
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.timing = Some(points);
+        }
+    }
+    fn direct_time(&self, t: f32, points: &[[f32; 2]]) -> f32 {
+        let t = t.clamp(0., 1.);
+        let n = points.len() + 2;
+        let point = |i: usize| {
+            if i == 0 {
+                [0., 0.]
+            } else if i == n - 1 {
+                [1., 1.]
+            } else {
+                points[i - 1]
+            }
+        };
+        let secant = |i: usize| {
+            let a = point(i);
+            let b = point(i + 1);
+            (b[1] - a[1]) / (b[0] - a[0]).max(1e-6)
+        };
+        let tangent = |i: usize| {
+            if i == 0 {
+                return self.pace[0] * 3.;
+            }
+            if i == n - 1 {
+                return self.pace[1] * 3.;
+            }
+            let (left, right) = (secant(i - 1), secant(i));
+            if left <= 0. || right <= 0. {
+                return 0.;
+            }
+            let h0 = point(i)[0] - point(i - 1)[0];
+            let h1 = point(i + 1)[0] - point(i)[0];
+            let (w0, w1) = (2. * h1 + h0, h1 + 2. * h0);
+            (w0 + w1) / (w0 / left + w1 / right)
+        };
+        let i = (0..n - 1).find(|&i| t <= point(i + 1)[0]).unwrap_or(n - 2);
+        let (a, b) = (point(i), point(i + 1));
+        let h = b[0] - a[0];
+        // Limit each shared tangent using both adjacent segments, so the
+        // derivative stays continuous when a point is pulled near a flat section.
+        let limited = |index: usize| {
+            let mut factor = 1.0_f32;
+            for segment in [index.checked_sub(1), (index + 1 < n).then_some(index)]
+                .into_iter()
+                .flatten()
+            {
+                let slope = secant(segment);
+                if slope <= 1e-6 {
+                    return 0.;
+                }
+                let norm = ((tangent(segment) / slope).powi(2)
+                    + (tangent(segment + 1) / slope).powi(2))
+                .sqrt();
+                if norm > 3. {
+                    factor = factor.min(3. / norm);
+                }
+            }
+            tangent(index) * factor
+        };
+        let (m0, m1) = (limited(i), limited(i + 1));
+        let u = ((t - a[0]) / h.max(1e-6)).clamp(0., 1.);
+        ((2. * u.powi(3) - 3. * u * u + 1.) * a[1]
+            + (u.powi(3) - 2. * u * u + u) * h * m0
+            + (-2. * u.powi(3) + 3. * u * u) * b[1]
+            + (u.powi(3) - u * u) * h * m1)
+            .clamp(a[1], b[1])
     }
     fn ease_time(&self, t: f32) -> f32 {
         if self.ease[0][0] == self.ease[0][1] && self.ease[1][0] == self.ease[1][1] {
@@ -53,6 +142,18 @@ impl Curve {
         }
         cubic((lo + hi) / 2., self.ease[0][1], self.ease[1][1])
     }
+
+    pub fn bend_path(&mut self, t: f32, delta: Vec2, original: [[f32; 2]; 2]) {
+        let t = t.clamp(0.02, 0.98);
+        let w0 = 3. * (1. - t).powi(2) * t;
+        let w1 = 3. * (1. - t) * t * t;
+        let sum = w0 * w0 + w1 * w1;
+        for (i, weight) in [w0, w1].into_iter().enumerate() {
+            self.path[i] = std::array::from_fn(|axis| {
+                (original[i][axis] + delta[axis] * weight / sum).clamp(-1e6, 1e6)
+            });
+        }
+    }
     pub fn point(&self, a: Pos2, b: Pos2, t: f32) -> Pos2 {
         let p = a + (b - a) / 3. + crate::vector::pos(self.path[0]).to_vec2();
         let q = a + (b - a) * 2. / 3. + crate::vector::pos(self.path[1]).to_vec2();
@@ -61,7 +162,19 @@ impl Curve {
             + (b - a) * (t * t * t)
     }
     pub fn valid(&self) -> bool {
-        self.pace
+        self.timing.as_ref().is_none_or(|points| {
+            points.len() <= 32
+                && points.iter().all(|p| {
+                    p.iter().all(|v| v.is_finite())
+                        && p[0] > 0.
+                        && p[0] < 1.
+                        && (0. ..=1.).contains(&p[1])
+                })
+                && points
+                    .windows(2)
+                    .all(|p| p[0][0] < p[1][0] && p[0][1] <= p[1][1])
+        }) && self
+            .pace
             .iter()
             .all(|v| v.is_finite() && (0. ..=1.).contains(v))
             && self
@@ -106,6 +219,14 @@ pub struct Scene {
     pub cameras: SharedVec<Camera>,
     pub perspective: Perspective,
 }
+#[derive(Clone, Copy)]
+pub struct MotionBend {
+    pub layer: usize,
+    pub span: usize,
+    pub start: Pos2,
+    pub original: [[f32; 2]; 2],
+    pub t: f32,
+}
 #[derive(Default)]
 pub struct State {
     pub clock: usize,
@@ -119,6 +240,8 @@ pub struct State {
     pub gradient_drag: Option<usize>,
     pub ease_handle: Option<usize>,
     pub path_handle: Option<usize>,
+    pub path_bend: Option<MotionBend>,
+    pub timing_transaction: bool,
     pub camera_mode: usize,
     pub thumbnail_cache: crate::paint::RenderCache,
 }
@@ -443,35 +566,10 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     Ok(())
 }
 impl Editor {
+    // Transform gestures may materialize an explicitly enabled tween, but must
+    // never create a new tween merely because artwork is moved.
     pub fn autokey_motion(&mut self, ids: &[(usize, usize)]) {
         self.materialize_motion(ids);
-        let mut layers: Vec<_> = ids.iter().map(|v| v.0).collect();
-        layers.sort_unstable();
-        layers.dedup();
-        for l in layers {
-            if self.doc.layers[l].options.locked || self.doc.layers[l].key(self.frame) {
-                continue;
-            }
-            let layer = &mut self.doc.layers[l];
-            let start = layer.exposure(self.frame).start;
-            layer.init_keys();
-            let mut source = layer.frames[start].clone();
-            for m in &mut source {
-                if m.style.track == 0 {
-                    m.style.track = crate::features::id();
-                }
-            }
-            layer.frames[start] = source.clone();
-            layer.frames[self.frame] = source;
-            layer.options.keys[self.frame] = true;
-            if start < self.frame {
-                layer.options.tweens.push(Tween {
-                    start,
-                    end: self.frame,
-                    curve: Default::default(),
-                });
-            }
-        }
     }
     pub fn materialize_motion(&mut self, ids: &[(usize, usize)]) {
         let mut layers: Vec<_> = ids.iter().map(|i| i.0).collect();

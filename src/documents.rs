@@ -306,7 +306,10 @@ impl Editor {
                         ))
                     }
                     Err(e) => {
-                        self.status = format!("No se pudo recuperar el documento: {e}");
+                        self.status = crate::i18n::message(
+                            "No se pudo recuperar el documento: {e}",
+                            &[("e", e)],
+                        );
                         return;
                     }
                 }
@@ -380,7 +383,10 @@ impl Editor {
 
     pub fn persist_documents(&mut self) {
         if let Err(e) = self.hub.persist() {
-            self.status = format!("No se pudo guardar la lista de proyectos: {e}");
+            self.status = crate::i18n::message(
+                "No se pudo guardar la lista de proyectos: {e}",
+                &[("e", e.to_string())],
+            );
         }
     }
     pub fn saved_document(&mut self) {
@@ -526,7 +532,7 @@ impl Editor {
         }
         if let Some(i) = activate {
             if i == usize::MAX {
-                self.add_document(crate::fresh_document(), None);
+                self.new_document();
             } else {
                 self.activate_document(i);
             }
@@ -613,7 +619,7 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| { ui.heading(egui::RichText::new(crate::i18n::tr("Tu próximo movimiento")).size(30.)); ui.label(egui::RichText::new(crate::i18n::tr("LIBRETOON  /  ESTUDIO DE ANIMACIÓN")).small().color(crate::themes::muted())); });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.add_document(crate::fresh_document(), None); }
+                    if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.new_document(); }
                     if crate::design::button(ui, crate::design::Icon::Open, "Abrir", "Abrir proyecto", false, true).clicked() { self.open(); }
                     if crate::design::button(ui, crate::design::Icon::Folder, "Carpeta", "Añadir carpeta de proyectos", false, true).clicked() {
                         if let Some(p) = rfd::FileDialog::new().pick_folder() {

@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "builderExitCode": 0,
+  "binarySha256": "48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055",
+  "probeSha256": "f88b9ae20f3624b90189a8d8bc08728e4284ea7f6f9d365c119567b3a2296b3a",
+  "builderScriptSha256": "7e5c5ad1e5f8d70995c00edc33168763e4315769dc11a6f2c71b54f3a0d6427f",
+  "buildReceipt": {
+    "schema": 1,
+    "binarySha256": "48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055",
+    "probeSha256": "f88b9ae20f3624b90189a8d8bc08728e4284ea7f6f9d365c119567b3a2296b3a",
+    "lockSha256": "5b54739b6177d7c0d84a65b755b34461be0ec4bc808426c34934787f6d25aec3",
+    "recipeSha256": "a83282d7ada4e328f6ab855339caaec03a82012feebb110afb542789cf1e8446",
+    "toolchainCompilerSha256": "2e1c3555b5c733d619b62f1f35d6defb5358cf94a01b2263b81f9ecfc0e9e08a",
+    "target": "x86_64-w64-mingw32-ucrt",
+    "status": "built-unreviewed",
+    "traceRecipeSha256": "287cfaa11c25037049c14782f031c66b9c3c3922941cde3961984d9bf6246c8b"
+  },
+  "sourcePackageSha256": "8374c0d93e554cf3a66b16111be55b6498b859b70a0cd4a837d21ebc9d6f29ba",
+  "scope": "Complete final orchestrator executed locally in a third fresh directory. Remote Actions not run."
+}

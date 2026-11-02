@@ -19,6 +19,7 @@ pub enum Icon {
     SketchBrush,
     Pressure,
     Mannequin,
+    Head,
     Loop,
     Tween,
     CapRound,
@@ -75,6 +76,8 @@ pub enum Icon {
     Layers,
     Film,
     Settings,
+    DocumentSettings,
+    Preferences,
     Select,
     Transform,
     Rotate,
@@ -130,8 +133,9 @@ pub fn theme(ctx: &egui::Context) {
 }
 /// Original 20-unit line icons, drawn as geometry so they stay sharp at any DPI.
 pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
-    let origin = r.center() - Vec2::splat(10.);
-    let pt = |x: f32, y: f32| origin + Vec2::new(x, y);
+    let scale = (r.width().min(r.height()) / 20.).min(1.);
+    let origin = r.center() - Vec2::splat(10. * scale);
+    let pt = |x: f32, y: f32| origin + Vec2::new(x, y) * scale;
     let s = Stroke::new(1.5, c);
     let line = |a: (f32, f32), b: (f32, f32)| {
         p.line_segment([pt(a.0, a.1), pt(b.0, b.1)], s);
@@ -836,6 +840,35 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             path(&[(7., 18.), (2., 18.), (2., 13.)]);
             rect(6., 6., 8., 8.);
         }
+        Icon::Head => {
+            p.circle_stroke(pt(10., 7.), 5., s);
+            path(&[(5., 18.), (6., 14.), (14., 14.), (15., 18.)]);
+        }
+        Icon::DocumentSettings => {
+            path(&[
+                (5., 2.),
+                (13., 2.),
+                (17., 6.),
+                (17., 18.),
+                (5., 18.),
+                (5., 2.),
+            ]);
+            path(&[(13., 2.), (13., 6.), (17., 6.)]);
+            line((8., 10.), (14., 10.));
+            line((8., 14.), (12., 14.));
+        }
+        Icon::Preferences => {
+            circle(10., 10., 6.);
+            circle(10., 10., 2.5);
+            for i in 0..8 {
+                let angle = i as f32 * std::f32::consts::TAU / 8.;
+                let d = Vec2::angled(angle);
+                p.line_segment(
+                    [pt(10., 10.) + d * 6., pt(10., 10.) + d * 9.],
+                    Stroke::new(3., c),
+                );
+            }
+        }
         Icon::Settings => {
             for (y, x) in [(5., 7.), (10., 13.), (15., 8.)] {
                 line((2., y), (18., y));
@@ -860,13 +893,23 @@ pub fn button(
         egui::FontId::proportional(12.),
         crate::themes::palette().text,
     );
-    let width = if label.is_empty() {
+    let compact = label.is_empty() && ui.spacing().interact_size.y <= 24.;
+    let width = if compact {
+        27.
+    } else if label.is_empty() {
         32.
     } else {
         40. + text.size().x
     };
     let (r, response) = ui.allocate_exact_size(
-        Vec2::new(width, 30.),
+        Vec2::new(
+            width,
+            if compact {
+                ui.spacing().interact_size.y
+            } else {
+                30.
+            },
+        ),
         if enabled {
             Sense::click()
         } else {
@@ -898,7 +941,10 @@ pub fn button(
     };
     draw(
         ui.painter(),
-        Rect::from_center_size(Pos2::new(r.left() + 16., r.center().y), Vec2::splat(20.)),
+        Rect::from_center_size(
+            Pos2::new(r.left() + if compact { 13.5 } else { 16. }, r.center().y),
+            Vec2::splat(if compact { 18. } else { 20. }),
+        ),
         icon,
         color,
     );

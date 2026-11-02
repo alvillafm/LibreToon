@@ -1,0 +1,17 @@
+[
+  {
+    "case": "legacy incomplete manifest",
+    "result": "rejected",
+    "reason": "FFmpeg distribution BLOCKED: complete corresponding source and notices are unverified. See assets/tools/THIRD_PARTY.md."
+  },
+  {
+    "case": "changed binary hash",
+    "result": "rejected",
+    "reason": "FFmpeg hash changed: repeat source and licensing review."
+  },
+  {
+    "case": "reviewed-complete flag with incomplete source",
+    "result": "rejected",
+    "reason": "Missing corresponding source: ffmpeg"
+  }
+]

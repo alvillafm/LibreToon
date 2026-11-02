@@ -1,0 +1,39 @@
+Owned Windows x64 FFmpeg build; 2 November 2026.
+SHA-256: 48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055
+Source/build review: BUILD_EVIDENCE.json and SOURCE_STATUS.json
+
+ffmpeg version 7.1.5-LibreToon-1 Copyright (c) 2000-2026 the FFmpeg developers
+built with clang version 18.1.8 (https://github.com/llvm/llvm-project.git 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff)
+configuration: --prefix=/build/prefix --target-os=mingw32 --arch=x86_64 --enable-cross-compile --cc=x86_64-w64-mingw32-clang --cxx=x86_64-w64-mingw32-clang++ --ar=x86_64-w64-mingw32-ar --ranlib=x86_64-w64-mingw32-ranlib --nm=x86_64-w64-mingw32-nm --strip=x86_64-w64-mingw32-strip --pkg-config=pkgconf --pkg-config-flags=--static --enable-gpl --enable-version3 --enable-libx264 --enable-zlib --enable-static --disable-shared --disable-autodetect --disable-debug --disable-doc --disable-ffplay --disable-everything --enable-protocol='file,pipe' --enable-demuxer='rawvideo,mov,matroska,avi,gif,image2' --enable-muxer='mp4,matroska,avi,mov,gif,image2,rawvideo,null' --enable-encoder='libx264,mpeg4,prores_ks,gif,png,rawvideo' --enable-decoder='h264,mpeg4,prores,gif,png,rawvideo' --enable-parser='h264,mpeg4video,gif' --enable-filter='pad,format,scale,split,palettegen,paletteuse,null,ssim,psnr,setsar,setpts' --extra-cflags='-O2 -ffile-prefix-map=/build=/build -fdebug-prefix-map=/build=/build -fno-ident -I/build/prefix/include' --extra-ldflags='-Wl,--no-insert-timestamp -L/build/prefix/lib -Wl,-Map,/build/logs/link.map' --extra-version=LibreToon-1
+libavutil      59. 39.100 / 59. 39.100
+libavcodec     61. 19.101 / 61. 19.101
+libavformat    61.  7.103 / 61.  7.103
+libavdevice    61.  3.100 / 61.  3.100
+libavfilter    10.  5.100 / 10.  5.100
+libswscale      8.  3.100 /  8.  3.100
+libswresample   5.  3.100 /  5.  3.100
+libpostproc    58.  3.100 / 58.  3.100
+
+ffmpeg version 7.1.5-LibreToon-1 Copyright (c) 2000-2026 the FFmpeg developers
+  built with clang version 18.1.8 (https://github.com/llvm/llvm-project.git 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff)
+  configuration: --prefix=/build/prefix --target-os=mingw32 --arch=x86_64 --enable-cross-compile --cc=x86_64-w64-mingw32-clang --cxx=x86_64-w64-mingw32-clang++ --ar=x86_64-w64-mingw32-ar --ranlib=x86_64-w64-mingw32-ranlib --nm=x86_64-w64-mingw32-nm --strip=x86_64-w64-mingw32-strip --pkg-config=pkgconf --pkg-config-flags=--static --enable-gpl --enable-version3 --enable-libx264 --enable-zlib --enable-static --disable-shared --disable-autodetect --disable-debug --disable-doc --disable-ffplay --disable-everything --enable-protocol='file,pipe' --enable-demuxer='rawvideo,mov,matroska,avi,gif,image2' --enable-muxer='mp4,matroska,avi,mov,gif,image2,rawvideo,null' --enable-encoder='libx264,mpeg4,prores_ks,gif,png,rawvideo' --enable-decoder='h264,mpeg4,prores,gif,png,rawvideo' --enable-parser='h264,mpeg4video,gif' --enable-filter='pad,format,scale,split,palettegen,paletteuse,null,ssim,psnr,setsar,setpts' --extra-cflags='-O2 -ffile-prefix-map=/build=/build -fdebug-prefix-map=/build=/build -fno-ident -I/build/prefix/include' --extra-ldflags='-Wl,--no-insert-timestamp -L/build/prefix/lib -Wl,-Map,/build/logs/link.map' --extra-version=LibreToon-1
+  libavutil      59. 39.100 / 59. 39.100
+  libavcodec     61. 19.101 / 61. 19.101
+  libavformat    61.  7.103 / 61.  7.103
+  libavdevice    61.  3.100 / 61.  3.100
+  libavfilter    10.  5.100 / 10.  5.100
+  libswscale      8.  3.100 /  8.  3.100
+  libswresample   5.  3.100 /  5.  3.100
+  libpostproc    58.  3.100 / 58.  3.100
+ffmpeg is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 3 of the License, or
+(at your option) any later version.
+
+ffmpeg is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with ffmpeg.  If not, see <http://www.gnu.org/licenses/>.

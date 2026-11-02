@@ -198,3 +198,34 @@ Las paletas solo afectan a decoraciones de la interfaz. Los datos del dibujo, el
 La colección Noto Sans CJK integrada ocupa aproximadamente 18,5 MiB de datos de fuente, compartidos como bytes estáticos. La memoria de fuentes/atlas depende de los glifos utilizados; no se afirma un límite global de RAM. El paquete Windows omite una segunda copia del TTC, conservando su licencia. Las regresiones comprueban los seis temas, los once idiomas, contraste de texto y texto secundario, cobertura de glifos, persistencia/migración y que recorrer los temas e idiomas no modifica el documento.
 
 `cargo test --locked render_studio_review_images -- --ignored --nocapture` añade vistas de los temas, preferencias y los tres idiomas asiáticos. Son capturas sin ventana para comprobar fuentes, contraste y colocación; no sustituyen una sesión manual en Windows.
+
+
+## Ajustes de interacción (2 de noviembre de 2026)
+
+Los destinos de arrastre de biblioteca se dibujan sobre las filas visibles; el indicador flotante solo muestra el recurso y el destino actuales. El menú contextual de fotogramas usa las acciones existentes y conserva la virtualización de filas y columnas. Los paneles usan un tamaño inicial con límites, en lugar de bloquear el tamaño cada cuadro.
+
+Las poses de huesos comparten su lista de símbolos afectados mediante SharedVec. La deformación comprueba esa lista antes de aplicar cada influencia y descarta los pesos desvinculados; no duplica geometría fuente. Desvincular limpia únicamente las celdas de la instancia afectada sin redistribuir los pesos de otros huesos. El pintado modifica solo el hueso activo, con hasta cuatro influencias por celda. La comprobación de pertenencia depende del número de símbolos vinculados; no se afirma una mejora temporal ni FPS constantes.
+
+Las regresiones cubren los arrastres reales de bordes de panel, el orden y visibilidad de herramientas a 1366 × 720 y 1366 × 768, la salida de carpetas con indicador de destino, creación de hijos desde el botón +, desvinculación con pesos obsoletos, aislamiento COW y acciones de timeline con deshacer y capas bloqueadas. Los renderizados de revisión se generan a 1366 × 768.
+
+
+## Texto, referencias 3D y cámaras (2 de noviembre de 2026)
+
+El editor de texto conserva contornos vectoriales portables y metadatos del cuadro. Las fuentes y contornos se resuelven al confirmar cambios; la edición agrupa el historial de una sesión en el cuadro. La fuente de la interfaz de edición se instala al cambiar de fuente, con los datos compartidos de egui, retirando la anterior. La cantidad de trabajo al escribir depende del contenido del cuadro; no se promete latencia constante para 16.384 caracteres.
+
+El maniquí evalúa una jerarquía fija de 16 articulaciones en tres dimensiones. Sus volúmenes son elipsoides de 10 × 16 celdas, con ordenación por profundidad y sombreado de vértices; no carga mallas externas ni añade datos a la exportación. Posar con ratón usa diez iteraciones sobre dos ángulos, sin cambiar longitudes. El coste es constante respecto al tamaño de la película, pero la malla se prepara en cada cuadro y aún necesita envío a GPU.
+
+El recorte entre cámaras guarda únicamente las dos cámaras del gesto y una instantánea COW del historial. Durante el arrastre restaura ese par antes de evaluar el desplazamiento, evitando perder claves al encoger y volver a extender el corte. Solo recorre las claves de esas cámaras; no duplica el proyecto ni desplaza geometría del dibujo.
+
+El bote aplica cierre morfológico solo al pulsar y únicamente a las barreras temporales. Su coste depende de la complejidad de los polígonos. Las pruebas cubren siluetas de pincel rellenas con huecos, conservan los contornos de entrada y comprueban el rechazo de regiones exteriores.
+
+Medición reproducible: cargo test --release --locked benchmark_3d_mannequin_projection -- --ignored --nocapture. Genera cien cuadros de un maniquí girando sobre un lienzo Full HD en Windows, sin GPU. Incluye evaluación, formas de lienzo y trabajo de egui en CPU; no representa FPS globales ni latencia física.
+
+Resultado local de una ejecución en perfil release predeterminado, Windows x64: 1,607568 ms de media por cuadro para los cien cuadros del escenario anterior. Incluye preparar las formas del lienzo y el maniquí, sin GPU ni una escena de producción. No es una comparación con otras aplicaciones.
+
+
+## Gizmo de articulaciones (2 de noviembre de 2026)
+
+El gizmo añade tres aros de 64 segmentos a la articulación seleccionada, con tamaño constante en pantalla y geometría local proyectada en 3D. Solo busca impactos en esos segmentos y evalúa las 16 articulaciones; no recorre fotogramas ni geometría del dibujo. Durante el gesto conserva la proyección de los aros y una instantánea COW para deshacer. Los aros casi de canto usan un arrastre tangencial para evitar divisiones inestables.
+
+La rotación local adicional se aplica después de situar la articulación, conservando su pivote y las longitudes de los segmentos. Sus valores se guardan en metadatos nativos, con cero por defecto para documentos antiguos. Las pruebas simulan arrastres de los tres ejes, cancelación, capas bloqueadas y deshacer. La medición de CPU de 1,607568 ms de la sección anterior corresponde al maniquí antes de añadir estos aros, no mide esta revisión.

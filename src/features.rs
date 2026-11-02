@@ -226,7 +226,7 @@ impl Default for Perspective {
         Self {
             enabled: false,
             horizon: 180.,
-            points: vec![[100., 180.], [860., 180.]].into(),
+            points: vec![[480., 180.]].into(),
             rays: 12,
         }
     }
@@ -245,6 +245,21 @@ pub struct ProjectExtras {
     pub cameras: SharedVec<Camera>,
     pub perspective: Perspective,
 }
+#[derive(Clone)]
+pub struct CameraTrim {
+    pub index: usize,
+    pub pointer_x: f32,
+    pub left: Camera,
+    pub right: Camera,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct FrameDrag {
+    pub layer: usize,
+    pub start: usize,
+    pub end: usize,
+    pub grab: usize,
+    pub target: Option<usize>,
+}
 pub struct FeatureState {
     pub toon_levels: u8,
     pub gradient_on: bool,
@@ -256,8 +271,11 @@ pub struct FeatureState {
     pub selected_folder: Option<u64>,
     pub selected_camera: Option<u64>,
     pub symbol_stack: Vec<(Document, usize, usize, u64)>,
+    pub frame_selection: Option<(usize, usize, usize)>,
+    pub frame_drag: Option<FrameDrag>,
     pub row_drag: Option<(bool, usize)>,
     pub camera_drag: Option<usize>,
+    pub camera_trim: Option<CameraTrim>,
     pub guide_drag: Option<usize>,
     pub last_pointer: Option<Pos2>,
 }
@@ -274,8 +292,11 @@ impl Default for FeatureState {
             selected_folder: None,
             selected_camera: None,
             symbol_stack: vec![],
+            frame_selection: None,
+            frame_drag: None,
             row_drag: None,
             camera_drag: None,
+            camera_trim: None,
             guide_drag: None,
             last_pointer: None,
         }

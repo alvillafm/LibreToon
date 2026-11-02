@@ -93,6 +93,7 @@ pub fn xml_text(data: Vec<u8>) -> Result<String, String> {
 pub struct Archive<'a> {
     bytes: &'a [u8],
     entries: std::collections::HashMap<Vec<u8>, usize>,
+    directory_size_recovered: bool,
 }
 impl<'a> Archive<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, String> {
@@ -105,10 +106,14 @@ impl<'a> Archive<'a> {
             return Err("Directorio ZIP incoherente".into());
         }
         let mut p = u32_at(bytes, end + 16)? as usize;
-        let stop = p
-            .checked_add(u32_at(bytes, end + 12)? as usize)
-            .filter(|s| *s <= end)
-            .ok_or("Directorio ZIP fuera de rango")?;
+        let start = p;
+        let declared_size = u32_at(bytes, end + 12)? as usize;
+        if start > end {
+            return Err("Directorio ZIP fuera de rango".into());
+        }
+        // Parse the declared number of records against the physical EOCD boundary.
+        // Animate 24 files can overstate the directory size by 54 bytes.
+        let stop = end;
         let mut entries = std::collections::HashMap::new();
         for _ in 0..count {
             if u32_at(bytes, p)? != 0x02014b50 {
@@ -131,7 +136,21 @@ impl<'a> Archive<'a> {
         if p != stop {
             return Err("Tamaño de directorio ZIP incoherente".into());
         }
-        Ok(Self { bytes, entries })
+        let actual_size = p - start;
+        let directory_size_recovered = declared_size != actual_size;
+        if directory_size_recovered
+            && !(declared_size == actual_size + 54 && entries.contains_key(b"mimetype".as_slice()))
+        {
+            return Err("Tamaño de directorio ZIP incoherente".into());
+        }
+        Ok(Self {
+            bytes,
+            entries,
+            directory_size_recovered,
+        })
+    }
+    pub fn directory_size_recovered(&self) -> bool {
+        self.directory_size_recovered
     }
     pub fn entry(&self, wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
         let Some(&p) = self.entries.get(wanted) else {

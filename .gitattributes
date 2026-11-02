@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Keep the locked FFmpeg builder scripts byte-stable on Windows checkouts.
+scripts/ffmpeg/*.sh text eol=lf
+scripts/ffmpeg/*.json text eol=lf
+scripts/*.ps1 text eol=lf

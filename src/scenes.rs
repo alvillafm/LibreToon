@@ -40,150 +40,175 @@ impl Editor {
         self.animation.picker = None;
         self.feature.selected_camera = None;
     }
-    pub fn scenes_ui(&mut self, ctx: &egui::Context) {
-        if !self.animation.scenes_open {
-            return;
+    pub fn scene_dropdown(&mut self, ui: &mut egui::Ui) {
+        let label = format!("{}  ▾", self.scene_label());
+        let response = button(
+            ui,
+            Icon::Film,
+            &label,
+            "Scene manager",
+            self.animation.scenes_open,
+            true,
+        );
+        if response.clicked() {
+            self.animation.scenes_open = !self.animation.scenes_open;
         }
-        let mut open = true;
-        egui::Window::new(tr("Gestor de escenas"))
-            .open(&mut open)
-            .default_width(470.)
-            .default_pos(ctx.content_rect().center() - egui::vec2(235., 160.))
-            .show(ctx, |ui| {
-                self.ensure_scenes();
-                ui.horizontal(|ui| {
-                    if button(
-                        ui,
-                        Icon::Plus,
-                        "+ Scene",
-                        "Add scene",
-                        false,
-                        self.doc.extras.scenes.len() < 100,
-                    )
-                    .clicked()
-                    {
-                        self.leave_symbol_context_for_document_change();
-                        self.checkpoint();
-                        animation::store_scene(&mut self.doc);
-                        let mut fresh = crate::fresh_document();
-                        fresh.width = self.doc.width;
-                        fresh.height = self.doc.height;
-                        let s =
-                            animation::scene_from(&fresh, crate::features::id(), "Scene".into());
-                        self.doc.extras.scenes.push(s);
-                        self.switch_scene(self.doc.extras.scenes.len() - 1);
-                        self.recover();
-                    }
-                    if button(
-                        ui,
-                        Icon::Play,
-                        tr("Reproducir todas las escenas"),
-                        "Preview movie",
-                        self.animation.play_all && self.playing,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.leave_symbol_context_for_document_change();
-                        self.switch_scene(0);
-                        self.animation.play_all = true;
-                        self.playing = true;
-                        self.tick = std::time::Instant::now();
-                    }
-                });
-                ui.separator();
-                let mut reorder = None;
-                egui::ScrollArea::vertical()
-                    .max_height(400.)
-                    .show(ui, |ui| {
-                        for i in 0..self.doc.extras.scenes.len() {
-                            let s = self.doc.extras.scenes[i].clone();
-                            ui.horizontal(|ui| {
-                                let (rect, drag) = ui
-                                    .allocate_exact_size(egui::vec2(24., 28.), egui::Sense::drag());
-                                crate::design::draw(
-                                    ui.painter(),
-                                    rect,
-                                    Icon::Pan,
-                                    crate::themes::muted(),
-                                );
-                                if drag.drag_started() {
-                                    self.animation.scene_drag = Some(i);
-                                }
-                                ui.label(format!("{}.", i + 1));
-                                if self.animation.scene_rename == Some(s.id) {
-                                    let r = ui
-                                        .text_edit_singleline(&mut self.doc.extras.scenes[i].name);
-                                    if r.changed() {
-                                        self.recover();
-                                    }
-                                    if r.lost_focus() {
-                                        self.animation.scene_rename = None;
-                                        self.recover();
-                                    }
-                                } else {
-                                    let r = ui.add_sized(
-                                        [300., 28.],
-                                        egui::Button::selectable(
-                                            i == self.doc.extras.active_scene,
-                                            &s.name,
-                                        ),
-                                    );
-                                    if r.double_clicked() {
-                                        self.checkpoint();
-                                        self.animation.scene_rename = Some(s.id);
-                                    } else if r.clicked() {
-                                        self.leave_symbol_context_for_document_change();
-                                        self.switch_scene(i);
-                                    }
-                                    if ui.input(|x| {
-                                        x.pointer.any_released()
-                                            && x.pointer
-                                                .interact_pos()
-                                                .is_some_and(|p| r.rect.contains(p))
-                                    }) {
-                                        if let Some(from) = self.animation.scene_drag.take() {
-                                            reorder = Some((from, i));
-                                        }
-                                    }
-                                }
-                                if button(
-                                    ui,
-                                    Icon::Trash,
-                                    "",
-                                    "Delete scene",
-                                    false,
-                                    self.doc.extras.scenes.len() > 1,
-                                )
-                                .clicked()
-                                {
-                                    self.animation.scene_delete = Some(s.id);
-                                }
-                            });
+        let mut open = self.animation.scenes_open;
+        egui::Popup::from_response(&response)
+            .width(520.)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .open_bool(&mut open)
+            .show(|ui| self.scene_manager_contents(ui));
+        self.animation.scenes_open = open;
+        if !open {
+            self.animation.scene_drag = None;
+        }
+    }
+    fn scene_manager_contents(&mut self, ui: &mut egui::Ui) {
+        ui.set_width(500.);
+        ui.heading(tr("Gestor de escenas"));
+        self.ensure_scenes();
+        ui.horizontal(|ui| {
+            if button(
+                ui,
+                Icon::Plus,
+                "+ Scene",
+                "Add scene",
+                false,
+                self.doc.extras.scenes.len() < 100,
+            )
+            .clicked()
+            {
+                self.leave_symbol_context_for_document_change();
+                self.checkpoint();
+                animation::store_scene(&mut self.doc);
+                let mut fresh = crate::fresh_document();
+                fresh.width = self.doc.width;
+                fresh.height = self.doc.height;
+                let s = animation::scene_from(&fresh, crate::features::id(), "Scene".into());
+                self.doc.extras.scenes.push(s);
+                self.switch_scene(self.doc.extras.scenes.len() - 1);
+                self.recover();
+            }
+            if button(
+                ui,
+                Icon::Play,
+                tr("Reproducir todas las escenas"),
+                "Preview movie",
+                self.animation.play_all && self.playing,
+                true,
+            )
+            .clicked()
+            {
+                self.leave_symbol_context_for_document_change();
+                self.switch_scene(0);
+                self.animation.play_all = true;
+                self.playing = true;
+                self.tick = std::time::Instant::now();
+            }
+        });
+        ui.separator();
+        let mut reorder = None;
+        egui::ScrollArea::vertical()
+            .max_height((ui.ctx().content_rect().height() * 0.6).clamp(240., 500.))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for i in 0..self.doc.extras.scenes.len() {
+                    let s = self.doc.extras.scenes[i].clone();
+                    let row = ui.horizontal(|ui| {
+                        let (rect, drag) =
+                            ui.allocate_exact_size(egui::vec2(24., 28.), egui::Sense::drag());
+                        crate::design::draw(ui.painter(), rect, Icon::Pan, crate::themes::muted());
+                        drag.clone().on_hover_cursor(egui::CursorIcon::Grab);
+                        if drag.drag_started() {
+                            self.animation.scene_drag = Some(i);
+                        }
+                        ui.label(format!("{}.", i + 1));
+                        if self.animation.scene_rename == Some(s.id) {
+                            let r = ui.text_edit_singleline(&mut self.doc.extras.scenes[i].name);
+                            if r.changed() {
+                                self.recover();
+                            }
+                            if r.lost_focus() {
+                                self.animation.scene_rename = None;
+                                self.recover();
+                            }
+                        } else {
+                            let r = ui.add_sized(
+                                [300., 28.],
+                                egui::Button::selectable(
+                                    i == self.doc.extras.active_scene,
+                                    &s.name,
+                                ),
+                            );
+                            if r.double_clicked() {
+                                self.checkpoint();
+                                self.animation.scene_rename = Some(s.id);
+                            } else if r.clicked() {
+                                self.leave_symbol_context_for_document_change();
+                                self.switch_scene(i);
+                            }
+                        }
+                        if button(
+                            ui,
+                            Icon::Trash,
+                            "",
+                            "Delete scene",
+                            false,
+                            self.doc.extras.scenes.len() > 1,
+                        )
+                        .clicked()
+                        {
+                            self.animation.scene_delete = Some(s.id);
                         }
                     });
-                if let Some((a, b)) = reorder {
-                    if a != b {
-                        self.checkpoint();
-                        animation::store_scene(&mut self.doc);
-                        let active = self.doc.extras.scenes[self.doc.extras.active_scene].id;
-                        let s = self.doc.extras.scenes.remove(a);
-                        self.doc.extras.scenes.insert(b, s);
-                        self.doc.extras.active_scene = self
-                            .doc
-                            .extras
-                            .scenes
-                            .iter()
-                            .position(|s| s.id == active)
-                            .unwrap();
-                        self.recover();
+                    if let Some(from) = self.animation.scene_drag {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                            if row.response.rect.contains(pos) && ui.clip_rect().contains(pos) {
+                                let after = pos.y >= row.response.rect.center().y;
+                                let insertion = i + usize::from(after);
+                                let destination = insertion - usize::from(from < insertion);
+                                let y = if after {
+                                    row.response.rect.bottom()
+                                } else {
+                                    row.response.rect.top()
+                                };
+                                ui.painter().hline(
+                                    row.response.rect.x_range(),
+                                    y,
+                                    egui::Stroke::new(2., crate::themes::accent()),
+                                );
+                                if ui.input(|i| i.pointer.primary_released()) {
+                                    reorder = Some((from, destination));
+                                }
+                            }
+                        }
                     }
                 }
-                if ui.input(|i| i.pointer.any_released()) {
-                    self.animation.scene_drag = None;
-                }
             });
-        self.animation.scenes_open = open;
+        if let Some((a, b)) = reorder {
+            if a != b {
+                self.checkpoint();
+                animation::store_scene(&mut self.doc);
+                let active = self.doc.extras.scenes[self.doc.extras.active_scene].id;
+                let s = self.doc.extras.scenes.remove(a);
+                self.doc.extras.scenes.insert(b, s);
+                self.doc.extras.active_scene = self
+                    .doc
+                    .extras
+                    .scenes
+                    .iter()
+                    .position(|s| s.id == active)
+                    .unwrap();
+                self.recover();
+            }
+        }
+        if ui.input(|i| i.pointer.any_released()) {
+            self.animation.scene_drag = None;
+        }
+    }
+    pub fn scenes_ui(&mut self, ctx: &egui::Context) {
         if let Some(id) = self.animation.scene_delete {
             egui::Modal::new(egui::Id::unique("confirm-delete-scene")).show(ctx, |ui| {
                 ui.heading(tr("Eliminar escena"));

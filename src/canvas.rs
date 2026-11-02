@@ -331,7 +331,40 @@ pub(crate) fn axis_distance(m: &Mark, p: Pos2) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 fn hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
-    stroke_hit(m, p, tolerance) || crate::vector::contains_fill(m, p)
+    stroke_hit(m, p, tolerance) || fill_hit(m, p, tolerance)
+}
+/// Filled brush ink needs the same screen-space picking margin as a stroke.
+/// Test the real contour, including counters, rather than its bounding box.
+fn fill_hit(mark: &Mark, p: Pos2, tolerance: f32) -> bool {
+    if mark.fill.is_none()
+        || !crate::vector::control_bounds(mark)
+            .expand(tolerance)
+            .contains(p)
+    {
+        return false;
+    }
+    if crate::vector::contains_fill(mark, p) {
+        return true;
+    }
+    let outer = crate::vector::flatten(mark, 0.15);
+    let near = |ring: &[Pos2]| {
+        ring.len() >= 2
+            && ring
+                .iter()
+                .zip(ring.iter().cycle().skip(1))
+                .take(ring.len())
+                .any(|(&a, &b)| distance_to_segment(p, a, b) <= tolerance)
+    };
+    near(&outer)
+        || mark.holes.iter().any(|ring| {
+            near(
+                &ring
+                    .iter()
+                    .copied()
+                    .map(crate::vector::pos)
+                    .collect::<Vec<_>>(),
+            )
+        })
 }
 pub fn transformed(m: &Mark, pivot: Pos2, scale: Vec2, angle: f32, translation: Vec2) -> Mark {
     crate::vector::transform(m, |p| {
@@ -405,6 +438,7 @@ impl Editor {
             || self.animation.scenes_open
             || self.animation.picker.is_some()
             || self.studio.preferences_open
+            || self.document_settings.is_some()
             || self.studio.export.is_some();
         let (
             pointer,
@@ -444,31 +478,38 @@ impl Editor {
             })
         });
         let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
-        let guide_handled = visual_handled
-            | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
-            | self.advanced_canvas_input(ui, area, view)
-            | self.mannequin_input(ui, area, view)
-            | self.rig_input(ui, area, view);
+        let guide_handled = if self.document_settings.is_some() {
+            true
+        } else {
+            visual_handled
+                | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
+                | self.advanced_canvas_input(ui, area, view)
+                | self.mannequin_input(ui, area, view)
+                | self.rig_input(ui, area, view)
+        };
         let mut convert = false;
-        response.context_menu(|ui| {
-            if crate::design::button(
-                ui,
-                Icon::Symbol,
-                "Convertir a símbolo · F8",
-                "Convertir a símbolo",
-                false,
-                !state.selected.is_empty(),
-            )
-            .clicked()
-            {
-                convert = true;
-                ui.close();
-            }
-        });
+        if self.tool != Tool::Mannequin {
+            response.context_menu(|ui| {
+                if crate::design::button(
+                    ui,
+                    Icon::Symbol,
+                    "Convertir a símbolo · F8",
+                    "Convertir a símbolo",
+                    false,
+                    !state.selected.is_empty(),
+                )
+                .clicked()
+                {
+                    convert = true;
+                    ui.close();
+                }
+            });
+        }
         if convert {
             self.canvas = state;
             self.convert_symbol();
-            return;
+            state = std::mem::take(&mut self.canvas);
+            ctx.request_repaint();
         }
         if response.double_clicked()
             && matches!(self.tool, Tool::Select | Tool::Object | Tool::Transform)
@@ -642,6 +683,10 @@ impl Editor {
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
                 self.text_at(world);
+                if self.drawing.text.editing.is_none() {
+                    self.drawing.text.box_drag = Some(world);
+                }
+                state.selected = self.canvas.selected.clone();
             } else if !self.playing && self.tool == Tool::Eyedropper {
                 self.sample_apply_at(&state.selected, world, 3. / view.scale);
             } else if !self.playing && self.tool == Tool::Wand {
@@ -850,7 +895,7 @@ impl Editor {
                             let wants_stroke = stroke_hit(
                                 &self.doc.layers[id.0].frames[self.frame][id.1],
                                 world,
-                                4. / view.scale,
+                                6. / view.scale,
                             );
                             id = self.separate_component(&mut state, id, wants_stroke);
                             if wants_stroke {
@@ -1460,6 +1505,11 @@ impl Editor {
                     Some(&mut state.cache),
                 );
             }
+        }
+        self.paint_mannequin_gizmo(&painter, view);
+        self.text_canvas_ui(ui, &painter, view);
+        if self.tool == Tool::Text {
+            state.selected = self.canvas.selected.clone();
         }
         if let Some(mark) = &self.draft {
             let mut mark = mark.clone();
@@ -2901,12 +2951,15 @@ mod new_tool_regressions {
             let c = &e.doc.extras.cameras[0];
             assert_eq!(c.animation.keys.len(), 1);
             assert_eq!(c.animation.keys[0].frame, 10);
-            assert_eq!(c.center, [480., 270.]);
+            assert_eq!(
+                c.center,
+                [e.doc.width as f32 / 2., e.doc.height as f32 / 2.]
+            );
             assert!(e.project_document().validate().is_ok());
         });
     }
     #[test]
-    fn moving_held_art_creates_motion_key_instead_of_rewriting_first_frame() {
+    fn moving_held_art_edits_exposure_without_creating_motion() {
         run(|ctx, e| {
             e.doc = crate::fresh_document();
             let mark = rect([100., 100.], [200., 200.], [90, 60, 220, 255]);
@@ -2923,14 +2976,15 @@ mod new_tool_regressions {
             tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
             tick(ctx, e, vec![egui::Event::PointerMoved(q)]);
             tick(ctx, e, vec![button(q, false)]);
+            assert_ne!(e.doc.layers[0].frames[0][0].points, mark.points);
+            assert!(!e.doc.layers[0].key(10));
+            assert!(e.doc.layers[0].options.tweens.is_empty());
+            assert_eq!(
+                e.doc.layers[0].frames[0][0].points,
+                e.doc.layers[0].frames[10][0].points
+            );
+            e.history(false);
             assert_eq!(e.doc.layers[0].frames[0][0].points, mark.points);
-            assert!(e.doc.layers[0].key(10));
-            assert_eq!(e.doc.layers[0].options.tweens.len(), 1);
-            let mid =
-                crate::vector::control_bounds(&crate::animation::marks(&e.doc.layers[0], 5)[0])
-                    .center();
-            let end = crate::vector::control_bounds(&e.doc.layers[0].frames[10][0]).center();
-            assert!((mid.x - (150. + (end.x - 150.) / 2.)).abs() < 0.01);
         });
     }
     #[test]

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct TextSpec {
     pub content: String,
+    pub box_size: Option<[f32; 2]>,
     pub font: String,
     pub size: f32,
     pub line_height: f32,
@@ -24,7 +25,8 @@ pub struct TextSpec {
 impl Default for TextSpec {
     fn default() -> Self {
         Self {
-            content: "Tu historia empieza aquí".into(),
+            content: String::new(),
+            box_size: None,
             font: String::new(),
             size: 48.,
             line_height: 1.2,
@@ -42,7 +44,10 @@ impl Default for TextSpec {
 }
 impl TextSpec {
     pub fn valid(&self) -> bool {
-        self.content.len() <= 65536
+        self.box_size.is_none_or(|v| {
+            v.iter()
+                .all(|v| v.is_finite() && (1. ..=16384.).contains(v))
+        }) && self.content.len() <= 65536
             && self.font.len() <= 4096
             && self.size.is_finite()
             && (1. ..=2048.).contains(&self.size)
@@ -63,6 +68,10 @@ pub struct TextEditor {
     pub editing: Option<(usize, usize, usize)>,
     pub fonts: Vec<(String, PathBuf)>,
     pub fonts_loaded: bool,
+    pub box_drag: Option<Pos2>,
+    pub canvas_edit: bool,
+    pub focus: bool,
+    pub transaction: bool,
 }
 impl Default for TextEditor {
     fn default() -> Self {
@@ -71,6 +80,10 @@ impl Default for TextEditor {
             editing: None,
             fonts: vec![],
             fonts_loaded: false,
+            box_drag: None,
+            canvas_edit: false,
+            focus: false,
+            transaction: false,
         }
     }
 }
@@ -170,7 +183,7 @@ pub fn geometry(spec: &TextSpec) -> Result<Mark, String> {
     if !spec.valid() {
         return Err("Propiedades de texto fuera de rango".into());
     }
-    if spec.content.trim().is_empty() {
+    if spec.content.trim().is_empty() && spec.box_size.is_none() {
         return Err("Escribe un texto antes de insertarlo".into());
     }
     let bytes=std::fs::read(&spec.font).map_err(|_|"Selecciona una fuente instalada (TTF/OTF). El texto ya guardado conserva su dibujo sin la fuente.".to_string())?;
@@ -192,7 +205,34 @@ pub fn geometry(spec: &TextSpec) -> Result<Mark, String> {
         y: 0.,
         scale,
     };
-    for (line_index, line) in spec.content.lines().enumerate() {
+    let mut lines = vec![];
+    for paragraph in spec.content.split('\n') {
+        let mut line = String::new();
+        let mut width = 0.;
+        for word in paragraph.split_inclusive(char::is_whitespace) {
+            let word_width = word
+                .chars()
+                .map(advance)
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .sum::<f32>();
+            if !line.is_empty() && spec.box_size.is_some_and(|b| width + word_width > b[0]) {
+                lines.push(std::mem::take(&mut line));
+                width = 0.;
+            }
+            for c in word.chars() {
+                let w = advance(c)?;
+                if !line.is_empty() && spec.box_size.is_some_and(|b| width + w > b[0]) {
+                    lines.push(std::mem::take(&mut line));
+                    width = 0.;
+                }
+                line.push(c);
+                width += w;
+            }
+        }
+        lines.push(line);
+    }
+    for (line_index, line) in lines.iter().enumerate() {
         let width = line
             .chars()
             .map(advance)
@@ -200,8 +240,8 @@ pub fn geometry(spec: &TextSpec) -> Result<Mark, String> {
             .iter()
             .sum::<f32>();
         builder.x = match spec.align {
-            1 => -width / 2.,
-            2 => -width,
+            1 => spec.box_size.map_or(-width / 2., |b| (b[0] - width) / 2.),
+            2 => spec.box_size.map_or(-width, |b| b[0] - width),
             _ => 0.,
         };
         builder.y = line_index as f32 * spec.size * spec.line_height;
@@ -215,9 +255,7 @@ pub fn geometry(spec: &TextSpec) -> Result<Mark, String> {
         }
     }
     let mut contours = builder.contours.into_iter();
-    let first = contours
-        .next()
-        .ok_or("El texto no contiene contornos visibles")?;
+    let first = contours.next().unwrap_or_default();
     let holes = contours
         .map(|nodes| {
             let m = Mark {
@@ -232,10 +270,19 @@ pub fn geometry(spec: &TextSpec) -> Result<Mark, String> {
         })
         .collect();
     let mut mark = Mark {
+        points: if first.is_empty() {
+            vec![[0., 0.], spec.box_size.unwrap_or([1., 1.])].into()
+        } else {
+            Default::default()
+        },
         nodes: first.into(),
         holes,
         closed: true,
-        fill: Some(spec.color),
+        fill: if spec.content.trim().is_empty() {
+            None
+        } else {
+            Some(spec.color)
+        },
         stroke: spec.outline,
         width: spec.outline_width,
         color: spec.outline_color,
@@ -280,6 +327,9 @@ impl Editor {
         }
     }
     pub fn text_at(&mut self, p: Pos2) {
+        self.drawing.text.transaction = false;
+        self.drawing.text.canvas_edit = true;
+        self.drawing.text.focus = true;
         let selected = self
             .doc
             .layers
@@ -296,7 +346,10 @@ impl Editor {
                         mark.style
                             .text
                             .as_ref()
-                            .filter(|_| crate::vector::contains_fill(mark, p))
+                            .filter(|s| {
+                                text_box_bounds(s).is_some_and(|r| r.contains(p))
+                                    || crate::vector::contains_fill(mark, p)
+                            })
                             .map(|s| ((l, m, self.frame), (**s).clone()))
                     })
             });
@@ -307,25 +360,39 @@ impl Editor {
             self.layer = id.0;
         } else {
             self.drawing.text.editing = None;
+            self.drawing.text.spec.content.clear();
+            self.drawing.text.spec.box_size = None;
             self.drawing.text.spec.matrix = [1., 0., 0., 1., p.x, p.y];
             self.canvas.clear_selection();
         }
     }
     pub fn commit_text(&mut self) {
-        if self.doc.layers[self.layer].options.locked
-            || !self.doc.layers[self.layer].visible
-            || self.doc.layers[self.layer].options.mannequin.is_some()
+        let edit = self.drawing.text.editing.filter(|&(l, m, f)| {
+            f == self.frame
+                && self
+                    .doc
+                    .layers
+                    .get(l)
+                    .and_then(|l| l.frames.get(f))
+                    .and_then(|f| f.get(m))
+                    .is_some_and(|m| m.style.text.is_some())
+        });
+        if self.drawing.text.editing.is_some() && edit.is_none() {
+            return;
+        }
+        let layer = edit.map_or(self.layer, |id| id.0);
+        if self.doc.layers[layer].options.locked
+            || !self.doc.layers[layer].visible
+            || self.doc.layers[layer].options.mannequin.is_some()
         {
             return;
         }
         match geometry(&self.drawing.text.spec) {
             Ok(mark) => {
-                let edit = self.drawing.text.editing.filter(|&(l, m, f)| {
-                    f == self.frame
-                        && l < self.doc.layers.len()
-                        && m < self.doc.layers[l].frames[f].len()
-                });
-                self.checkpoint();
+                if !self.drawing.text.transaction {
+                    self.checkpoint();
+                    self.drawing.text.transaction = true;
+                }
                 let (l, m) = if let Some((l, m, _)) = edit {
                     self.materialize_motion(&[(l, m)]);
                     self.doc.layers[l].frames[self.frame][m] = mark;
@@ -344,7 +411,7 @@ impl Editor {
             Err(e) => self.status = e,
         }
     }
-    pub fn text_properties(&mut self, ui: &mut egui::Ui) {
+    pub fn ensure_text_fonts(&mut self) {
         if !self.drawing.text.fonts_loaded {
             self.drawing.text.fonts = system_fonts();
             self.drawing.text.fonts_loaded = true;
@@ -361,6 +428,10 @@ impl Editor {
                 }
             }
         }
+    }
+    pub fn text_properties(&mut self, ui: &mut egui::Ui) {
+        self.ensure_text_fonts();
+        let original = self.drawing.text.spec.clone();
         crate::design::category(ui, "CONTENIDO");
         ui.add(
             egui::TextEdit::multiline(&mut self.drawing.text.spec.content)
@@ -368,6 +439,14 @@ impl Editor {
                 .desired_width(f32::INFINITY)
                 .char_limit(16384),
         );
+        if let Some(size) = self.drawing.text.spec.box_size.as_mut() {
+            ui.horizontal(|ui| {
+                ui.label(crate::i18n::tr("Ancho"));
+                ui.add(egui::DragValue::new(&mut size[0]).range(1. ..=16384.));
+                ui.label(crate::i18n::tr("Alto"));
+                ui.add(egui::DragValue::new(&mut size[1]).range(1. ..=16384.));
+            });
+        }
         crate::design::category(ui, "TIPOGRAFÍA");
         let spec = &mut self.drawing.text.spec;
         let name = PathBuf::from(&spec.font)
@@ -462,31 +541,175 @@ impl Editor {
             );
             edit_color(ui, &mut spec.outline_color);
         }
-        ui.add_space(12.);
-        if crate::design::button(
-            ui,
-            crate::design::Icon::Text,
-            if self.drawing.text.editing.is_some() {
-                "Aplicar cambios"
-            } else {
-                "Insertar texto"
-            },
-            "Texto vectorial editable",
-            false,
-            true,
-        )
-        .clicked()
-        {
+        if original != self.drawing.text.spec && self.drawing.text.editing.is_some() {
             self.commit_text();
         }
-        ui.small(crate::i18n::tr(
-            "Haz clic en el lienzo para colocar texto o sobre un texto existente para editarlo.",
-        ));
+        ui.small(crate::i18n::tr("Arrastra para crear un cuadro. Escribe en el lienzo; las propiedades se aplican al instante."));
     }
 }
 fn edit_color(ui: &mut egui::Ui, rgba: &mut [u8; 4]) {
     let mut c = Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
     if ui.color_edit_button_srgba(&mut c).changed() {
         *rgba = c.to_srgba_unmultiplied();
+    }
+}
+
+pub fn text_box_bounds(spec: &TextSpec) -> Option<egui::Rect> {
+    let size = spec.box_size?;
+    let mut bounds = egui::Rect::NOTHING;
+    for p in [
+        Pos2::new(0., -spec.size),
+        Pos2::new(size[0], -spec.size),
+        Pos2::new(size[0], size[1] - spec.size),
+        Pos2::new(0., size[1] - spec.size),
+    ] {
+        bounds.extend_with(crate::rig::point(spec.matrix, p));
+    }
+    Some(bounds)
+}
+impl Editor {
+    pub fn text_canvas_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        view: crate::canvas::View,
+    ) {
+        if self.tool != crate::canvas::Tool::Text || !self.drawing.text.canvas_edit {
+            return;
+        }
+        if let Some(start) = self.drawing.text.box_drag {
+            let end = ui
+                .input(|i| i.pointer.interact_pos())
+                .map(|p| view.world(p))
+                .unwrap_or(start);
+            let rect = egui::Rect::from_two_pos(start, end);
+            painter.rect_stroke(
+                egui::Rect::from_two_pos(view.screen(rect.min), view.screen(rect.max)),
+                0.,
+                egui::Stroke::new(1., crate::themes::accent()),
+                egui::StrokeKind::Inside,
+            );
+            if ui.input(|i| i.pointer.primary_down()) {
+                return;
+            }
+            self.drawing.text.box_drag = None;
+            let size = if rect.width() > 12. && rect.height() > 12. {
+                rect.size()
+            } else {
+                egui::vec2(320., 140.)
+            };
+            let top = if rect.width() > 12. { rect.min } else { start };
+            self.drawing.text.spec.box_size = Some([size.x.max(20.), size.y.max(20.)]);
+            self.drawing.text.spec.matrix =
+                [1., 0., 0., 1., top.x, top.y + self.drawing.text.spec.size];
+            self.ensure_text_fonts();
+            self.commit_text();
+            self.drawing.text.focus = true;
+        }
+        if self
+            .drawing
+            .text
+            .editing
+            .is_some_and(|(_, _, f)| f != self.frame)
+        {
+            self.drawing.text.canvas_edit = false;
+            return;
+        }
+        let Some(bounds) = text_box_bounds(&self.drawing.text.spec).or_else(|| {
+            self.drawing.text.editing.and_then(|(l, m, f)| {
+                self.doc
+                    .layers
+                    .get(l)?
+                    .frames
+                    .get(f)?
+                    .get(m)
+                    .map(crate::vector::control_bounds)
+            })
+        }) else {
+            return;
+        };
+        let rect = egui::Rect::from_two_pos(view.screen(bounds.min), view.screen(bounds.max));
+        painter.rect_stroke(
+            rect,
+            0.,
+            egui::Stroke::new(1., crate::themes::accent()),
+            egui::StrokeKind::Inside,
+        );
+        let family = egui::FontFamily::Name("canvas-text-font".into());
+        let mut definitions = ui.ctx().fonts(|f| f.definitions().clone());
+        let font_path = self.drawing.text.spec.font.clone();
+        let ready = definitions
+            .families
+            .get(&family)
+            .is_some_and(|v| v.first() == Some(&font_path));
+        if !ready {
+            if let Ok(bytes) = std::fs::read(&font_path) {
+                if let Some(old) = definitions.families.get(&family).and_then(|v| v.first()) {
+                    definitions.font_data.remove(&old.clone());
+                }
+                definitions.font_data.insert(
+                    font_path.clone(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                definitions.families.insert(family.clone(), vec![font_path]);
+                ui.ctx().set_fonts(definitions);
+            }
+        }
+        let family = if ready {
+            family
+        } else {
+            egui::FontFamily::Proportional
+        };
+        let align = match self.drawing.text.spec.align {
+            1 => egui::Align::Center,
+            2 => egui::Align::Max,
+            _ => egui::Align::Min,
+        };
+        let size = (self.drawing.text.spec.size * view.scale).clamp(5., 200.);
+        let font_id = egui::FontId::new(size, family);
+        let line_height = size * self.drawing.text.spec.line_height;
+        let letter_spacing = self.drawing.text.spec.letter_spacing * view.scale;
+        let word_spacing = self.drawing.text.spec.word_spacing * view.scale;
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = width;
+            job.halign = align;
+            for c in text.as_str().chars() {
+                job.append(
+                    &c.to_string(),
+                    0.,
+                    egui::TextFormat {
+                        font_id: font_id.clone(),
+                        color: Color32::TRANSPARENT,
+                        extra_letter_spacing: letter_spacing
+                            + if c == ' ' { word_spacing } else { 0. },
+                        line_height: Some(line_height),
+                        ..Default::default()
+                    },
+                );
+            }
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let response = ui.put(
+            rect,
+            egui::TextEdit::multiline(&mut self.drawing.text.spec.content)
+                .id(egui::Id::unique(("canvas-text", self.drawing.text.editing)))
+                .font(font_id.clone())
+                .layouter(&mut layouter)
+                .align(egui::Align2([align, egui::Align::Min]))
+                .text_color(Color32::TRANSPARENT)
+                .frame(egui::Frame::NONE)
+                .margin(0.)
+                .desired_width(rect.width())
+                .char_limit(16384),
+        );
+        if self.drawing.text.focus {
+            response.request_focus();
+            self.drawing.text.focus = false;
+        }
+        if response.changed() {
+            self.commit_text();
+            ui.ctx().request_repaint();
+        }
     }
 }

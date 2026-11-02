@@ -116,46 +116,26 @@ impl Cell {
             .sum()
     }
     pub fn set(&mut self, bone: u64, weight: f32) {
-        let weight = weight.clamp(0., 1.);
-        let old = self.weight(bone);
-        let other = self
-            .influences
-            .iter()
-            .filter(|i| i.bone != bone)
-            .map(|i| i.weight)
-            .sum::<f32>();
+        // Painting edits only this bone. Unused weight stays in the rest pose.
         let slot = self
             .influences
             .iter()
             .position(|i| i.bone == bone)
-            .unwrap_or_else(|| {
-                self.influences
-                    .iter()
-                    .enumerate()
-                    .min_by(|(_, a), (_, b)| a.weight.total_cmp(&b.weight))
-                    .unwrap()
-                    .0
-            });
-        if self.influences[slot].bone != bone {
-            self.influences[slot] = Influence { bone, weight: 0. };
-        }
-        let other = if old == 0. {
-            self.influences
-                .iter()
-                .filter(|i| i.bone != bone)
-                .map(|i| i.weight)
-                .sum()
-        } else {
-            other
+            .or_else(|| self.influences.iter().position(|i| i.weight <= 1e-8));
+        let Some(slot) = slot else {
+            return;
         };
-        for (i, v) in self.influences.iter_mut().enumerate() {
-            if i == slot {
-                v.bone = bone;
-                v.weight = weight;
-            } else if other > 1e-8 {
-                v.weight *= (1. - weight) / other;
-            }
-        }
+        let other = self
+            .influences
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != slot)
+            .map(|(_, i)| i.weight)
+            .sum::<f32>();
+        self.influences[slot] = Influence {
+            bone,
+            weight: weight.clamp(0., (1. - other).max(0.)),
+        };
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -237,8 +217,9 @@ impl Binding {
             .clamp(0., 1.)
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Pose {
+    pub targets: SharedVec<u64>,
     pub start: Pos2,
     pub end: Pos2,
     pub angle: f32,
@@ -336,7 +317,7 @@ impl Rig {
         ) -> Option<Pose> {
             let b = &rig.bones[index];
             if let Some(p) = cache.get(&b.id) {
-                return Some(*p);
+                return Some(p.clone());
             }
             if visiting.len() >= 64 || !visiting.insert(b.id) {
                 return None;
@@ -349,7 +330,7 @@ impl Rig {
             let rest = vector::pos(b.start);
             let rest_angle = (vector::pos(b.end) - rest).angle();
             let angle = rest_angle
-                + parent.map_or(0., |p| {
+                + parent.as_ref().map_or(0., |p| {
                     p.angle
                         - (vector::pos(rig.bones[*lookup.get(&b.parent.unwrap()).unwrap()].end)
                             - vector::pos(
@@ -358,13 +339,13 @@ impl Rig {
                         .angle()
                 })
                 + value.angle;
-            let inherited = parent.map_or(IDENTITY, |p| p.matrix);
+            let inherited = parent.as_ref().map_or(IDENTITY, |p| p.matrix);
             let start = point(inherited, rest)
                 + crate::canvas::rotate(
                     vector::pos(value.translation).to_vec2(),
-                    parent.map_or(0., |p| p.angle),
+                    parent.as_ref().map_or(0., |p| p.angle),
                 );
-            let scale = value.scale * parent.map_or(1., |p| p.scale);
+            let scale = value.scale * parent.as_ref().map_or(1., |p| p.scale);
             let rotation = angle - rest_angle;
             let (s, c) = rotation.sin_cos();
             let matrix = [
@@ -376,6 +357,7 @@ impl Rig {
                 start.y - (s * rest.x + c * rest.y) * scale,
             ];
             let pose = Pose {
+                targets: b.targets.clone(),
                 start,
                 end: point(matrix, vector::pos(b.end)),
                 angle,
@@ -383,7 +365,7 @@ impl Rig {
                 matrix,
             };
             visiting.remove(&b.id);
-            cache.insert(b.id, pose);
+            cache.insert(b.id, pose.clone());
             Some(pose)
         }
         let lookup = self
@@ -436,6 +418,20 @@ impl Rig {
             parent = b.parent;
         }
         true
+    }
+    pub fn detach(&mut self, bone: u64, target: u64) {
+        if let Some(b) = self.bones.iter_mut().find(|b| b.id == bone) {
+            b.targets.retain(|t| *t != target);
+        }
+        if let Some(binding) = self.bindings.iter_mut().find(|b| b.target == target) {
+            for cell in &mut binding.cells {
+                for influence in &mut cell.influences {
+                    if influence.bone == bone {
+                        *influence = Influence::default();
+                    }
+                }
+            }
+        }
     }
     pub fn auto_weights(&mut self, target: u64) {
         let Some(i) = self.bindings.iter().position(|b| b.target == target) else {
@@ -624,7 +620,10 @@ pub fn skin_point(binding: &Binding, poses: &HashMap<u64, Pose>, p: Pos2) -> Pos
     let mut sum = 0.;
     let mut out = Vec2::ZERO;
     for i in binding.sample(p) {
-        if let Some(b) = poses.get(&i.bone) {
+        if let Some(b) = poses
+            .get(&i.bone)
+            .filter(|b| b.targets.contains(&binding.target))
+        {
             out += point(b.matrix, p).to_vec2() * i.weight;
             sum += i.weight;
         }
@@ -652,7 +651,10 @@ impl<'a> Deformer<'a> {
         let warp = Warp::new(source, target);
         let active = !warp.is_identity()
             || binding.cells.iter().flat_map(|c| c.influences).any(|i| {
-                i.weight > 1e-7 && poses.get(&i.bone).is_some_and(|p| !identity(p.matrix))
+                i.weight > 1e-7
+                    && poses
+                        .get(&i.bone)
+                        .is_some_and(|p| p.targets.contains(&binding.target) && !identity(p.matrix))
             });
         Self {
             binding,

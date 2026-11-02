@@ -271,7 +271,6 @@ impl Editor {
                         Tool::FillBrush,
                         Tool::ShadeBrush,
                         Tool::LightBrush,
-                        Tool::Airbrush,
                         Tool::SketchBrush,
                     ] {
                         let (r, row) = ui.allocate_exact_size(
@@ -373,6 +372,9 @@ impl Editor {
             .iter()
             .zip(&self.studio.prefs.bindings)
             .find_map(|(&tool, b)| {
+                if tool == Tool::Airbrush {
+                    return None;
+                }
                 let key = egui::Key::from_name(&b.key)?;
                 let modifiers = egui::Modifiers {
                     ctrl: b.ctrl,
@@ -1021,6 +1023,7 @@ impl Editor {
                             egui::ScrollArea::vertical().max_height(340.).show(ui,|ui|{
                                 egui::Grid::new("shortcut-options").spacing([24.,7.]).striped(true).show(ui,|ui|{
                                     for (index,tool) in TOOLS.iter().enumerate(){
+                                        if *tool == Tool::Airbrush { continue; }
                                         ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,tool.icon(),crate::themes::muted());ui.label(tr(tool.name()));});
                                         let binding=&self.studio.prefs.bindings[index];
                                         let label=if self.studio.capture==Some(index){"…".into()}else{let s=binding.label();if s.is_empty(){"—".into()}else{s}};

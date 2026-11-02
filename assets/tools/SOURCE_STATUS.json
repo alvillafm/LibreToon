@@ -1,0 +1,12 @@
+{
+  "correspondingSourceBundle": "work\\ffmpeg-owned-final\\output\\ffmpeg-complete-source.zip",
+  "applicationTest": "work\\ffmpeg-owned-final\\output\\APPLICATION_TEST.json",
+  "binarySha256": "48d3a36fdf33cd0027fa87806287f92149fa29f0ab60c5465bc04c2468556055",
+  "exportValidation": "work\\ffmpeg-owned-final\\output\\EXPORT_VALIDATION.json",
+  "schema": 2,
+  "correspondingSourceSha256": "80b97d400e04ba34f373ee305ef27c7dd63d575b35b8ac9a2a16b893427bb2d7",
+  "reviewEvidence": "work\\ffmpeg-owned-final\\output\\REVIEW.json",
+  "reviewEvidenceSha256": "1900b75c82358916021d90088cbdb335c96549faef5642fce40f473e2502067b",
+  "reviewRecord": "work\\ffmpeg-owned-final\\output\\REVIEW.md",
+  "status": "reviewed-complete"
+}

@@ -56,7 +56,7 @@ impl Editor {
                         ui.separator();
                         if button(
                             ui,
-                            Icon::Settings,
+                            Icon::DocumentSettings,
                             "Ajustes de documento…",
                             "Ajustes de documento…",
                             false,
@@ -69,7 +69,7 @@ impl Editor {
                         }
                         if button(
                             ui,
-                            Icon::Settings,
+                            Icon::Preferences,
                             "Preferencias del programa…",
                             "Preferencias del programa…",
                             false,
@@ -243,15 +243,19 @@ impl Editor {
         self.document_tabs(ui);
         if self.hub.home {
             self.home_ui(ui);
+            self.document_settings_ui(&ctx);
             self.preferences_ui(&ctx);
             self.notice_ui(&ctx);
             return;
         }
         egui::Panel::left("tools")
-            .exact_size(88.)
+            .exact_size(76.)
             .resizable(false)
             .show(ui, |ui| {
+                let tool_height = ((ui.available_height() - 300.) / 16.).clamp(18., 24.);
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.;
+                    ui.spacing_mut().interact_size.y = tool_height;
                     use crate::canvas::Tool::*;
                     for (label, rows) in [
                         (
@@ -259,18 +263,10 @@ impl Editor {
                             vec![(Select, Object), (Lasso, PolygonSelect), (Wand, Wand)],
                         ),
                         ("EDICIÓN", vec![(Transform, Mirror)]),
-                        (
-                            "PINTURA",
-                            vec![
-                                (Brush, Eraser),
-                                (Bucket, Eyedropper),
-                                (Airbrush, SketchBrush),
-                            ],
-                        ),
-                        ("Rigging", vec![(Bones, Puppet)]),
-                        ("TEXTO", vec![(Text, Text)]),
+                        ("PINTURA", vec![(Brush, Eraser), (Bucket, Eyedropper)]),
                         ("VECTORIAL", vec![(VectorBrush, Pen), (Node, Width)]),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),
+                        ("TEXTO", vec![(Text, Text)]),
                         (
                             "LIENZO",
                             vec![
@@ -280,8 +276,9 @@ impl Editor {
                                 (Mannequin, Mannequin),
                             ],
                         ),
+                        ("Rigging", vec![(Bones, Puppet)]),
                     ] {
-                        ui.add_space(7.);
+                        ui.add_space(3.);
                         ui.label(
                             egui::RichText::new(crate::i18n::tr(label))
                                 .size(8.)
@@ -311,7 +308,9 @@ impl Editor {
                 });
             });
         egui::Panel::right("properties")
-            .exact_size(305.)
+            .default_size(305.)
+            .min_size(245.)
+            .max_size(650.)
             .resizable(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -453,10 +452,7 @@ impl Editor {
                             }
                         }
                     } else {
-                        let label = self.scene_label();
-                        if button(ui, Icon::Film, &label, "Scene manager", false, true).clicked() {
-                            self.animation.scenes_open = true;
-                        }
+                        self.scene_dropdown(ui);
                         ui.label(
                             egui::RichText::new(crate::i18n::tr(" /  Escenario"))
                                 .size(11.)
@@ -469,6 +465,7 @@ impl Editor {
             && !self.animation.scenes_open
             && self.animation.picker.is_none()
             && !self.studio.preferences_open
+            && self.document_settings.is_none()
             && self.studio.export.is_none()
         {
             if self.studio.prefs.bindings[17].key == "W"
@@ -478,6 +475,7 @@ impl Editor {
                 && !self.animation.scenes_open
                 && self.animation.picker.is_none()
                 && !self.studio.preferences_open
+                && self.document_settings.is_none()
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::W))
             {
                 self.activate_tool(crate::canvas::Tool::Width);
@@ -515,8 +513,14 @@ impl Editor {
         self.export_ui(&ctx);
         self.notice_ui(&ctx);
     }
-    fn new_document(&mut self) {
-        self.add_document(crate::fresh_document(), None);
+    pub(crate) fn new_document(&mut self) {
+        self.playing = false;
+        self.document_settings = Some(crate::inspector::DocumentSettings {
+            creating: true,
+            width: 1920,
+            height: 1080,
+            fps: 24,
+        });
     }
 }
 

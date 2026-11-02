@@ -615,3 +615,117 @@ fn absent_symbol_type_uses_animate_default_movie_clip_clock() {
     ));
     assert!(crate::animation::movie_svg(&d, 1).contains("rgb(0,0,255)"));
 }
+
+#[test]
+#[ignore = "manual external FLA fixture; set LIBRETOON_IMPORT_FIXTURES"]
+fn external_student_fla_import() {
+    let paths = std::env::var("LIBRETOON_IMPORT_FIXTURES").expect("semicolon separated FLA paths");
+    let mut failures = Vec::new();
+    for path in paths.split(';') {
+        let bytes = std::fs::read(path).unwrap();
+        match crate::documents::read_project(std::path::Path::new(path)) {
+            Ok(d) => {
+                println!(
+                    "{}: {}x{} fps={} scenes={} layers={} symbols={} frames={} warnings={:?}",
+                    path,
+                    d.width,
+                    d.height,
+                    d.fps,
+                    d.extras.scenes.len(),
+                    d.layers.len(),
+                    d.extras.symbols.len(),
+                    d.layers[0].frames.len(),
+                    d.extras.import_warnings
+                );
+                assert!(d.validate().is_ok());
+                let count = (0..d.layers[0].frames.len())
+                    .step_by(10)
+                    .map(|f| crate::features::resolve(&d, f, false).len())
+                    .sum::<usize>();
+                println!("sampled visible marks: {count}");
+                assert!(count > 0, "import must preserve visible artwork");
+                let ctx = eframe::egui::Context::default();
+                let mut cache = crate::paint::RenderCache::default();
+                let sample_frames = [
+                    0,
+                    d.layers[0].frames.len() / 2,
+                    d.layers[0].frames.len() - 1,
+                ];
+                let rendered: Vec<_> = sample_frames
+                    .iter()
+                    .map(|&f| {
+                        let pixels = crate::exporter::raster(&d, f, 320, 180, &ctx, &mut cache);
+                        (
+                            pixels
+                                .chunks_exact(3)
+                                .filter(|p| *p != [255, 255, 255])
+                                .count(),
+                            crc32fast::hash(&pixels),
+                        )
+                    })
+                    .collect();
+                println!("rendered frame samples (nonwhite pixels, CRC): {rendered:?}");
+                assert!(rendered.iter().any(|(count, _)| *count > 0));
+                assert!(
+                    rendered.windows(2).any(|w| w[0].1 != w[1].1),
+                    "animation samples must change"
+                );
+                let saved = crate::fla::encode(&d).expect("import should save as a native copy");
+                let restored = crate::fla::decode(&saved).expect("native copy should reopen");
+                assert_eq!(restored.layers.len(), d.layers.len());
+                assert_eq!(restored.layers[0].frames.len(), d.layers[0].frames.len());
+                assert_eq!(restored.extras.symbols.len(), d.extras.symbols.len());
+                assert_eq!(
+                    std::fs::read(path).unwrap(),
+                    bytes,
+                    "source file must remain untouched"
+                );
+            }
+            Err(e) => {
+                println!("{path}: ERROR {e}");
+                failures.push(e);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn animate_directory_size_quirk_recovers_art_and_reports_it_without_relaxing_integrity() {
+    let original = archive(
+        &timeline("Main", &frame(0, 3, "", &shape("#123456"))),
+        &[],
+        "",
+    );
+    let xml = crate::fla_zip::document(&original).unwrap();
+    let mut bytes = crate::fla_zip::pack(&[
+        ("DOMDocument.xml", xml.into_bytes()),
+        ("mimetype", b"application/x-fla".to_vec()),
+    ]);
+    let end = bytes.len() - 22;
+    let size = u32::from_le_bytes(bytes[end + 12..end + 16].try_into().unwrap());
+    bytes[end + 12..end + 16].copy_from_slice(&(size + 54).to_le_bytes());
+    let d = crate::fla::decode(&bytes).unwrap();
+    assert_eq!(d.layers[0].frames.len(), 3);
+    assert_eq!(d.layers[0].frames[0][0].fill, Some([0x12, 0x34, 0x56, 255]));
+    assert!(
+        d.extras
+            .import_warnings
+            .iter()
+            .any(|w| w.contains("Directorio ZIP"))
+    );
+    let mut wrong = bytes.clone();
+    wrong[end + 12..end + 16].copy_from_slice(&(size + 53).to_le_bytes());
+    assert!(crate::fla::decode(&wrong).is_err());
+    let mut crc = bytes.clone();
+    crc[30 + "DOMDocument.xml".len() + 20] ^= 1;
+    assert!(crate::fla::decode(&crc).is_err());
+    let mut truncated = bytes.clone();
+    truncated.drain(end - 1..end);
+    assert!(crate::fla::decode(&truncated).is_err());
+    let mut without_marker = original.clone();
+    let end = without_marker.len() - 22;
+    let size = u32::from_le_bytes(without_marker[end + 12..end + 16].try_into().unwrap());
+    without_marker[end + 12..end + 16].copy_from_slice(&(size + 54).to_le_bytes());
+    assert!(crate::fla::decode(&without_marker).is_err());
+}

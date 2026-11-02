@@ -8,6 +8,7 @@ use crate::{
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 pub struct DocumentSettings {
+    pub creating: bool,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -15,6 +16,7 @@ pub struct DocumentSettings {
 impl Editor {
     pub fn open_document_settings(&mut self) {
         self.document_settings = Some(DocumentSettings {
+            creating: false,
             width: self.doc.width,
             height: self.doc.height,
             fps: self.doc.fps,
@@ -88,83 +90,103 @@ impl Editor {
         let mut open = true;
         let mut apply = false;
         let mut cancel = false;
-        egui::Window::new(crate::i18n::tr("Ajustes de documento"))
-            .id(egui::Id::unique("document-settings"))
-            .open(&mut open)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .resizable(false)
-            .show(ctx, |ui| {
-                let presets = [
-                    ("HD · 1280 × 720", 1280, 720),
-                    ("Full HD · 1920 × 1080", 1920, 1080),
-                    ("4K UHD · 3840 × 2160", 3840, 2160),
-                    ("4K DCI · 4096 × 2160", 4096, 2160),
-                    ("Vertical · 1080 × 1920", 1080, 1920),
-                    ("Cuadrado · 1080 × 1080", 1080, 1080),
-                ];
-                let label = presets
-                    .iter()
-                    .find(|(_, w, h)| *w == settings.width && *h == settings.height)
-                    .map_or("Personalizada", |(label, _, _)| *label);
-                egui::ComboBox::from_id_salt("resolution-preset")
-                    .selected_text(label)
-                    .width(250.)
-                    .show_ui(ui, |ui| {
-                        for (label, w, h) in presets {
-                            if ui
-                                .selectable_label(
-                                    settings.width == w && settings.height == h,
-                                    label,
-                                )
-                                .clicked()
-                            {
-                                settings.width = w;
-                                settings.height = h;
-                            }
+        egui::Window::new(crate::i18n::tr(if settings.creating {
+            "Nuevo proyecto"
+        } else {
+            "Ajustes de documento"
+        }))
+        .id(egui::Id::unique("document-settings"))
+        .open(&mut open)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .resizable(false)
+        .show(ctx, |ui| {
+            let presets = [
+                ("HD · 1280 × 720", 1280, 720),
+                ("Full HD · 1920 × 1080", 1920, 1080),
+                ("4K UHD · 3840 × 2160", 3840, 2160),
+                ("4K DCI · 4096 × 2160", 4096, 2160),
+                ("Vertical · 1080 × 1920", 1080, 1920),
+                ("Cuadrado · 1080 × 1080", 1080, 1080),
+            ];
+            let label = presets
+                .iter()
+                .find(|(_, w, h)| *w == settings.width && *h == settings.height)
+                .map_or("Personalizada", |(label, _, _)| *label);
+            egui::ComboBox::from_id_salt("resolution-preset")
+                .selected_text(label)
+                .width(250.)
+                .show_ui(ui, |ui| {
+                    for (label, w, h) in presets {
+                        if ui
+                            .selectable_label(settings.width == w && settings.height == h, label)
+                            .clicked()
+                        {
+                            settings.width = w;
+                            settings.height = h;
                         }
-                    });
-                ui.add_space(10.);
-                egui::Grid::new("document-size")
-                    .spacing([18., 10.])
-                    .show(ui, |ui| {
-                        ui.label(crate::i18n::tr("Ancho"));
-                        ui.add(
-                            egui::DragValue::new(&mut settings.width)
-                                .range(1..=16384)
-                                .suffix(crate::i18n::tr(" px"))
-                                .update_while_editing(false),
-                        );
-                        ui.end_row();
-                        ui.label(crate::i18n::tr("Alto"));
-                        ui.add(
-                            egui::DragValue::new(&mut settings.height)
-                                .range(1..=16384)
-                                .suffix(crate::i18n::tr(" px"))
-                                .update_while_editing(false),
-                        );
-                        ui.end_row();
-                        ui.label(crate::i18n::tr("Velocidad"));
-                        ui.add(
-                            egui::DragValue::new(&mut settings.fps)
-                                .range(1..=240)
-                                .suffix(crate::i18n::tr(" fps"))
-                                .update_while_editing(false),
-                        );
-                        ui.end_row();
-                    });
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::tr("Aplicar")).clicked() {
-                        apply = true;
-                    }
-                    if ui.button(crate::i18n::tr("Cancelar")).clicked() {
-                        cancel = true;
                     }
                 });
+            ui.add_space(10.);
+            egui::Grid::new("document-size")
+                .spacing([18., 10.])
+                .show(ui, |ui| {
+                    ui.label(crate::i18n::tr("Ancho"));
+                    ui.add(
+                        egui::DragValue::new(&mut settings.width)
+                            .range(1..=16384)
+                            .suffix(crate::i18n::tr(" px"))
+                            .update_while_editing(false),
+                    );
+                    ui.end_row();
+                    ui.label(crate::i18n::tr("Alto"));
+                    ui.add(
+                        egui::DragValue::new(&mut settings.height)
+                            .range(1..=16384)
+                            .suffix(crate::i18n::tr(" px"))
+                            .update_while_editing(false),
+                    );
+                    ui.end_row();
+                    ui.label(crate::i18n::tr("Velocidad"));
+                    ui.add(
+                        egui::DragValue::new(&mut settings.fps)
+                            .range(1..=240)
+                            .suffix(crate::i18n::tr(" fps"))
+                            .update_while_editing(false),
+                    );
+                    ui.end_row();
+                });
+            ui.add_space(12.);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(crate::i18n::tr(if settings.creating {
+                        "Crear"
+                    } else {
+                        "Aplicar"
+                    }))
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if ui.button(crate::i18n::tr("Cancelar")).clicked() {
+                    cancel = true;
+                }
             });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+            apply = false;
+        }
         if apply {
-            self.apply_document_settings(settings.width, settings.height, settings.fps);
+            if settings.creating {
+                let mut doc = crate::fresh_document();
+                doc.width = settings.width;
+                doc.height = settings.height;
+                doc.fps = settings.fps;
+                self.add_document(doc, None);
+            } else {
+                self.apply_document_settings(settings.width, settings.height, settings.fps);
+            }
         } else if open && !cancel {
             self.document_settings = Some(settings);
         }
@@ -190,6 +212,7 @@ impl Editor {
                 ui.painter()
                     .rect_filled(response.rect.shrink(5.), 0., crate::themes::panel());
                 if response.clicked() {
+                    self.color = self.color.to_opaque();
                     self.active_fill = false;
                 }
             },
@@ -203,6 +226,7 @@ impl Editor {
                     .on_hover_text(crate::i18n::tr("Relleno"))
                     .clicked()
                 {
+                    self.fill_color = self.fill_color.to_opaque();
                     self.active_fill = true;
                 }
             },
@@ -314,11 +338,15 @@ impl Editor {
             ) {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.fill_enabled, crate::i18n::tr("Relleno"));
-                    ui.color_edit_button_srgba(&mut self.fill_color);
+                    if ui.color_edit_button_srgba(&mut self.fill_color).clicked() {
+                        self.fill_color = self.fill_color.to_opaque();
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.stroke_enabled, crate::i18n::tr("Contorno"));
-                    ui.color_edit_button_srgba(&mut self.color);
+                    if ui.color_edit_button_srgba(&mut self.color).clicked() {
+                        self.color = self.color.to_opaque();
+                    }
                 });
                 ui.add_space(8.);
             }

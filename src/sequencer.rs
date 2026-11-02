@@ -41,7 +41,141 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
         out.push(Row::Layer(index, depth));
     }
 }
+
+fn retimed(frame: usize, drag: crate::features::FrameDrag, target: usize) -> usize {
+    if frame > 0 && (drag.start..=drag.end).contains(&frame) {
+        (frame as isize + target as isize - drag.start as isize) as usize
+    } else {
+        frame
+    }
+}
 impl Editor {
+    pub(crate) fn frame_drop_valid(&self, drag: crate::features::FrameDrag, target: usize) -> bool {
+        let Some(layer) = self.doc.layers.get(drag.layer) else {
+            return false;
+        };
+        if drag.start > drag.end
+            || !(drag.start..=drag.end).contains(&drag.grab)
+            || drag.end >= layer.frames.len()
+            || target >= 10000
+            || layer.options.locked
+            || layer.options.mannequin.is_some()
+        {
+            return false;
+        }
+        let mut previous = None;
+        let mut movable = false;
+        for f in (0..layer.frames.len()).filter(|&f| layer.key(f)) {
+            let next = retimed(f, drag, target);
+            movable |= f > 0 && (drag.start..=drag.end).contains(&f);
+            if next >= 10000 || previous.is_some_and(|p| p >= next) {
+                return false;
+            }
+            previous = Some(next);
+        }
+        movable
+            && layer
+                .options
+                .tweens
+                .iter()
+                .all(|s| retimed(s.start, drag, target) < retimed(s.end, drag, target))
+    }
+    pub(crate) fn move_timeline_frames(
+        &mut self,
+        drag: crate::features::FrameDrag,
+        target: usize,
+    ) -> bool {
+        if target == drag.start || !self.frame_drop_valid(drag, target) {
+            return false;
+        }
+        self.finish_pending_pen();
+        self.checkpoint();
+        let layer = &mut self.doc.layers[drag.layer];
+        layer.init_keys();
+        let first = (drag.start..=drag.end).find(|&f| f > 0 && layer.key(f));
+        let last = (drag.start..=drag.end)
+            .rev()
+            .find(|&f| f > 0 && layer.key(f));
+        let keys: Vec<_> = (0..layer.frames.len())
+            .filter(|&f| layer.key(f))
+            .map(|f| (retimed(f, drag, target), layer.frames[f].clone()))
+            .collect();
+        let count = layer.frames.len().max(keys.last().unwrap().0 + 1);
+        let mut owner = 0;
+        layer.frames = (0..count)
+            .map(|f| {
+                if owner + 1 < keys.len() && keys[owner + 1].0 <= f {
+                    owner += 1;
+                }
+                keys[owner].1.clone()
+            })
+            .collect::<Vec<_>>()
+            .into();
+        layer.options.keys = vec![false; count].into();
+        for (f, _) in keys {
+            layer.options.keys[f] = true;
+        }
+        for span in &mut layer.options.tweens {
+            span.start = retimed(span.start, drag, target);
+            span.end = retimed(span.end, drag, target);
+        }
+        for other in &mut self.doc.layers {
+            if other.frames.len() < count {
+                other.init_keys();
+                let held = other.frames.last().cloned().unwrap_or_default();
+                other.frames.resize(count, held);
+                other.options.keys.resize(count, false);
+            }
+        }
+        self.layer = drag.layer;
+        self.frame = (target + drag.grab - drag.start).min(count - 1);
+        self.feature.frame_selection = first.zip(last).map(|(a, b)| {
+            (
+                drag.layer,
+                retimed(a, drag, target),
+                retimed(b, drag, target),
+            )
+        });
+        self.playing = false;
+        self.fit_camera_duration();
+        self.recover();
+        true
+    }
+    pub(crate) fn timeline_layer_action(&mut self, layer: usize, action: usize) {
+        if layer >= self.doc.layers.len() {
+            return;
+        }
+        self.layer = layer;
+        if action == 0 {
+            self.renaming_layer = Some(layer);
+            self.rename_focus = true;
+            return;
+        }
+        if action == 4 {
+            self.feature.frame_selection =
+                Some((layer, 0, self.doc.layers[layer].frames.len() - 1));
+            return;
+        }
+        if action == 1 && (self.doc.layers.len() == 1 || self.doc.layers[layer].options.locked) {
+            return;
+        }
+        self.finish_pending_pen();
+        self.checkpoint();
+        match action {
+            1 => {
+                self.doc.layers.remove(layer);
+                self.layer = layer.min(self.doc.layers.len() - 1);
+                self.renaming_layer = None;
+                self.feature.frame_selection = None;
+                self.feature.frame_drag = None;
+            }
+            2 => self.doc.layers[layer].visible = !self.doc.layers[layer].visible,
+            3 => self.doc.layers[layer].options.locked = !self.doc.layers[layer].options.locked,
+            _ => return,
+        }
+        self.recover();
+    }
+
     pub fn timeline_edit(&mut self, action: usize) {
         if matches!(
             self.tool,
@@ -50,6 +184,9 @@ impl Editor {
             self.rig_key_action(action);
             return;
         }
+        self.timeline_layer_edit(action);
+    }
+    fn timeline_layer_edit(&mut self, action: usize) {
         if self.doc.layers[self.layer].options.locked
             || self.doc.layers[self.layer].options.mannequin.is_some()
         {
@@ -149,6 +286,37 @@ impl Editor {
         self.fit_camera_duration();
         self.recover();
     }
+    pub fn timeline_cell_action(&mut self, layer: usize, frame: usize, action: usize) {
+        if layer >= self.doc.layers.len() || frame >= self.doc.layers[layer].frames.len() {
+            return;
+        }
+        self.finish_pending_pen();
+        self.layer = layer;
+        self.frame = frame;
+        self.playing = false;
+        if self.doc.layers[layer].options.locked
+            || self.doc.layers[layer].options.mannequin.is_some()
+        {
+            return;
+        }
+        match action {
+            5 => {
+                self.frame = self.doc.layers[layer].exposure(frame).start;
+                self.create_motion();
+            }
+            6 => {
+                if crate::animation::span(&self.doc.layers[layer], frame).is_some() {
+                    self.checkpoint();
+                    self.doc.layers[layer]
+                        .options
+                        .tweens
+                        .retain(|s| !(s.start <= frame && frame < s.end));
+                    self.recover();
+                }
+            }
+            _ => self.timeline_layer_edit(action),
+        }
+    }
     fn add_layer_advanced(&mut self) {
         self.finish_pending_pen();
         if self.doc.layers.len() >= 100 {
@@ -160,7 +328,7 @@ impl Editor {
         keys[0] = true;
         let number = self.doc.layers.len() + 1;
         self.doc.layers.push(Layer {
-            name: format!("{} {}", tr("Capa"), number),
+            name: format!("Layer {number}"),
             visible: true,
             frames: vec![Default::default(); count].into(),
             options: LayerOptions {
@@ -200,7 +368,9 @@ impl Editor {
     }
     pub fn sequencer(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("timeline")
-            .exact_size(295.)
+            .default_size(245.)
+            .min_size(150.)
+            .max_size(700.)
             .resizable(true)
             .show(ui, |ui| {
                 ui.label(
@@ -491,6 +661,9 @@ impl Editor {
                     all.push(Row::Rigging);
                 }
                 rows(self, None, 0, &mut all);
+                let mut layer_menu_action = None;
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.feature.frame_drag = None; }
+                if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
                 let mut target = None;
                 let mut camera_target = None;
                 egui::ScrollArea::both()
@@ -502,7 +675,7 @@ impl Editor {
                         let row_h = 28.;
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
-                                label_w + count as f32 * cell,
+                                label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).min(10000) as f32 * cell,
                                 24. + all.len() as f32 * row_h,
                             ),
                             Sense::hover(),
@@ -749,6 +922,24 @@ impl Editor {
                                         if response.drag_started() {
                                             self.feature.row_drag = Some((false, l));
                                         }
+                                        if response.secondary_clicked() { self.layer = l; }
+                                        response.context_menu(|ui| {
+                                            ui.label(&self.doc.layers[l].name);
+                                            ui.separator();
+                                            for (action, icon, label, enabled) in [
+                                                (0, Icon::Rename, "Rename layer", true),
+                                                (2, Icon::Eye, if self.doc.layers[l].visible { "Hide layer" } else { "Show layer" }, true),
+                                                (3, Icon::Lock, if self.doc.layers[l].options.locked { "Unlock layer" } else { "Lock layer" }, true),
+                                                (4, Icon::Film, "Select all frames", true),
+                                                (1, Icon::Trash, "Delete layer", self.doc.layers.len() > 1 && !self.doc.layers[l].options.locked),
+                                            ] {
+                                                if button(ui, icon, label, label, false, enabled).clicked() {
+                                                    layer_menu_action = Some((l, action));
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+
                                     }
                                     let mut opacity = self.doc.layers[l].options.opacity * 100.;
                                     if ui
@@ -842,17 +1033,137 @@ impl Editor {
                                                 ),
                                             );
                                         }
-                                        if ui
-                                            .interact(
-                                                rect,
-                                                ui.scope_id().with(("cell", l, f)),
-                                                Sense::click(),
-                                            )
-                                            .clicked()
-                                        {
+                                        let response = ui.interact(
+                                            rect,
+                                            ui.scope_id().with(("cell", l, f)),
+                                            Sense::click_and_drag(),
+                                        );
+                                        let editable = !self.doc.layers[l].options.locked
+                                            && self.doc.layers[l].options.mannequin.is_none();
+                                        if response.clicked() || response.secondary_clicked() {
                                             self.layer = l;
                                             self.frame = f;
                                             self.playing = false;
+                                            let anchor = self.feature.frame_selection
+                                                .filter(|s| s.0 == l).map_or(f, |s| s.1.min(count - 1));
+                                            self.feature.frame_selection = Some((l,
+                                                if ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
+                                        }
+                                        if response.drag_started() && editable {
+                                            let (mut a, mut b) = self.feature.frame_selection
+                                                .filter(|s| s.0 == l && (s.1.min(s.2)..=s.1.max(s.2)).contains(&f))
+                                                .map_or((f, f), |s| (s.1.min(s.2), s.1.max(s.2)));
+                                            if a == b {
+                                                let exposure=self.doc.layers[l].exposure(f); a=exposure.start; b=exposure.end-1;
+                                            }
+                                            self.layer = l; self.frame = f;
+                                            self.feature.frame_drag = Some(crate::features::FrameDrag {
+                                                layer: l, start: a, end: b.min(count - 1), grab: f, target: None,
+                                            });
+                                            self.feature.frame_selection = Some((l, a, b.min(count - 1)));
+                                            self.playing = false;
+                                        }
+                                        if let Some(drag) = &mut self.feature.frame_drag {
+                                            if drag.layer == l && rect.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
+                                                && clip.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO))) {
+                                                drag.target = Some(f.saturating_sub(drag.grab - drag.start)
+                                                    .min(10000 - (drag.end - drag.start + 1)));
+                                            }
+                                        }
+                                        if self.feature.frame_drag.is_none() && self.feature.frame_selection.is_some_and(|s|
+                                            s.0 == l && (s.1.min(s.2)..=s.1.max(s.2)).contains(&f)) {
+                                            painter.rect_stroke(rect.shrink(1.), 1.,
+                                                Stroke::new(1.5, crate::themes::accent()), egui::StrokeKind::Inside);
+                                        }
+
+                                        response
+                                            .on_hover_text(crate::i18n::message(
+                                                "Frame {frame} · Shift-click: select range · drag: move · right-click: edit",
+                                                &[("frame", (f + 1).to_string())],
+                                            ))
+                                            .context_menu(|ui| {
+                                                ui.label(format!(
+                                                    "{} · {}",
+                                                    self.doc.layers[l].name,
+                                                    f + 1
+                                                ));
+                                                ui.separator();
+                                                let editable = !self.doc.layers[l].options.locked
+                                                    && self.doc.layers[l]
+                                                        .options
+                                                        .mannequin
+                                                        .is_none();
+                                                for (action, label) in [
+                                                    (0, "Insertar fotograma clave aquí"),
+                                                    (1, "Insertar fotograma clave vacío aquí"),
+                                                    (2, "Prolongar exposición"),
+                                                    (3, "Acortar exposición"),
+                                                    (4, "Borrar este fotograma clave"),
+                                                    (5, "Aplicar interpolación a la capa"),
+                                                    (6, "Quitar interpolación"),
+                                                ] {
+                                                    let enabled = editable
+                                                        && match action {
+                                                            3 => {
+                                                                self.doc.layers[l].exposure(f).len()
+                                                                    > 1
+                                                            }
+                                                            5 => {
+                                                                !self.doc.layers[l].frames[f]
+                                                                    .is_empty()
+                                                                    && f + 1
+                                                                        < self.doc.layers[l]
+                                                                            .frames
+                                                                            .len()
+                                                            }
+                                                            6 => crate::animation::span(
+                                                                &self.doc.layers[l],
+                                                                f,
+                                                            )
+                                                            .is_some(),
+                                                            _ => true,
+                                                        };
+                                                    if button(
+                                                        ui,
+                                                        match action {
+                                                            0 => Icon::Keyframe,
+                                                            1 => Icon::New,
+                                                            2 => Icon::Plus,
+                                                            3 => Icon::Previous,
+                                                            4 => Icon::Trash,
+                                                            _ => Icon::Tween,
+                                                        },
+                                                        label,
+                                                        label,
+                                                        false,
+                                                        enabled,
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        self.timeline_cell_action(l, f, action);
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                    }
+                                    if let Some(drag) = &mut self.feature.frame_drag {
+                                        if drag.layer == l {
+                                            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                                                if clip.contains(p) && p.y >= y && p.y < y+row_h && p.x >= r.left()+label_w && p.x <= r.right() {
+                                                    let frame=((p.x-r.left()-label_w)/cell).floor().max(0.) as usize;
+                                                    drag.target=Some(frame.saturating_sub(drag.grab-drag.start).min(10000-(drag.end-drag.start+1)));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if let Some(drag) = self.feature.frame_drag.filter(|d| d.layer == l) {
+                                        if let Some(at) = drag.target {
+                                            let color = if self.frame_drop_valid(drag, at) {
+                                                crate::themes::accent() } else { Color32::LIGHT_RED };
+                                            let x = r.left()+label_w+(at+drag.grab-drag.start) as f32*cell;
+                                            let destination = Rect::from_min_size(Pos2::new(x,y),Vec2::new(cell,row_h));
+                                            painter.rect_stroke(destination.shrink(1.),1.,Stroke::new(2.,color),egui::StrokeKind::Inside);
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                         }
                                     }
                                 }
@@ -997,6 +1308,19 @@ impl Editor {
                                             ui.scope_id().with(("camera-cut", c.id)),
                                             Sense::click_and_drag(),
                                         );
+                                        for f in frames
+                                            .clone()
+                                            .filter(|f| *f >= c.start && *f < c.start + c.duration)
+                                        {
+                                            let x = r.left() + label_w + f as f32 * cell;
+                                            painter.line_segment(
+                                                [
+                                                    Pos2::new(x, rect.top()),
+                                                    Pos2::new(x, rect.bottom()),
+                                                ],
+                                                Stroke::new(0.5, orange.gamma_multiply(0.35)),
+                                            );
+                                        }
                                         for key in &c.animation.keys {
                                             let f = c.start + key.frame;
                                             if !frames.contains(&f) {
@@ -1017,7 +1341,9 @@ impl Editor {
                                                 Stroke::NONE,
                                             ));
                                         }
-                                        if response.drag_started() {
+                                        if response.drag_started()
+                                            && self.feature.camera_trim.is_none()
+                                        {
                                             self.feature.camera_drag = Some(index);
                                         }
                                         if rect.contains(ui.input(|i| {
@@ -1025,12 +1351,103 @@ impl Editor {
                                         })) {
                                             camera_target = Some(index);
                                         }
-                                        if response.clicked() {
+                                        if response.clicked() || response.secondary_clicked() {
                                             self.feature.selected_camera = Some(c.id);
-                                            self.frame = c.start;
+                                            if let Some(p) = response.interact_pointer_pos() {
+                                                self.frame = (((p.x - r.left() - label_w) / cell)
+                                                    .floor()
+                                                    .max(0.)
+                                                    as usize)
+                                                    .clamp(c.start, c.start + c.duration - 1);
+                                            }
                                             self.activate_tool(crate::canvas::Tool::Camera);
+                                            self.playing = false;
+                                        }
+                                        response.context_menu(|ui| {
+                                            ui.label(format!("{} · {}", c.name, self.frame + 1));
+                                            for (action, icon, label) in [
+                                                (
+                                                    0,
+                                                    Icon::Keyframe,
+                                                    "Insertar clave de cámara aquí",
+                                                ),
+                                                (1, Icon::Trash, "Borrar clave de cámara"),
+                                                (2, Icon::Plus, "Insertar fotograma de cámara"),
+                                                (3, Icon::Previous, "Eliminar fotograma de cámara"),
+                                                (4, Icon::Cut, "Dividir cámara aquí"),
+                                                (5, Icon::Trash, "Eliminar cámara"),
+                                            ] {
+                                                let local = self.frame.saturating_sub(c.start);
+                                                let enabled = match action {
+                                                    1 => {
+                                                        local > 0
+                                                            && c.animation
+                                                                .keys
+                                                                .iter()
+                                                                .any(|k| k.frame == local)
+                                                    }
+                                                    3 => c.duration > 1,
+                                                    4 => local > 0 && local < c.duration,
+                                                    _ => true,
+                                                };
+                                                if button(ui, icon, label, label, false, enabled)
+                                                    .clicked()
+                                                {
+                                                    self.camera_timeline_action(
+                                                        c.id, self.frame, action,
+                                                    );
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                        if index + 1 < self.doc.extras.cameras.len() {
+                                            let edge = Rect::from_center_size(
+                                                rect.right_center(),
+                                                Vec2::new(10., row_h),
+                                            );
+                                            let handle = ui.interact(
+                                                edge,
+                                                ui.scope_id().with(("camera-edge", c.id)),
+                                                Sense::drag(),
+                                            );
+                                            if handle.hovered() || handle.dragged() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::ResizeHorizontal,
+                                                );
+                                                painter.line_segment(
+                                                    [rect.right_top(), rect.right_bottom()],
+                                                    Stroke::new(3., crate::themes::accent()),
+                                                );
+                                            }
+                                            if handle.drag_started() {
+                                                self.checkpoint();
+                                                self.feature.camera_drag = None;
+                                                self.feature.camera_trim =
+                                                    Some(crate::features::CameraTrim {
+                                                        index,
+                                                        pointer_x: handle
+                                                            .interact_pointer_pos()
+                                                            .map_or(rect.right(), |p| p.x),
+                                                        left: c.clone(),
+                                                        right: self.doc.extras.cameras[index + 1]
+                                                            .clone(),
+                                                    });
+                                            }
                                         }
                                     }
+                                }
+                            }
+                        }
+                        if let Some(trim) = self.feature.camera_trim.clone() {
+                            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                                let delta = ((p.x - trim.pointer_x) / cell).round() as isize;
+                                if trim.index + 1 < self.doc.extras.cameras.len() {
+                                    self.doc.extras.cameras[trim.index] = trim.left.clone();
+                                    self.doc.extras.cameras[trim.index + 1] = trim.right.clone();
+                                    self.roll_camera_boundary(
+                                        trim.index,
+                                        trim.left.duration as isize + delta,
+                                    );
                                 }
                             }
                         }
@@ -1040,7 +1457,15 @@ impl Editor {
                             Stroke::new(1., crate::themes::accent()),
                         );
                     });
+                if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
+                    if let Some(drag) = self.feature.frame_drag.take() {
+                        if let Some(at) = drag.target { self.move_timeline_frames(drag, at); }
+                    }
+                    if self.feature.camera_trim.take().is_some() {
+                        self.feature.camera_drag = None;
+                        self.recover();
+                    }
                     if let (Some(source), Some(target)) =
                         (self.feature.camera_drag.take(), camera_target)
                     {
@@ -1109,6 +1534,131 @@ impl Editor {
                 self.layer = source.1;
             }
         }
+        self.recover();
+    }
+}
+
+impl Editor {
+    pub fn roll_camera_boundary(&mut self, index: usize, duration: isize) {
+        if index + 1 >= self.doc.extras.cameras.len() {
+            return;
+        }
+        let left = self.doc.extras.cameras[index].clone();
+        let right = self.doc.extras.cameras[index + 1].clone();
+        let total = left.duration + right.duration;
+        let duration = duration.clamp(1, total as isize - 1) as usize;
+        let new_start = left.start + duration;
+        let pose = crate::animation::camera_at(&right, new_start);
+        let shift = new_start as isize - right.start as isize;
+        let l = &mut self.doc.extras.cameras[index];
+        l.duration = duration;
+        l.animation.keys.retain(|k| k.frame < duration);
+        let r = &mut self.doc.extras.cameras[index + 1];
+        r.duration = total - duration;
+        r.start = new_start;
+        r.center = pose.center;
+        r.zoom = pose.zoom;
+        r.angle = pose.angle;
+        let mut keys = vec![];
+        for key in &right.animation.keys {
+            let at = key.frame as isize - shift;
+            if at >= 0 && at < r.duration as isize {
+                let mut k = key.clone();
+                k.frame = at as usize;
+                keys.push(k);
+            }
+        }
+        r.animation.keys = keys.into();
+    }
+    pub fn camera_timeline_action(&mut self, id: u64, frame: usize, action: usize) {
+        let Some(index) = self.doc.extras.cameras.iter().position(|c| c.id == id) else {
+            return;
+        };
+        let camera = self.doc.extras.cameras[index].clone();
+        let local = frame.saturating_sub(camera.start).min(camera.duration - 1);
+        if (action == 1 && local == 0)
+            || (action == 3 && camera.duration <= 1)
+            || (action == 4 && local == 0)
+        {
+            return;
+        }
+        self.checkpoint();
+        self.feature.selected_camera = Some(id);
+        self.playing = false;
+        match action {
+            0 => {
+                let mut key = crate::animation::camera_at(&camera, frame);
+                key.frame = local;
+                crate::animation::camera_record(&mut self.doc.extras.cameras[index], key);
+            }
+            1 => self.doc.extras.cameras[index]
+                .animation
+                .keys
+                .retain(|k| k.frame != local),
+            2 => {
+                if self
+                    .doc
+                    .extras
+                    .cameras
+                    .iter()
+                    .map(|c| c.duration)
+                    .sum::<usize>()
+                    >= 10000
+                {
+                    return;
+                }
+                let c = &mut self.doc.extras.cameras[index];
+                c.duration += 1;
+                for k in &mut c.animation.keys {
+                    if k.frame >= local {
+                        k.frame += 1;
+                    }
+                }
+            }
+            3 => {
+                let c = &mut self.doc.extras.cameras[index];
+                c.duration -= 1;
+                c.animation.keys.retain(|k| k.frame != local);
+                for k in &mut c.animation.keys {
+                    if k.frame > local {
+                        k.frame -= 1;
+                    }
+                }
+            }
+            4 => {
+                let pose = crate::animation::camera_at(&camera, frame);
+                let mut right = camera.clone();
+                right.id = crate::features::id();
+                right.name = format!("{} · 2", camera.name);
+                right.duration -= local;
+                right.center = pose.center;
+                right.zoom = pose.zoom;
+                right.angle = pose.angle;
+                right.animation.keys.retain(|k| k.frame >= local);
+                for k in &mut right.animation.keys {
+                    k.frame -= local;
+                }
+                self.doc.extras.cameras[index].duration = local;
+                self.doc.extras.cameras[index]
+                    .animation
+                    .keys
+                    .retain(|k| k.frame < local);
+                self.feature.selected_camera = Some(right.id);
+                self.doc.extras.cameras.insert(index + 1, right);
+            }
+            5 => {
+                self.doc.extras.cameras.remove(index);
+                self.feature.selected_camera = self
+                    .doc
+                    .extras
+                    .cameras
+                    .get(index.min(self.doc.extras.cameras.len().saturating_sub(1)))
+                    .map(|c| c.id);
+            }
+            _ => return,
+        }
+        self.normalize_cameras();
+        self.frame = frame.min(self.doc.layers[0].frames.len() - 1);
         self.recover();
     }
 }

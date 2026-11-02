@@ -237,6 +237,7 @@ impl Editor {
         self.recover();
     }
     pub fn asset_library_ui(&mut self, ui: &mut egui::Ui) {
+        let library_rect = ui.available_rect_before_wrap();
         ui.heading(tr("Biblioteca"));
         ui.add_space(6.);
         let mut new_folder = false;
@@ -245,7 +246,10 @@ impl Editor {
         let mut remove = None;
         let mut rename = None;
         let mut color = None;
-        let mut drop_target = None;
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let mut drop_target = pointer
+            .filter(|p| library_rect.contains(*p))
+            .map(|_| Asset::Root);
         let mut reorder = None;
         ui.horizontal(|ui| {
             if design::button(
@@ -285,19 +289,6 @@ impl Editor {
                 remove = self.assets.selected;
             }
         });
-        let root = ui.add_sized(
-            [ui.available_width(), 28.],
-            egui::Button::new(tr("Todos los recursos · soltar para sacar de carpeta")).wrap(),
-        );
-        if root.clicked() {
-            self.assets.selected = Some(Asset::Root);
-        }
-        if root
-            .rect
-            .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
-        {
-            drop_target = Some(Asset::Root);
-        }
         let mut list = vec![];
         rows(self, None, 0, &mut list);
         let mut commit_rename = None;
@@ -471,7 +462,18 @@ impl Editor {
                         .rect
                         .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
                     {
-                        drop_target = Some(asset);
+                        // The left gutter is outside the folder hierarchy.
+                        let outdent = depth > 0
+                            && pointer.is_some_and(|p| p.x < r.left() + 10. + depth as f32 * 12.);
+                        drop_target = Some(if outdent { Asset::Root } else { asset });
+                        if self.assets.drag.is_some_and(|source| source != asset) {
+                            ui.painter().rect_stroke(
+                                r.shrink(1.),
+                                4.,
+                                egui::Stroke::new(2., crate::themes::accent()),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                         if let (Some(Asset::Folder(source)), Asset::Folder(target), Some(pos)) = (
                             self.assets.drag,
                             asset,
@@ -488,24 +490,28 @@ impl Editor {
                             }
                         }
                     }
-                    response.context_menu(|ui| {
-                        if ui.button(tr("Renombrar")).clicked() {
-                            rename = Some(asset);
-                            ui.close();
-                        }
-                        if let Asset::Folder(id) = asset {
-                            design::category(ui, "COLOR DE CARPETA");
-                            let mut c = tag;
-                            if ui.color_edit_button_srgba(&mut c).changed() {
-                                color = Some((id, c.to_srgba_unmultiplied()));
+                    egui::Popup::context_menu(&response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            if ui.button(tr("Renombrar")).clicked() {
+                                rename = Some(asset);
+                                ui.close();
                             }
-                        }
-                        if ui.button(tr("Sacar a la raíz")).clicked() {
-                            self.assets.drag = Some(asset);
-                            drop_target = Some(Asset::Root);
-                            ui.close();
-                        }
-                    });
+                            if let Asset::Folder(id) = asset {
+                                design::category(ui, "COLOR DE CARPETA");
+                                let mut c = tag;
+                                ui.spacing_mut().slider_width = 240.;
+                                // Keep the picker in the same popup: opening a second
+                                // popup replaces the context menu that owns it.
+                                if egui::color_picker::color_picker_color32(
+                                    ui,
+                                    &mut c,
+                                    egui::color_picker::Alpha::OnlyBlend,
+                                ) {
+                                    color = Some((id, c.to_srgba_unmultiplied()));
+                                }
+                            }
+                        });
                 }
             });
         if let Some((asset, name)) = commit_rename {
@@ -644,6 +650,86 @@ impl Editor {
                 }
                 _ => {}
             }
+        }
+        if let (Some(source), Some(pos)) = (self.assets.drag, pointer) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            let name = match source {
+                Asset::Symbol(id) => self
+                    .doc
+                    .extras
+                    .symbols
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.name.as_str()),
+                Asset::Folder(id) => self
+                    .doc
+                    .extras
+                    .library
+                    .folders
+                    .iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.name.as_str()),
+                Asset::Root => None,
+            }
+            .unwrap_or("");
+            let destination = match drop_target {
+                Some(Asset::Root) => tr("Biblioteca"),
+                Some(Asset::Folder(id)) => self
+                    .doc
+                    .extras
+                    .library
+                    .folders
+                    .iter()
+                    .find(|f| f.id == id)
+                    .map_or("", |f| f.name.as_str()),
+                Some(Asset::Symbol(id)) => self
+                    .doc
+                    .extras
+                    .symbols
+                    .iter()
+                    .find(|s| s.id == id)
+                    .and_then(|s| s.library_folder)
+                    .and_then(|id| self.doc.extras.library.folders.iter().find(|f| f.id == id))
+                    .map_or(tr("Biblioteca"), |f| f.name.as_str()),
+                None => "",
+            };
+            let text = if destination.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name} → {destination}")
+            };
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                ui.scope_id().with("asset-drag-preview"),
+            ));
+            let galley = painter.layout_no_wrap(
+                text,
+                egui::FontId::proportional(12.),
+                crate::themes::palette().text,
+            );
+            let ghost =
+                Rect::from_min_size(pos + Vec2::new(16., 18.), galley.size() + Vec2::splat(14.));
+            painter.rect_filled(ghost, 5., crate::themes::panel());
+            painter.rect_stroke(
+                ghost,
+                5.,
+                egui::Stroke::new(1., crate::themes::accent()),
+                egui::StrokeKind::Inside,
+            );
+            painter.galley(
+                ghost.min + Vec2::splat(7.),
+                galley,
+                crate::themes::palette().text,
+            );
+            if drop_target == Some(Asset::Root) {
+                painter.line_segment(
+                    [library_rect.left_bottom(), library_rect.right_bottom()],
+                    egui::Stroke::new(2., crate::themes::accent()),
+                );
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.assets.drag = None;
         }
         if ui.input(|i| i.pointer.primary_released()) {
             if let Some((source, target, before)) = reorder {

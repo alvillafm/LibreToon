@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "sourceDateEpoch": 1718755200,
+  "target": "x86_64-w64-mingw32-ucrt",
+  "inputs": [
+    {
+      "id": "ffmpeg",
+      "file": "ffmpeg-7.1.5-source.tar.gz",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587",
+      "role": "source",
+      "sha256": "83220fe0807da10df19714176f02ec3d3812ef0e055f69e940d01b3ad1379cdb",
+      "bytes": 15946561
+    },
+    {
+      "id": "x264",
+      "file": "x264-btbn.tar.gz",
+      "url": "https://code.videolan.org/videolan/x264/-/archive/0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee/x264-0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee.tar.gz",
+      "role": "source",
+      "sha256": "d0967a1348c85dfde363bb52610403be898171493100561efa0dd05d5fd1ae50",
+      "bytes": 1040667
+    },
+    {
+      "id": "zlib",
+      "file": "zlib-1.3.1.tar.gz",
+      "url": "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+      "role": "source",
+      "sha256": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+      "bytes": 1512791
+    },
+    {
+      "id": "llvm-source",
+      "file": "llvm-project-18.1.8.tar.gz",
+      "url": "https://codeload.github.com/llvm/llvm-project/tar.gz/refs/tags/llvmorg-18.1.8",
+      "role": "runtime-source",
+      "sha256": "09c08693a9afd6236f27a2ebae62cda656eba19021ef3f94d59e931d662d4856",
+      "bytes": 205562783
+    },
+    {
+      "id": "mingw-source",
+      "file": "mingw-w64-7c9cfe6708cafc83c14a2654308b2db62b126eae.tar.gz",
+      "url": "https://codeload.github.com/mingw-w64/mingw-w64/tar.gz/7c9cfe6708cafc83c14a2654308b2db62b126eae",
+      "role": "runtime-source",
+      "sha256": "f8f768198696bde35b54deb97be413e592db0d3dbb3b9ed5d10eb4e4e3d63bee",
+      "bytes": 14502665
+    },
+    {
+      "id": "toolchain-recipes",
+      "file": "llvm-mingw-build-scripts.tar.gz",
+      "url": "https://codeload.github.com/mstorsjo/llvm-mingw/tar.gz/refs/tags/20240619",
+      "role": "runtime-build-recipes",
+      "sha256": "938e8e7398a2a674d55d573220fbef81bc107b1599c5e61aa6e57c96275e5c8c",
+      "bytes": 61720
+    },
+    {
+      "id": "toolchain",
+      "file": "llvm-mingw-20240619-ucrt-x86_64.zip",
+      "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-x86_64.zip",
+      "role": "build-tool",
+      "sha256": "810703594a7e3eea03385b5329c7ea3bd65f5e496b44cf1b68c17ff436d265e7",
+      "bytes": 142797010
+    },
+    {
+      "id": "msys2",
+      "file": "msys2-base-x86_64-20240727.tar.xz",
+      "url": "https://github.com/msys2/msys2-installer/releases/download/2024-07-27/msys2-base-x86_64-20240727.tar.xz",
+      "role": "build-tool",
+      "sha256": "da19afcc9b635967b3bfc0db119bf848ed6c28fdde8e4678d9f838d678939060",
+      "bytes": 48958128
+    },
+    {
+      "id": "make",
+      "file": "make-4.4.1-2-x86_64.pkg.tar.zst",
+      "url": "https://repo.msys2.org/msys/x86_64/make-4.4.1-2-x86_64.pkg.tar.zst",
+      "role": "build-tool",
+      "sha256": "2408af61717dae87b00c855b132769a125c708907fc94a46bb16dae076113e5c",
+      "bytes": 519783
+    },
+    {
+      "id": "pkgconf",
+      "file": "pkgconf-2.3.0-1-x86_64.pkg.tar.zst",
+      "url": "https://repo.msys2.org/msys/x86_64/pkgconf-2.3.0-1-x86_64.pkg.tar.zst",
+      "role": "build-tool",
+      "sha256": "9ca6331af1e61b9e5d7c3d08503841087b664db570cf9cc9b07890cc39757301",
+      "bytes": 63833
+    },
+    {
+      "id": "nasm",
+      "file": "nasm-2.16.03-win64.zip",
+      "url": "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip",
+      "role": "build-tool",
+      "sha256": "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6",
+      "bytes": 513543
+    },
+    {
+      "id": "diffutils",
+      "file": "diffutils-3.10-1-x86_64.pkg.tar.zst",
+      "url": "https://repo.msys2.org/msys/x86_64/diffutils-3.10-1-x86_64.pkg.tar.zst",
+      "role": "build-tool",
+      "sha256": "ed5084a37995377c0288050640363a0daf1c8ace774da26ca84ec305ba51c7ce",
+      "bytes": 388909
+    }
+  ]
+}
