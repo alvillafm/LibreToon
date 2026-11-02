@@ -5,6 +5,14 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Bones,
+    Puppet,
+    IK,
+    WeightPaint,
+    AutoWeights,
+    Keyframe,
+    FolderPlus,
+    Rename,
     Home,
     Text,
     Airbrush,
@@ -134,6 +142,9 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             s,
         ));
     };
+    let circle = |x: f32, y: f32, r: f32| {
+        p.circle_stroke(pt(x, y), r, s);
+    };
     let rect = |x: f32, y: f32, w: f32, h: f32| {
         p.rect_stroke(
             Rect::from_min_size(pt(x, y), Vec2::new(w, h)),
@@ -143,6 +154,55 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::Bones | Icon::IK => {
+            path(&[(3., 16.), (6., 8.), (16., 3.), (13., 11.), (3., 16.)]);
+            circle(3., 16., 2.);
+            circle(16., 3., 2.);
+        }
+        Icon::Puppet => {
+            circle(10., 10., 3.);
+            path(&[(10., 2.), (10., 7.)]);
+            path(&[(10., 13.), (10., 18.)]);
+            path(&[(2., 10.), (7., 10.)]);
+            path(&[(13., 10.), (18., 10.)]);
+        }
+        Icon::WeightPaint | Icon::AutoWeights => {
+            path(&[
+                (3., 17.),
+                (7., 8.),
+                (14., 2.),
+                (18., 6.),
+                (10., 14.),
+                (3., 17.),
+            ]);
+        }
+        Icon::Keyframe => {
+            path(&[(10., 2.), (18., 10.), (10., 18.), (2., 10.), (10., 2.)]);
+        }
+        Icon::FolderPlus => {
+            path(&[
+                (2., 17.),
+                (2., 4.),
+                (8., 4.),
+                (10., 7.),
+                (18., 7.),
+                (18., 17.),
+                (2., 17.),
+            ]);
+            path(&[(10., 9.), (10., 15.)]);
+            path(&[(7., 12.), (13., 12.)]);
+        }
+        Icon::Rename => {
+            path(&[
+                (3., 16.),
+                (5., 11.),
+                (14., 2.),
+                (18., 6.),
+                (9., 15.),
+                (3., 16.),
+            ]);
+            path(&[(3., 19.), (18., 19.)]);
+        }
         Icon::Home => {
             path(&[(2., 9.), (10., 2.), (18., 9.)]);
             path(&[

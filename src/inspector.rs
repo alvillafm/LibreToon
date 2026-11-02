@@ -61,14 +61,21 @@ impl Editor {
         self.checkpoint();
         for layer in &mut self.doc.layers {
             layer.init_keys();
-            layer.frames.resize(count, Default::default());
-            layer.options.keys.resize(count, true);
+            let symbol_context = !self.feature.symbol_stack.is_empty();
+            let held = if symbol_context {
+                layer.frames.last().cloned().unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            layer.frames.resize(count, held);
+            layer.options.keys.resize(count, !symbol_context);
             layer.options.tweens.retain(|t| t.start < count - 1);
             for t in &mut layer.options.tweens {
                 t.end = t.end.min(count - 1);
                 layer.options.keys[t.end] = true;
             }
         }
+        self.doc.extras.rig.trim_keys(count);
         self.fit_camera_duration();
         self.frame = self.frame.min(count - 1);
         self.playing = false;
@@ -239,6 +246,10 @@ impl Editor {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);
             design::category(ui, "HERRAMIENTA");
+            if matches!(self.tool, Tool::Bones | Tool::Puppet) {
+                self.rig_properties(ui);
+                return;
+            }
             if self.tool == Tool::Text {
                 self.text_properties(ui);
                 return;

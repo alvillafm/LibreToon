@@ -821,3 +821,45 @@ mod fringe_regressions {
         );
     }
 }
+
+/// Grayscale weight visualization on a subdivided vector fill. No raster mask.
+pub fn weight_overlay(
+    p: &egui::Painter,
+    mark: &Mark,
+    view: View,
+    map: impl Fn(Pos2) -> (Pos2, f32),
+) {
+    let prepared = Prepared::new(mark, (0.2 / view.scale).clamp(0.003, 0.5));
+    let mut mesh = egui::Mesh::default();
+    for triangle in prepared.fill.indices.chunks_exact(3) {
+        let a = vector::pos(prepared.fill.vertices[triangle[0] as usize]);
+        let b = vector::pos(prepared.fill.vertices[triangle[1] as usize]);
+        let c = vector::pos(prepared.fill.vertices[triangle[2] as usize]);
+        let n = (a.distance(b).max(b.distance(c)).max(c.distance(a)) / 16.)
+            .ceil()
+            .clamp(1., 32.) as usize;
+        for row in 0..n {
+            for col in 0..n - row {
+                let at = |i: usize, j: usize| {
+                    a + (b - a) * (i as f32 / n as f32) + (c - a) * (j as f32 / n as f32)
+                };
+                let mut add = |points: [Pos2; 3]| {
+                    let base = mesh.vertices.len() as u32;
+                    for q in points {
+                        let (q, w) = map(q);
+                        mesh.colored_vertex(
+                            view.screen(q),
+                            Color32::from_gray((w.clamp(0., 1.) * 255.) as u8),
+                        );
+                    }
+                    mesh.add_triangle(base, base + 1, base + 2);
+                };
+                add([at(row, col), at(row + 1, col), at(row, col + 1)]);
+                if row + col + 1 < n {
+                    add([at(row + 1, col), at(row + 1, col + 1), at(row, col + 1)]);
+                }
+            }
+        }
+    }
+    p.add(mesh);
+}

@@ -16,16 +16,29 @@ impl Editor {
         let t = &layer.options.tweens[index];
         let a = crate::vector::control_bounds(layer.frames[t.start].get(m)?).center();
         let b = crate::vector::control_bounds(layer.frames[t.end].get(m)?).center();
+        let rail = if a.distance(b) < 0.1 {
+            eframe::egui::vec2(160., 0.)
+        } else {
+            b - a
+        };
+        let origin = if a.distance(b) < 0.1 {
+            a - rail / 2.
+        } else {
+            a
+        };
         Some((
             index,
             a,
             b,
             [
-                a + (b - a) / 3. + crate::vector::pos(t.curve.path[0]).to_vec2(),
-                a + (b - a) * 2. / 3. + crate::vector::pos(t.curve.path[1]).to_vec2(),
+                origin + rail * t.curve.pace[0] + crate::vector::pos(t.curve.path[0]).to_vec2(),
+                origin
+                    + rail * (1. - t.curve.pace[1])
+                    + crate::vector::pos(t.curve.path[1]).to_vec2(),
             ],
         ))
     }
+
     pub fn visual_canvas_input(
         &mut self,
         ui: &egui::Ui,
@@ -81,13 +94,31 @@ impl Editor {
             self.animation.path_handle.is_some() || self.animation.gradient_drag.is_some();
         if ui.input(|i| i.pointer.primary_down()) {
             if let (Some(i), Some((index, a, b, _))) = (self.animation.path_handle, path) {
-                let base = if i == 0 {
-                    a + (b - a) / 3.
+                let stationary = a.distance(b) < 0.1;
+                let rail = if stationary {
+                    Vec2::new(160., 0.)
                 } else {
-                    a + (b - a) * 2. / 3.
+                    b - a
                 };
-                self.doc.layers[ids[0].0].options.tweens[index].curve.path[i] =
-                    (view.world(screen) - base).into();
+                let origin = if stationary { a - rail / 2. } else { a };
+                let world = view.world(screen);
+                let curve = &mut self.doc.layers[ids[0].0].options.tweens[index].curve;
+                curve.pace[i] = if i == 0 {
+                    world.distance(origin) / rail.length()
+                } else {
+                    world.distance(origin + rail) / rail.length()
+                }
+                .clamp(0., 1.);
+                // Keep a spatial bend only perpendicular to the timing rail.
+                if !stationary {
+                    let endpoint = if i == 0 {
+                        origin + rail * curve.pace[i]
+                    } else {
+                        origin + rail * (1. - curve.pace[i])
+                    };
+                    let n = rail.rot90().normalized();
+                    curve.path[i] = (n * (world - endpoint).dot(n)).into();
+                }
             }
             if let Some(i) = self.animation.gradient_drag {
                 for &(l, m) in ids {
@@ -123,13 +154,30 @@ impl Editor {
         }
         if let Some((index, a, b, handles)) = self.motion_path(ids) {
             let curve = &self.doc.layers[ids[0].0].options.tweens[index].curve;
-            let points = (0..=64)
-                .map(|i| view.screen(curve.point(a, b, i as f32 / 64.)))
-                .collect();
-            p.add(egui::Shape::line(
-                points,
-                Stroke::new(2., Color32::from_rgb(180, 120, 250)),
-            ));
+            let span = &self.doc.layers[ids[0].0].options.tweens[index];
+            let frames = span.end - span.start + 1;
+            let stationary = a.distance(b) < 0.1;
+            for i in 0..frames {
+                let t = i as f32 / (frames - 1).max(1) as f32;
+                let q = if stationary {
+                    (a - Vec2::X * 80.).lerp(a + Vec2::X * 80., curve.time(t))
+                } else {
+                    curve.point(a, b, curve.time(t))
+                };
+                p.circle_filled(
+                    view.screen(q),
+                    if span.start + i == self.frame {
+                        4.
+                    } else {
+                        2.5
+                    },
+                    if span.start + i == self.frame {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgb(180, 120, 250)
+                    },
+                );
+            }
             for (i, h) in handles.iter().enumerate() {
                 p.line_segment(
                     [view.screen(if i == 0 { a } else { b }), view.screen(*h)],
@@ -276,6 +324,7 @@ impl Editor {
             if let Some(s) = self.doc.extras.symbols.iter().find(|s| s.id == id) {
                 let mut d = self.doc.clone();
                 d.layers = s.layers.clone();
+                d.extras.rig = s.rig.clone();
                 d.extras.cameras = Default::default();
                 d.extras.scenes = Default::default();
                 let marks =
@@ -612,7 +661,13 @@ impl Editor {
             return;
         };
         let mut curve = self.doc.layers[l].options.tweens[index].curve.clone();
-        curve_controls(ui, &mut curve, &mut self.animation.ease_handle);
+        let span = &self.doc.layers[l].options.tweens[index];
+        timing_controls(
+            ui,
+            &mut curve,
+            &mut self.animation.ease_handle,
+            span.end - span.start + 1,
+        );
         if curve != self.doc.layers[l].options.tweens[index].curve {
             let ids = self.canvas.selected.clone();
             self.checkpoint();
@@ -623,99 +678,69 @@ impl Editor {
     }
 }
 
-pub fn curve_controls(
+/// One dot per frame; the two horizontal handles control endpoint speed for
+/// translation, rotation, scale, bone angles and puppet pins alike.
+pub fn timing_controls(
     ui: &mut egui::Ui,
     curve: &mut crate::animation::Curve,
     handle: &mut Option<usize>,
+    frames: usize,
 ) {
     ui.horizontal(|ui| {
-        for (icon, label, ease) in [
-            (
-                Icon::Line,
-                "Linear",
-                [[1. / 3., 1. / 3.], [2. / 3., 2. / 3.]],
-            ),
-            (Icon::Next, "Ease in", [[0.42, 0.], [1., 1.]]),
-            (Icon::Previous, "Ease out", [[0., 0.], [0.58, 1.]]),
-            (Icon::Onion, "Ease both", [[0.42, 0.], [0.58, 1.]]),
+        for (icon, label, pace) in [
+            (Icon::Line, "Lineal", [1. / 3., 1. / 3.]),
+            (Icon::Next, "Acelerar", [0., 0.6]),
+            (Icon::Previous, "Desacelerar", [0.6, 0.]),
+            (Icon::Onion, "Suavizar ambos extremos", [0., 0.]),
         ] {
             if button(ui, icon, "", label, false, true).clicked() {
-                curve.ease = ease;
-                if label == "Linear" {
-                    curve.path = [[0., 0.], [0., 0.]];
-                }
+                curve.ease = crate::animation::Curve::default().ease;
+                curve.pace = pace;
             }
         }
     });
-    let (r, response) = ui.allocate_exact_size(Vec2::new(240., 125.), Sense::click_and_drag());
-    let graph = r.shrink(8.);
-    let pos = |p: [f32; 2]| {
-        Pos2::new(
-            graph.left() + p[0] * graph.width(),
-            graph.bottom() - p[1] * graph.height(),
-        )
-    };
-    ui.painter().rect_stroke(
-        graph,
-        0.,
-        Stroke::new(1., Color32::GRAY),
-        egui::StrokeKind::Inside,
+    let (r, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width().min(260.), 90.),
+        Sense::click_and_drag(),
     );
-    let pts: Vec<_> = (0..=64)
-        .map(|i| {
-            let t = i as f32 / 64.;
-            pos([t, curve.time(t)])
-        })
-        .collect();
-    ui.painter()
-        .add(egui::Shape::line(pts, Stroke::new(2., ACCENT)));
+    let r = r.shrink2(Vec2::new(10., 12.));
+    let a = Pos2::new(r.left(), r.top() + 12.);
+    let b = Pos2::new(r.right(), a.y);
+    let endpoints = [a, b];
+    let handles = [
+        a + Vec2::new(r.width() * curve.pace[0], 32.),
+        b - Vec2::new(r.width() * curve.pace[1], -32.),
+    ];
+    for i in 0..frames.clamp(2, 10000) {
+        let t = i as f32 / (frames.max(2) - 1) as f32;
+        ui.painter()
+            .circle_filled(a.lerp(b, curve.time(t)), 2., ACCENT);
+    }
     for i in 0..2 {
-        ui.painter().line_segment(
-            [
-                pos(if i == 0 { [0., 0.] } else { [1., 1.] }),
-                pos(curve.ease[i]),
-            ],
-            Stroke::new(1., Color32::GRAY),
-        );
-        ui.painter().circle_filled(pos(curve.ease[i]), 5., ACCENT);
+        ui.painter()
+            .line_segment([endpoints[i], handles[i]], Stroke::new(1., Color32::GRAY));
+        ui.painter().circle_filled(handles[i], 5., ACCENT);
     }
     if response.drag_started()
         && let Some(p) = response.interact_pointer_pos()
     {
-        *handle = Some(
-            if p.distance(pos(curve.ease[0])) < p.distance(pos(curve.ease[1])) {
-                0
-            } else {
-                1
-            },
-        );
+        *handle = Some(if p.distance(handles[0]) < p.distance(handles[1]) {
+            0
+        } else {
+            1
+        });
     }
     if response.dragged()
         && let (Some(i), Some(p)) = (*handle, response.interact_pointer_pos())
     {
-        curve.ease[i] = [
-            ((p.x - graph.left()) / graph.width()).clamp(0., 1.),
-            ((graph.bottom() - p.y) / graph.height()).clamp(0., 1.),
-        ];
+        curve.pace[i] = if i == 0 {
+            (p.x - a.x) / r.width()
+        } else {
+            (b.x - p.x) / r.width()
+        }
+        .clamp(0., 1.);
     }
-    ui.label("Motion path · Bézier offsets");
-    for i in 0..2 {
-        ui.horizontal(|ui| {
-            crate::design::draw(
-                ui.painter(),
-                ui.available_rect_before_wrap()
-                    .with_max_x(ui.cursor().left() + 20.),
-                Icon::Node,
-                ACCENT,
-            );
-            ui.add_space(22.);
-            for v in &mut curve.path[i] {
-                ui.add(
-                    egui::DragValue::new(v)
-                        .speed(1.)
-                        .prefix(if i == 0 { "A " } else { "B " }),
-                );
-            }
-        });
-    }
+    ui.small(crate::i18n::tr(
+        "Un punto por fotograma · Acerca el tirador para comprimir los fotogramas.",
+    ));
 }

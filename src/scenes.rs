@@ -28,6 +28,8 @@ impl Editor {
         self.doc.layers = s.layers;
         self.doc.extras.folders = s.folders;
         self.doc.extras.cameras = s.cameras;
+        self.doc.extras.rig = s.rig;
+        self.rigging = Default::default();
         self.doc.extras.perspective = s.perspective;
         self.doc.extras.active_scene = index;
         self.frame = 0;
@@ -218,6 +220,8 @@ impl Editor {
                             self.doc.layers = s.layers;
                             self.doc.extras.folders = s.folders;
                             self.doc.extras.cameras = s.cameras;
+                            self.doc.extras.rig = s.rig;
+                            self.rigging = Default::default();
                             self.doc.extras.perspective = s.perspective;
                             self.doc.extras.active_scene = next;
                             self.layer = 0;

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::mpsc};
 
 pub struct Session {
+    rigging: crate::rig_ui::RigEditor,
+    assets: crate::library::LibraryState,
     doc: Document,
     frame: usize,
     layer: usize,
@@ -22,6 +24,8 @@ pub struct Session {
 impl Session {
     fn new(doc: Document, path: Option<PathBuf>, recovery: PathBuf) -> Self {
         Self {
+            rigging: Default::default(),
+            assets: Default::default(),
             doc,
             path,
             recovery,
@@ -36,6 +40,8 @@ impl Session {
         }
     }
     fn exchange(&mut self, e: &mut Editor) {
+        std::mem::swap(&mut self.rigging, &mut e.rigging);
+        std::mem::swap(&mut self.assets, &mut e.assets);
         std::mem::swap(&mut self.doc, &mut e.doc);
         std::mem::swap(&mut self.frame, &mut e.frame);
         std::mem::swap(&mut self.layer, &mut e.layer);
