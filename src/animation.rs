@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Curve {
+    pub pace: [f32; 2],
     pub ease: [[f32; 2]; 2],
     pub path: [[f32; 2]; 2],
 }
 impl Default for Curve {
     fn default() -> Self {
         Self {
+            pace: [1. / 3., 1. / 3.],
             ease: [[1. / 3., 1. / 3.], [2. / 3., 2. / 3.]],
             path: [[0., 0.], [0., 0.]],
         }
@@ -22,6 +24,12 @@ impl Default for Curve {
 }
 impl Curve {
     pub fn time(&self, t: f32) -> f32 {
+        let t = self.ease_time(t);
+        3. * (1. - t).powi(2) * t * self.pace[0]
+            + 3. * (1. - t) * t * t * (1. - self.pace[1])
+            + t * t * t
+    }
+    fn ease_time(&self, t: f32) -> f32 {
         if self.ease[0][0] == self.ease[0][1] && self.ease[1][0] == self.ease[1][1] {
             return t.clamp(0., 1.);
         }
@@ -53,10 +61,14 @@ impl Curve {
             + (b - a) * (t * t * t)
     }
     pub fn valid(&self) -> bool {
-        self.ease
+        self.pace
             .iter()
-            .flatten()
             .all(|v| v.is_finite() && (0. ..=1.).contains(v))
+            && self
+                .ease
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite() && (0. ..=1.).contains(v))
             && self
                 .path
                 .iter()
@@ -85,6 +97,8 @@ pub struct CameraAnimation {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Scene {
+    #[serde(default)]
+    pub rig: crate::rig::Rig,
     pub id: u64,
     pub name: String,
     pub layers: SharedVec<Layer>,
@@ -94,6 +108,7 @@ pub struct Scene {
 }
 #[derive(Default)]
 pub struct State {
+    pub clock: usize,
     pub scenes_open: bool,
     pub scene_rename: Option<u64>,
     pub scene_delete: Option<u64>,
@@ -109,6 +124,7 @@ pub struct State {
 }
 pub fn scene_from(doc: &Document, id: u64, name: String) -> Scene {
     Scene {
+        rig: doc.extras.rig.clone(),
         id,
         name,
         layers: doc.layers.clone(),
@@ -130,6 +146,7 @@ pub fn scene_doc(doc: &Document, index: usize) -> Document {
     if !doc.extras.scenes.is_empty() && index != doc.extras.active_scene {
         let s = &doc.extras.scenes[index];
         result.layers = s.layers.clone();
+        result.extras.rig = s.rig.clone();
         result.extras.folders = s.folders.clone();
         result.extras.cameras = s.cameras.clone();
         result.extras.perspective = s.perspective.clone();
@@ -523,6 +540,7 @@ impl Editor {
         self.recover();
     }
     pub fn advance_animation(&mut self, steps: usize) {
+        self.animation.clock = self.animation.clock.saturating_add(steps);
         if self.animation.play_all && !self.doc.extras.scenes.is_empty() {
             let global = (movie_offset(&self.doc, self.frame) + steps) % movie_count(&self.doc);
             let (index, local) = locate(&self.doc, global);

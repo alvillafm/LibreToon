@@ -108,8 +108,17 @@ pub enum Playback {
     Once,
     Single,
 }
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolClock {
+    #[default]
+    Scene,
+    Independent,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
+    #[serde(default)]
+    pub clock: SymbolClock,
     pub symbol: u64,
     pub matrix: [f32; 6],
     pub mode: Playback,
@@ -160,7 +169,9 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    extras.scenes.is_empty()
+    extras.rig.is_empty()
+        && extras.library.is_empty()
+        && extras.scenes.is_empty()
         && extras.active_scene == 0
         && extras.folders.is_empty()
         && extras.symbols.is_empty()
@@ -176,6 +187,10 @@ pub struct Folder {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Symbol {
+    #[serde(default)]
+    pub rig: crate::rig::Rig,
+    #[serde(default)]
+    pub library_folder: Option<u64>,
     #[serde(default)]
     pub folders: SharedVec<Folder>,
     #[serde(default)]
@@ -216,6 +231,8 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    pub rig: crate::rig::Rig,
+    pub library: crate::library::Library,
     pub scenes: SharedVec<crate::animation::Scene>,
     pub active_scene: usize,
     pub folders: SharedVec<Folder>,
@@ -349,6 +366,8 @@ fn expand(
     depth: usize,
     out: &mut Vec<Mark>,
     guides: bool,
+    clock: usize,
+    poses: &std::collections::HashMap<u64, crate::rig::Pose>,
 ) {
     if mark.style.guide && !guides {
         return;
@@ -361,17 +380,25 @@ fn expand(
             return;
         };
         let count = symbol.layers.first().map_or(1, |l| l.frames.len()).max(1);
-        let offset = frame.saturating_sub(instance.born) + instance.first;
-        let frame = match instance.mode {
-            Playback::Loop => offset % count,
-            Playback::Once => offset.min(count - 1),
-            Playback::Single => instance.first.min(count - 1),
-        };
+        let parent_frame = frame;
+        let frame = symbol_frame(instance, count, frame, clock);
         let mut sub = doc.clone();
         sub.layers = symbol.layers.clone();
         sub.extras.cameras = Default::default();
-        for (_, _, m) in resolve_internal(&sub, frame, depth + 1, guides) {
-            out.push(affine(&m, instance.matrix));
+        sub.extras.rig = symbol.rig.clone();
+        let binding = doc
+            .extras
+            .rig
+            .bindings
+            .iter()
+            .find(|b| b.target == mark.style.track && b.symbol == instance.symbol);
+        let deform = binding.map(|b| crate::rig::Deformer::new(b, poses, parent_frame));
+        for (_, _, m) in resolve_internal(&sub, frame, depth + 1, guides, clock) {
+            if let Some(d) = &deform {
+                out.extend(d.mark(&m, instance.matrix));
+            } else {
+                out.push(affine(&m, instance.matrix));
+            }
         }
     } else {
         out.push(mark.clone());
@@ -404,7 +431,9 @@ fn resolve_internal(
     frame: usize,
     depth: usize,
     guides: bool,
+    clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
+    let poses = doc.extras.rig.poses(frame);
     let mut output = vec![];
     let mut below = vec![];
     for (l, layer) in doc.layers.iter().enumerate() {
@@ -426,7 +455,16 @@ fn resolve_internal(
             .enumerate()
         {
             let mut expanded = vec![];
-            expand(doc, mark, frame, depth, &mut expanded, guides);
+            expand(
+                doc,
+                mark,
+                frame,
+                depth,
+                &mut expanded,
+                guides,
+                clock,
+                &poses,
+            );
             for original in expanded {
                 let parts = mask
                     .as_ref()
@@ -452,18 +490,19 @@ fn resolve_internal(
     output
 }
 pub fn resolve(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, true)
+    resolve_mode(doc, frame, camera, true, frame)
 }
 pub fn resolve_export(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, false)
+    resolve_mode(doc, frame, camera, false, frame)
 }
 fn resolve_mode(
     doc: &Document,
     frame: usize,
     camera: bool,
     guides: bool,
+    clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
-    let mut marks = resolve_internal(doc, frame, 0, guides);
+    let mut marks = resolve_internal(doc, frame, 0, guides, clock);
     if camera {
         if let Some(c) = doc
             .extras
@@ -484,7 +523,8 @@ fn resolve_mode(
     marks
 }
 pub fn baked(doc: &Document) -> Document {
-    if doc.extras.scenes.is_empty()
+    if doc.extras.rig.is_empty()
+        && doc.extras.scenes.is_empty()
         && doc.extras.symbols.is_empty()
         && doc.extras.cameras.is_empty()
         && doc.layers.iter().all(|l| {
@@ -550,6 +590,11 @@ pub fn baked(doc: &Document) -> Document {
     result
 }
 pub fn validate(doc: &Document) -> Result<(), String> {
+    doc.extras.rig.validate()?;
+    doc.extras.library.validate(&doc.extras.symbols)?;
+    for symbol in &doc.extras.symbols {
+        symbol.rig.validate()?;
+    }
     if doc.extras.folders.len() > 200
         || doc.extras.symbols.len() > 500
         || doc.extras.cameras.len() > 1000
@@ -874,4 +919,27 @@ pub fn svg(doc: &Document, frame: usize) -> String {
         }
     }
     out + "</svg>"
+}
+
+pub fn resolve_at(
+    doc: &Document,
+    frame: usize,
+    camera: bool,
+    clock: usize,
+) -> Vec<(usize, usize, Mark)> {
+    resolve_mode(doc, frame, camera, true, clock)
+}
+pub fn symbol_frame(i: &Instance, count: usize, frame: usize, clock: usize) -> usize {
+    let count = count.max(1);
+    let source = if i.clock == SymbolClock::Independent {
+        clock
+    } else {
+        frame
+    };
+    let offset = source.saturating_sub(i.born).saturating_add(i.first);
+    match i.mode {
+        Playback::Loop => offset % count,
+        Playback::Once => offset.min(count - 1),
+        Playback::Single => i.first.min(count - 1),
+    }
 }

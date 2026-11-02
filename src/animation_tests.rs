@@ -28,6 +28,7 @@ fn close(a: f32, b: f32) {
 fn motion_interpolates_translation_rotation_scale_and_symbol_frame() {
     let mut a = rect();
     a.style.instance = Some(Instance {
+        clock: Default::default(),
         symbol: 1,
         matrix: [1., 0., 0., 1., 0., 0.],
         mode: Playback::Single,

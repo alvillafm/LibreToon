@@ -11,6 +11,7 @@ enum Row {
     Layer(usize, usize),
     Folder(usize, usize),
     Cameras,
+    Rigging,
 }
 fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
     if depth > 200 {
@@ -42,6 +43,13 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
 }
 impl Editor {
     pub fn timeline_edit(&mut self, action: usize) {
+        if matches!(
+            self.tool,
+            crate::canvas::Tool::Bones | crate::canvas::Tool::Puppet
+        ) {
+            self.rig_key_action(action);
+            return;
+        }
         if self.doc.layers[self.layer].options.locked
             || self.doc.layers[self.layer].options.mannequin.is_some()
         {
@@ -240,6 +248,9 @@ impl Editor {
                     {
                         self.animation.play_all = false;
                         self.playing = !self.playing;
+                        if self.playing {
+                            self.animation.clock = self.frame;
+                        }
                         self.tick = std::time::Instant::now();
                     }
                     if button(
@@ -459,6 +470,9 @@ impl Editor {
                 let mut all = vec![];
                 if !self.doc.extras.cameras.is_empty() {
                     all.push(Row::Cameras);
+                }
+                if !self.doc.extras.rig.is_empty() {
+                    all.push(Row::Rigging);
                 }
                 rows(self, None, 0, &mut all);
                 let mut target = None;
@@ -800,6 +814,71 @@ impl Editor {
                                             .clicked()
                                         {
                                             self.layer = l;
+                                            self.frame = f;
+                                            self.playing = false;
+                                        }
+                                    }
+                                }
+                                Row::Rigging => {
+                                    let color = Color32::from_rgb(86, 211, 214);
+                                    painter.rect_filled(label, 0., Color32::from_rgb(29, 63, 68));
+                                    draw(
+                                        &painter,
+                                        Rect::from_min_size(
+                                            label.min + Vec2::new(8., 4.),
+                                            Vec2::splat(20.),
+                                        ),
+                                        Icon::Bones,
+                                        color,
+                                    );
+                                    painter.text(
+                                        label.min + Vec2::new(36., 14.),
+                                        egui::Align2::LEFT_CENTER,
+                                        "Rigging · Huesos / Puppet",
+                                        egui::FontId::proportional(11.),
+                                        color,
+                                    );
+                                    for f in frames.clone() {
+                                        let x = r.left() + label_w + (f as f32 + 0.5) * cell;
+                                        let q = Pos2::new(x, y + row_h / 2.);
+                                        let keyed = self
+                                            .doc
+                                            .extras
+                                            .rig
+                                            .bones
+                                            .iter()
+                                            .any(|b| b.keys.iter().any(|k| k.frame == f))
+                                            || self.doc.extras.rig.bindings.iter().any(|b| {
+                                                b.pins
+                                                    .iter()
+                                                    .any(|p| p.keys.iter().any(|k| k.frame == f))
+                                            });
+                                        if keyed {
+                                            painter.add(egui::Shape::convex_polygon(
+                                                vec![
+                                                    q - Vec2::Y * 5.,
+                                                    q + Vec2::X * 4.,
+                                                    q + Vec2::Y * 5.,
+                                                    q - Vec2::X * 4.,
+                                                ],
+                                                color,
+                                                Stroke::NONE,
+                                            ));
+                                        } else {
+                                            painter.circle_filled(
+                                                q,
+                                                1.5,
+                                                color.gamma_multiply(0.5),
+                                            );
+                                        }
+                                        if ui
+                                            .interact(
+                                                Rect::from_center_size(q, Vec2::new(cell, row_h)),
+                                                ui.scope_id().with(("rig-frame", f)),
+                                                Sense::click(),
+                                            )
+                                            .clicked()
+                                        {
                                             self.frame = f;
                                             self.playing = false;
                                         }
