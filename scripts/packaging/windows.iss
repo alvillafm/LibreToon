@@ -16,7 +16,7 @@ DefaultGroupName=LibreToon
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0
+MinVersion=10.0.17763
 OutputDir={#Output}
 OutputBaseFilename=LibreToon-{#Version}-Windows-x64-Setup
 SetupIconFile=..\..\assets\libretoon.ico
@@ -29,6 +29,5 @@ LicenseFile={#Payload}\LICENSE
 Source: "{#Payload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]
 Name: "{group}\LibreToon"; Filename: "{app}\libretoon.exe"
-Name: "{group}\FFmpeg sources and notices"; Filename: "{app}\SOURCE-ACCESS.txt"
 [Run]
 Filename: "{app}\libretoon.exe"; Description: "Open LibreToon"; Flags: nowait postinstall skipifsilent unchecked

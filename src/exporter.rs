@@ -65,35 +65,23 @@ fn hidden(_command: &mut Command) {
     }
 }
 pub fn ffmpeg_path(configured: &str) -> PathBuf {
-    if !configured.is_empty() {
-        return configured.into();
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for dir in exe.ancestors().take(5) {
-            let name = if cfg!(windows) {
-                "ffmpeg.exe"
-            } else {
-                "ffmpeg"
-            };
-            let path = dir.join("assets/tools").join(name);
-            if path.is_file() {
-                return path;
-            }
+    crate::ffmpeg_setup::available(configured).unwrap_or_else(|| {
+        if configured.is_empty() {
+            PathBuf::from("ffmpeg")
+        } else {
+            PathBuf::from(configured)
         }
-    }
-    PathBuf::from("ffmpeg")
+    })
 }
 impl Editor {
     pub fn open_export(&mut self, gif: bool) {
         self.leave_symbol_context_for_document_change();
         self.finish_pending_pen();
-        if self.studio.prefs.ffmpeg.is_empty()
-            || !std::path::Path::new(&self.studio.prefs.ffmpeg).is_file()
-        {
-            let bundled = ffmpeg_path("");
-            if bundled.is_file() {
-                self.studio.prefs.ffmpeg = bundled.to_string_lossy().into_owned();
-            }
+        if let Some(path) = crate::ffmpeg_setup::available(&self.studio.prefs.ffmpeg) {
+            self.studio.prefs.ffmpeg = path.to_string_lossy().into_owned();
+        } else {
+            self.studio.ffmpeg_setup.prompt = true;
+            self.studio.ffmpeg_setup.complete = false;
         }
         let folder = self
             .path
@@ -132,7 +120,117 @@ impl Editor {
             svg_sequence: false,
         });
     }
+    fn select_external_ffmpeg(&mut self, folder: bool) {
+        let selected = if folder {
+            rfd::FileDialog::new()
+                .pick_folder()
+                .and_then(|p| crate::ffmpeg_setup::in_folder(&p))
+        } else {
+            let dialog = rfd::FileDialog::new();
+            let dialog = if cfg!(windows) {
+                dialog.add_filter("FFmpeg", &["exe"])
+            } else {
+                dialog
+            };
+            dialog.pick_file()
+        };
+        if let Some(path) = selected {
+            self.studio.prefs.ffmpeg = path.to_string_lossy().into_owned();
+            self.studio.ffmpeg_setup.prompt = false;
+            self.studio.ffmpeg_setup.error = None;
+            if let Err(e) = self.studio.save() {
+                self.status = e;
+            }
+        }
+    }
+    fn ffmpeg_setup_ui(&mut self, ctx: &egui::Context) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        let result = self
+            .studio
+            .ffmpeg_setup
+            .job
+            .as_ref()
+            .map(|rx| rx.try_recv());
+        match result {
+            Some(Ok(Ok(path))) => {
+                self.studio.ffmpeg_setup.job = None;
+                self.studio.prefs.ffmpeg = path.to_string_lossy().into_owned();
+                self.studio.ffmpeg_setup.complete = true;
+                self.studio
+                    .ffmpeg_setup
+                    .progress
+                    .store(1000, Ordering::Relaxed);
+                if let Err(e) = self.studio.save() {
+                    self.status = e;
+                }
+            }
+            Some(Ok(Err(e))) => {
+                self.studio.ffmpeg_setup.job = None;
+                self.studio.ffmpeg_setup.error = Some(e);
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.studio.ffmpeg_setup.job = None;
+                self.studio.ffmpeg_setup.error = Some("FFmpeg setup was interrupted".into());
+            }
+            _ => {}
+        }
+        if !self.studio.ffmpeg_setup.prompt {
+            return false;
+        }
+        let mut action = 0;
+        egui::Modal::new(egui::Id::unique("ffmpeg-setup")).show(ctx,|ui|{
+            ui.set_max_width(440.);
+            ui.heading(tr("FFmpeg setup"));
+            if self.studio.ffmpeg_setup.complete {
+                ui.add(egui::ProgressBar::new(1.).show_percentage());
+                ui.label(tr("FFmpeg downloaded and configured in LibreToon."));
+                if ui.button(tr("Continue")).clicked() {action=5;}
+            } else if self.studio.ffmpeg_setup.job.is_some() {
+                let phase=self.studio.ffmpeg_setup.phase.load(Ordering::Relaxed);
+                ui.label(tr(match phase {
+                    0=>"Downloading FFmpeg…",
+                    1=>"Verifying download…",
+                    2=>"Creating the FFmpeg folder…",
+                    _=>"Configuring FFmpeg in LibreToon…"
+                }));
+                let value=self.studio.ffmpeg_setup.progress.load(Ordering::Relaxed) as f32/1000.;
+                ui.add(egui::ProgressBar::new(value).show_percentage());
+                if ui.button(tr("Cancelar")).clicked() {self.studio.ffmpeg_setup.cancel.store(true,Ordering::Relaxed);}
+            } else {
+                ui.label(tr("This exporter needs FFmpeg to work. Download and configure it automatically?"));
+                ui.small(tr("FFmpeg is downloaded separately from Imageio/PyPI and saved in your user data folder."));
+                ui.hyperlink_to(tr("Download provider"),"https://github.com/imageio/imageio-ffmpeg");
+                if let Some(error)=&self.studio.ffmpeg_setup.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED,tr("FFmpeg setup could not finish. Retry or select it manually."));
+                    ui.collapsing(tr("Details"),|ui|{ui.label(crate::i18n::tr(error));});
+                }
+                if ui.button(tr("Download and configure automatically")).clicked(){action=1;}
+                ui.horizontal(|ui|{
+                    if ui.button(tr("Select executable…")).clicked(){action=2;}
+                    if ui.button(tr("Select folder…")).clicked(){action=3;}
+                });
+                if ui.button(tr("Not now")).clicked(){action=5;}
+            }
+        });
+        match action {
+            1 => self.studio.ffmpeg_setup.start(),
+            2 => self.select_external_ffmpeg(false),
+            3 => self.select_external_ffmpeg(true),
+            5 => {
+                self.studio.ffmpeg_setup.prompt = false;
+                self.studio.ffmpeg_setup.complete = false;
+            }
+            _ => {}
+        }
+        if self.studio.ffmpeg_setup.job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        true
+    }
     pub fn export_ui(&mut self, ctx: &egui::Context) {
+        if self.ffmpeg_setup_ui(ctx) {
+            return;
+        }
         if let Some(receiver) = &self.studio.export_job {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -293,28 +391,40 @@ impl Editor {
                 ));
             }
             if s.format != 1 {
-                ui.collapsing(crate::i18n::tr("FFmpeg"), |ui| {
-                    ui.label(tr("FFmpeg incluido: no requiere descarga."));
-                    ui.text_edit_singleline(&mut self.studio.prefs.ffmpeg);
-                    if ui.button(tr("Buscar FFmpeg…")).clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("FFmpeg", &["exe"])
-                            .pick_file()
-                        {
-                            self.studio.prefs.ffmpeg = path.to_string_lossy().into_owned();
-                        }
+                ui.group(|ui| {
+                    ui.label(tr("FFmpeg executable"));
+                    if ui
+                        .text_edit_singleline(&mut self.studio.prefs.ffmpeg)
+                        .lost_focus()
+                    {
+                        let _ = self.studio.save();
                     }
-                    if ui.button(tr("Configurar FFmpeg incluido")).clicked() {
-                        self.studio.prefs.ffmpeg = ffmpeg_path("").to_string_lossy().into_owned();
-                        if let Err(e) = self.studio.save() {
-                            self.status = e;
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("Select executable…")).clicked() {
+                            self.select_external_ffmpeg(false);
                         }
+                        if ui.button(tr("Select folder…")).clicked() {
+                            self.select_external_ffmpeg(true);
+                        }
+                    });
+                    if ui
+                        .button(tr("Download and configure automatically"))
+                        .clicked()
+                    {
+                        self.studio.ffmpeg_setup.prompt = true;
+                        self.studio.ffmpeg_setup.complete = false;
                     }
                 });
             }
             ui.separator();
             if ui.button(tr("Exportar")).clicked() {
-                start = true;
+                if s.format != 1
+                    && crate::ffmpeg_setup::available(&self.studio.prefs.ffmpeg).is_none()
+                {
+                    self.studio.ffmpeg_setup.prompt = true;
+                } else {
+                    start = true;
+                }
             }
         });
         s.first = s.first.clamp(1, crate::animation::movie_count(&self.doc));
@@ -504,7 +614,7 @@ fn run_export(
     let mut child = command.spawn().map_err(|e| {
         format!(
             "{}: {e}",
-            tr("No se pudo iniciar FFmpeg. Selecciona ffmpeg.exe en las opciones de exportación")
+            tr("Could not start FFmpeg. Configure it in the export dialog.")
         )
     })?;
     let mut stderr = child.stderr.take().unwrap();

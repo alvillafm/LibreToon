@@ -19,11 +19,20 @@ See [licenses/RUST-DEPENDENCIES.md](licenses/RUST-DEPENDENCIES.md) for package/v
 - The font metadata/candidate files were inspected, but the exact subset embedded in every platform/feature combination has not been established.
 - User-selected artwork fonts are not bundled by this notice record and their individual terms have not been audited.
 
-## FFmpeg and Imageio
+## Optional FFmpeg download
 
-[assets/tools/ffmpeg.exe](tools/ffmpeg.exe) is the owned FFmpeg 7.1.5-LibreToon-1 build, GPL version 3 or later. Its exact source-locked build, x264/zlib and runtime notices are documented separately. It is not MIT. Retained Imageio BSD materials describe the earlier distribution, not this executable.
+LibreToon installers and portable packages no longer contain an FFmpeg executable or
+its corresponding-source bundle. Video/GIF export can use a user-selected executable
+or, with explicit consent, download an immutable Imageio/PyPI wheel directly to that
+user's application-data folder. No Python runtime or library is installed.
+The archive size, HTTPS URL and SHA-256 are pinned in ffmpeg-downloads.json.
 
-See [tools/THIRD_PARTY.md](tools/THIRD_PARTY.md), [binary metadata](tools/BINARY_METADATA.txt) and [build evidence](tools/BUILD_EVIDENCE.json). The complete source ZIP and original notices are generated and validated with each Windows distribution. Preserve them together with the executable; the evidence records its scope and is not a blanket legal certification.
+FFmpeg remains a separate process and retains its own license. Its reported license,
+provider notices, version and exact download origin are kept beside the downloaded
+executable. Imageio's notices refer to the upstream download, not LibreToon's MIT code.
+The historical owned FFmpeg build/source/licensing evidence is retained under
+assets/tools and scripts/ffmpeg in the source repository, excluded from packages.
+
 
 ## Project artwork
 
@@ -31,4 +40,9 @@ See [ASSET_PROVENANCE.md](ASSET_PROVENANCE.md) for the maintainer declaration of
 
 ## Packaging status
 
-Windows CI retains the root MIT LICENSE and third-party notices, builds and reproduces FFmpeg, runs export tests and source review, then validates the exact staged binary/source pair before upload. The same artifact includes complete corresponding source and SOURCE-ACCESS.txt. Local checks passed; a remote Actions run/public release was not initiated. See tools/SOURCE_STATUS.json and the build guide.
+CI packages only LibreToon/resources/notices and rejects accidental inclusion of ffmpeg,
+ffprobe or an FFmpeg source ZIP. It does not compile, reproduce, download or redistribute
+FFmpeg. Historical source/reproduction gates remain available for any future explicit
+redistribution of those owned binaries; they are no longer a dependency of app packaging.
+The optional client download is supplied directly by the named upstream provider and
+is not a declaration that historical source-access limitations have been resolved.

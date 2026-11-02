@@ -133,6 +133,7 @@ pub struct Studio {
     brush_menu: bool,
     pub brush: Tool,
     pub export: Option<crate::exporter::ExportSettings>,
+    pub ffmpeg_setup: crate::ffmpeg_setup::Setup,
     pub export_job: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     pub export_progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub export_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -141,14 +142,13 @@ pub struct Studio {
     notice_time: Option<Instant>,
 }
 fn preferences_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("LibreToon/preferences.json")
+    crate::ffmpeg_setup::data_dir().join("preferences.json")
 }
+
 impl Studio {
     pub fn load() -> Self {
         let mut prefs: Preferences = std::fs::read(preferences_path())
+            .or_else(|_| std::fs::read(std::env::temp_dir().join("LibreToon/preferences.json")))
             .ok()
             .and_then(|s| serde_json::from_slice(&s).ok())
             .unwrap_or_default();
@@ -188,6 +188,7 @@ impl Studio {
             brush_menu: false,
             brush: Tool::Brush,
             export: None,
+            ffmpeg_setup: Default::default(),
             export_job: None,
             export_progress: Default::default(),
             export_cancel: Default::default(),

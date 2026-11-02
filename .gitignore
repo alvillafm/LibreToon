@@ -1,3 +1,5 @@
 /target/
 /work/
 *.trazo.tmp
+
+/dist/

@@ -17,6 +17,7 @@ mod drawing;
 mod editing;
 mod exporter;
 mod features;
+mod ffmpeg_setup;
 mod fla;
 mod fla_zip;
 mod i18n;

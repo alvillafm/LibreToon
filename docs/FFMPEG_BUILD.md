@@ -1,3 +1,7 @@
+# Historical owned FFmpeg build (not bundled)
+
+Current installers/portable packages exclude FFmpeg. Export offers an optional direct upstream download or manual selection. The build and source-review procedure below is retained for historical binary/source evidence and is not invoked by current Actions. See [current lightweight packaging](BUILD_PACKAGES.md).
+
 # Build and distribute LibreToon's FFmpeg
 
 Implemented 2 November 2026. The former Gyan build is no longer the bundled executable. FFmpeg remains an external process and LibreToon's own code remains MIT.

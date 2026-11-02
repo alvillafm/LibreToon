@@ -795,3 +795,48 @@ fn scene_hand_drag_reorders_over_other_handles_and_undo_preserves_active_scene()
         vec!["Alpha", "Beta", "Gamma"]
     );
 }
+
+#[test]
+fn ffmpeg_prompt_needs_consent_and_can_be_postponed_without_network() {
+    let mut e = editor();
+    let ctx = egui::Context::default();
+    e.studio.ffmpeg_setup.prompt = true;
+    let mut render = |events| {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.export_ui(ui.ctx()),
+        );
+        out.textures_delta.clear();
+        out
+    };
+    render(vec![]);
+    let out = render(vec![]);
+    assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.job.text==crate::i18n::tr("This exporter needs FFmpeg to work. Download and configure it automatically?"))));
+    let button = out
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.job.text == crate::i18n::tr("Not now") => {
+                Some(t.pos + t.galley.size() / 2.)
+            }
+            _ => None,
+        })
+        .unwrap();
+    render(vec![
+        egui::Event::PointerMoved(button),
+        event(button, true, egui::PointerButton::Primary, false),
+    ]);
+    render(vec![event(
+        button,
+        false,
+        egui::PointerButton::Primary,
+        false,
+    )]);
+    drop(render);
+    assert!(!e.studio.ffmpeg_setup.prompt);
+    assert!(e.studio.ffmpeg_setup.job.is_none());
+}

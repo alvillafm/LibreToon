@@ -1,5 +1,5 @@
-# Package only an already-built and already-reviewed candidate. Never build or promote it here.
-param([string]$CandidateDirectory = "work/ffmpeg-owned-final/output")
+# Package LibreToon only. FFmpeg is an optional user download, never redistributed here.
+param([switch]$StageOnly)
 $ErrorActionPreference = "Stop"
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 Push-Location $repo
@@ -8,29 +8,28 @@ try {
     if (Test-Path -LiteralPath $payload) { throw "Preserving existing staging directory: $payload" }
     New-Item -ItemType Directory -Force $payload, (Join-Path $repo "dist") | Out-Null
     Copy-Item -LiteralPath "target/release/libretoon.exe" -Destination $payload
-    Copy-Item -LiteralPath "assets" -Destination "$payload/assets" -Recurse
+    New-Item -ItemType Directory -Force "$payload/assets" | Out-Null
+    foreach ($resource in Get-ChildItem -LiteralPath "assets") {
+        if ($resource.Name -ne "tools") {Copy-Item -LiteralPath $resource.FullName -Destination "$payload/assets/" -Recurse}
+    }
     $font = [IO.Path]::GetFullPath("$payload/assets/fonts/NotoSansCJK-Regular.ttc")
     if (-not $font.StartsWith($payload + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {throw "Unsafe staging path"}
     if (Test-Path -LiteralPath $font) {Remove-Item -LiteralPath $font}
     Copy-Item -LiteralPath "LICENSE" -Destination $payload
-    Copy-Item -LiteralPath "$CandidateDirectory/ffmpeg.exe" -Destination "$payload/assets/tools/ffmpeg.exe" -Force
-    Copy-Item -LiteralPath "$CandidateDirectory/THIRD-PARTY-NOTICES.txt" -Destination "$payload/assets/tools/THIRD_PARTY.md" -Force
-    Copy-Item -Path "$CandidateDirectory/licenses/*" -Destination "$payload/assets/tools/licenses/" -Force
-    Copy-Item -LiteralPath "$CandidateDirectory/SOURCE_STATUS.json" -Destination "$payload/assets/tools/" -Force
-    Copy-Item -LiteralPath "$CandidateDirectory/REVIEW.json" -Destination "$payload/assets/tools/BUILD_EVIDENCE.json" -Force
-    & "$repo/scripts/check-ffmpeg-distribution.ps1" -Destination $payload -ManifestPath "$CandidateDirectory/SOURCE_STATUS.json" -BinaryPath "$CandidateDirectory/ffmpeg.exe"
-    if ((Get-FileHash "$payload/assets/tools/ffmpeg.exe").Hash -ne (Get-FileHash "$CandidateDirectory/ffmpeg.exe").Hash) {throw "Staged FFmpeg differs from reviewed binary"}
+    $forbidden = Get-ChildItem -LiteralPath $payload -File -Recurse | Where-Object { $_.Name -in @("ffmpeg.exe","ffprobe.exe","ffmpeg","ffprobe","ffmpeg-complete-source.zip") }
+    if ($forbidden) {throw "An external FFmpeg executable/source bundle entered the lightweight payload"}
     $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
     if ($version -notmatch '^\d+\.\d+\.\d+([-.][A-Za-z0-9.-]+)?$') {throw "Unsafe package version"}
     @"
 LibreToon $version for Windows x64
 Extract the whole portable ZIP, then open libretoon.exe.
-FFmpeg and resources are included; no manual FFmpeg installation is needed.
+Resources are included. FFmpeg is optional and is downloaded/configured on first video/GIF export, with consent.
 Own code: LICENSE (MIT). Third-party notices: assets/THIRD_PARTY_NOTICES.md.
-Complete FFmpeg sources: corresponding-source/ffmpeg-complete-source.zip.
+No FFmpeg executable or FFmpeg source bundle is shipped in this package.
 Build commit: $env:GITHUB_SHA
 "@ | Set-Content -LiteralPath "$payload/README.txt" -Encoding utf8
     Compress-Archive -LiteralPath $payload -DestinationPath "dist/LibreToon-$version-Windows-x64-Portable.zip"
+    if ($StageOnly) {Write-Output "Portable ZIP staged and checked; installer compilation skipped"; return}
     $programFiles = [Environment]::GetFolderPath("ProgramFilesX86")
     $iscc = @("$programFiles/Inno Setup 6/ISCC.exe", "$programFiles/Inno Setup 7/ISCC.exe") |
         Where-Object {Test-Path -LiteralPath $_} | Select-Object -First 1

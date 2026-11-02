@@ -152,7 +152,17 @@ impl<'a> Archive<'a> {
     pub fn directory_size_recovered(&self) -> bool {
         self.directory_size_recovered
     }
+    pub fn names(&self) -> impl Iterator<Item = &[u8]> {
+        self.entries.keys().map(Vec::as_slice)
+    }
     pub fn entry(&self, wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.entry_limited(wanted, LIMIT)
+    }
+    pub(crate) fn entry_limited(
+        &self,
+        wanted: &[u8],
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
         let Some(&p) = self.entries.get(wanted) else {
             return Ok(None);
         };
@@ -164,7 +174,7 @@ impl<'a> Archive<'a> {
         let compressed = u32_at(bytes, p + 20)? as usize;
         let uncompressed = u32_at(bytes, p + 24)? as usize;
         let local = u32_at(bytes, p + 42)? as usize;
-        if flags & 1 != 0 || uncompressed > LIMIT || compressed > LIMIT {
+        if flags & 1 != 0 || uncompressed > limit || compressed > limit {
             return Err("FLA cifrado o demasiado grande".into());
         }
         if u32_at(bytes, local)? != 0x04034b50 {
@@ -187,7 +197,7 @@ impl<'a> Archive<'a> {
             8 => {
                 let mut out = vec![];
                 flate2::read::DeflateDecoder::new(data)
-                    .take((LIMIT + 1) as u64)
+                    .take((limit + 1) as u64)
                     .read_to_end(&mut out)
                     .map_err(|e| e.to_string())?;
                 out

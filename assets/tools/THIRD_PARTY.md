@@ -1,3 +1,7 @@
+# Historical FFmpeg distribution evidence
+
+FFmpeg is no longer bundled in LibreToon installers or portable packages. This directory preserves notices and evidence for the earlier owned build, and is excluded from current packaging. The application offers an optional direct upstream download or manual FFmpeg selection; see docs/BUILD_PACKAGES.md.
+
 # Bundled FFmpeg — owned, source-locked build
 
 Updated 2 November 2026. Current executable: **FFmpeg 7.1.5-LibreToon-1**, Windows x64, GPL version 3 or later. LibreToon's own code remains MIT; it invokes FFmpeg as a separate process through pipes and does not link its libraries.

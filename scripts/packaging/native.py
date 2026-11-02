@@ -2,7 +2,6 @@
 """Package already-built Linux/macOS payloads; no application compilation here."""
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,9 +16,39 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("ffmpeg_native", ROOT / "scripts/ffmpeg/native.py")
-ffmpeg = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ffmpeg)
+def digest(path):
+    with Path(path).open("rb") as f:
+        return hashlib.file_digest(f,"sha256").hexdigest()
+
+
+def write(path,value):
+    Path(path).write_text(json.dumps(value,indent=2)+"\n")
+
+
+def download(url,path,sha):
+    path=Path(path)
+    if not path.exists():
+        with urllib.request.urlopen(url,timeout=120) as response,path.open("wb") as target:
+            shutil.copyfileobj(response,target)
+    if digest(path)!=sha:
+        raise RuntimeError("Packaging tool checksum mismatch: "+str(path))
+
+
+def check_system_imports(binary):
+    if sys.platform=="darwin":
+        lines=subprocess.check_output(["otool","-L",str(binary)],text=True).splitlines()[1:]
+        imports=[line.strip().split(" (",1)[0] for line in lines]
+        if any(not p.startswith(("/usr/lib/","/System/Library/")) for p in imports):
+            raise RuntimeError("Non-system library in Mac app: "+repr(imports))
+    else:
+        text=subprocess.check_output(["ldd",str(binary)],text=True)
+        if "not found" in text:
+            raise RuntimeError(text)
+        imports=re.findall(r"^\s*(\S+)\s+=>",text,re.M)
+        if any(not re.fullmatch(r"(libc|libm|libdl|libpthread|librt|libgcc_s)\.so[.0-9]*",p) for p in imports):
+            raise RuntimeError("Unpackaged non-system library: "+repr(imports))
+
+
 VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9.-]+)?", VERSION):
     raise RuntimeError("Unsafe package version")
@@ -29,26 +58,28 @@ def run(args, **kwargs):
     subprocess.run(list(map(str, args)), check=True, **kwargs)
 
 
-def common(payload, candidate):
+def common(payload):
     payload.mkdir(parents=True)
     shutil.copy2(ROOT / "target/release/libretoon", payload / "libretoon")
     shutil.copytree(ROOT / "assets", payload / "assets",
                     ignore=lambda path, names: {"tools", "NotoSansCJK-Regular.ttc"} & set(names))
     shutil.copy2(ROOT / "LICENSE", payload / "LICENSE")
-    ffmpeg.stage(candidate, payload)
-    ffmpeg.imports(payload / "libretoon")  # Reject accidental Homebrew/non-system libraries.
+    check_system_imports(payload / "libretoon")
+    forbidden={"ffmpeg.exe","ffprobe.exe","ffmpeg","ffprobe","ffmpeg-complete-source.zip"}
+    if any(p.is_file() and p.name in forbidden for p in payload.rglob("*")):
+        raise RuntimeError("FFmpeg entered the lightweight payload")
     (payload / "BUILD-INFO.txt").write_text(
         "LibreToon " + VERSION + "\nCommit: " + os.environ.get("GITHUB_SHA", "local") +
-        "\nMIT application; external FFmpeg GPLv3-or-later. Sources/notices included.\n")
+        "\nMIT application. FFmpeg is not bundled; video/GIF export offers a separate optional download.\n")
 
 
-def mac(candidate, dest):
+def mac(dest):
     work = ROOT / "work/packages/macos"
     work.mkdir(parents=True, exist_ok=False)
     app = work / "LibreToon.app"
     contents = app / "Contents"
     payload = contents / "MacOS"
-    common(payload, candidate)
+    common(payload)
     resources = contents / "Resources"
     resources.mkdir()
     iconset = work / "LibreToon.iconset"
@@ -71,8 +102,6 @@ def mac(candidate, dest):
     # Ad-hoc only. This is not Developer ID signing or Apple notarization.
     run(["codesign", "--force", "--sign", "-", "--identifier", "org.libretoon.app", app])
     run(["codesign", "--verify", "--strict", app])
-    if ffmpeg.digest(payload / "assets/tools/ffmpeg") != ffmpeg.digest(candidate / "output/ffmpeg"):
-        raise RuntimeError("Bundle signing changed the reviewed FFmpeg")
     arch = "arm64" if os.uname().machine == "arm64" else "x64"
     stem = "LibreToon-" + VERSION + "-macOS-" + arch
     run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, dest / (stem + "-Portable.zip")])
@@ -80,8 +109,7 @@ def mac(candidate, dest):
     dmg.mkdir()
     shutil.copytree(app, dmg / app.name, symlinks=True)
     (dmg / "Applications").symlink_to("/Applications", target_is_directory=True)
-    (dmg / "FFmpeg Sources").symlink_to("LibreToon.app/Contents/MacOS/corresponding-source", target_is_directory=True)
-    (dmg / "README.txt").write_text("Drag LibreToon.app into Applications. FFmpeg and all resource notices are inside the app.\n"
+    (dmg / "README.txt").write_text("Drag LibreToon.app into Applications. Resources/notices are included. Video/GIF export offers an optional separate FFmpeg download.\n"
                                    "This Actions build is ad-hoc signed, not Apple-notarized.\n")
     run(["hdiutil", "create", "-volname", "LibreToon", "-srcfolder", dmg,
          "-fs", "HFS+", "-format", "UDZO", dest / (stem + ".dmg")])
@@ -100,7 +128,7 @@ def asset(release, name, destination):
     checksum = item.get("digest", "")
     if not checksum.startswith("sha256:"):
         raise RuntimeError("Official packaging tool has no published SHA-256: " + name)
-    ffmpeg.download(item["browser_download_url"], destination, checksum.split(":", 1)[1])
+    download(item["browser_download_url"], destination, checksum.split(":", 1)[1])
     destination.chmod(0o755)
     return item
 
@@ -120,7 +148,7 @@ def appimage_runtime(work, appdir):
     if revision[:7] not in version:
         raise RuntimeError("AppImage runtime binary/source revision cannot be matched")
     notices = appdir / "usr/lib/libretoon/corresponding-source/appimage-runtime"
-    notices.mkdir()
+    notices.mkdir(parents=True)
     archive = notices / ("type2-runtime-" + revision + ".tar.gz")
     url = "https://codeload.github.com/AppImage/type2-runtime/tar.gz/" + revision
     with urllib.request.urlopen(url, timeout=120) as r, archive.open("wb") as f:
@@ -131,15 +159,15 @@ def appimage_runtime(work, appdir):
     # Capture the upstream runtime help, which includes component license references.
     license_text = subprocess.check_output([str(runtime), "--appimage-help"], stderr=subprocess.STDOUT)
     (notices / "RUNTIME-LICENSES.txt").write_bytes(license_text)
-    ffmpeg.write(notices / "BUILD-IDENTITY.json", {
+    write(notices / "BUILD-IDENTITY.json", {
         "runtime": runtime_asset, "runtimeRevision": revision, "runtimeVersion": version,
-        "sourceUrl": url, "sourceSha256": ffmpeg.digest(archive),
+        "sourceUrl": url, "sourceSha256": digest(archive),
         "appimagetool": tool_asset, "appimagetoolVersion": "1.9.1",
     })
     return tool, runtime
 
 
-def linux(candidate, dest):
+def linux(dest):
     work = ROOT / "work/packages/linux"
     work.mkdir(parents=True, exist_ok=False)
     appdir = work / "LibreToon.AppDir"
@@ -167,9 +195,9 @@ def linux(candidate, dest):
     (control / "control").write_text(
         "Package: libretoon\nVersion: " + VERSION + "\nSection: graphics\nPriority: optional\n"
         "Architecture: amd64\nMaintainer: LibreToon project <noreply@github.com>\n"
-        "Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0\n"
+        "Depends: curl, coreutils, libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0\n"
         "Recommends: xdg-desktop-portal, xdg-desktop-portal-gtk\n"
-        "Description: LibreToon native 2D animation editor\n Includes external FFmpeg, corresponding sources and third-party notices.\n")
+        "Description: LibreToon native 2D animation editor\n Includes application resources; FFmpeg is downloaded separately on request.\n")
     bindir = deb / "usr/bin"
     bindir.mkdir(parents=True)
     (bindir / "libretoon").symlink_to("/opt/libretoon/libretoon")
@@ -182,7 +210,7 @@ def linux(candidate, dest):
     copyright = deb / "usr/share/doc/libretoon"
     copyright.mkdir(parents=True)
     shutil.copy2(ROOT / "LICENSE", copyright / "copyright")
-    (copyright / "THIRD-PARTY.txt").write_text("FFmpeg GPLv3-or-later and other notices/sources: /opt/libretoon/assets and /opt/libretoon/corresponding-source.\n")
+    (copyright / "THIRD-PARTY.txt").write_text("Application notices: /opt/libretoon/assets. FFmpeg is not included in this package.\n")
     run(["dpkg-deb", "--root-owner-group", "--build", deb, dest / (stem + ".deb")])
     # Wrap the AppImage to preserve its executable bit through Actions artifact download.
     with tarfile.open(dest / (stem + "-AppImage.tar.gz"), "w:gz") as t:
@@ -192,11 +220,10 @@ def linux(candidate, dest):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=["macos", "linux"])
-    parser.add_argument("--candidate", type=Path, default=ROOT / "work/ffmpeg-native")
     args = parser.parse_args()
     if args.platform == "macos" and sys.platform != "darwin" or args.platform == "linux" and sys.platform != "linux":
         parser.error("Package on the native runner")
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
-    (mac if args.platform == "macos" else linux)(args.candidate.resolve(), dist)
-    (dist / "SHA256SUMS.txt").write_text("".join(ffmpeg.digest(p) + "  " + p.name + "\n" for p in sorted(dist.iterdir()) if p.is_file() and p.name != "SHA256SUMS.txt"))
+    (mac if args.platform == "macos" else linux)(dist)
+    (dist / "SHA256SUMS.txt").write_text("".join(digest(p) + "  " + p.name + "\n" for p in sorted(dist.iterdir()) if p.is_file() and p.name != "SHA256SUMS.txt"))
