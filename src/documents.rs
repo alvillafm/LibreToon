@@ -336,7 +336,13 @@ impl Editor {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("Sin título {}", self.hub.tabs.len() + 1));
+            .unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    crate::i18n::tr("Sin título"),
+                    self.hub.tabs.len() + 1
+                )
+            });
         let mut session = Session::new(doc, path.clone(), recovery.clone());
         session.exchange(self);
         self.drawing.scroll_to_tab = true;
@@ -433,7 +439,7 @@ impl Editor {
                     home = crate::design::button(
                         ui,
                         crate::design::Icon::Home,
-                        "Inicio",
+                        "Home",
                         "Galería de proyectos",
                         self.hub.home,
                         true,
@@ -449,9 +455,9 @@ impl Editor {
                                     let active = self.hub.active == Some(i) && !self.hub.home;
                                     egui::Frame::new()
                                         .fill(if active {
-                                            Color32::from_rgb(47, 73, 104)
+                                            crate::themes::color(Color32::from_rgb(47, 73, 104))
                                         } else {
-                                            Color32::from_rgb(34, 36, 42)
+                                            crate::themes::color(Color32::from_rgb(34, 36, 42))
                                         })
                                         .corner_radius(5.)
                                         .inner_margin(egui::Margin::symmetric(4, 1))
@@ -548,7 +554,10 @@ impl Editor {
                 .unwrap_or_default();
             egui::Modal::new(egui::Id::unique("close-document-confirm")).show(ctx, |ui| {
                 ui.heading(crate::i18n::tr("Guardar los cambios"));
-                ui.label(format!("«{name}» tiene cambios sin guardar."));
+                ui.label(crate::i18n::message(
+                    "«{name}» tiene cambios sin guardar.",
+                    &[("name", name.to_string())],
+                ));
                 ui.horizontal(|ui| {
                     if ui.button(crate::i18n::tr("Cancelar")).clicked() {
                         self.hub.closing = None;
@@ -600,9 +609,9 @@ impl Editor {
             });
             self.hub.previews.push(Preview { path, frames });
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(24,26,32)).inner_margin(28.)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::themes::color(Color32::from_rgb(24,26,32))).inner_margin(28.)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| { ui.heading(egui::RichText::new(crate::i18n::tr("Tu próximo movimiento")).size(30.)); ui.label(egui::RichText::new(crate::i18n::tr("LIBRETOON  /  ESTUDIO DE ANIMACIÓN")).small().color(crate::design::MUTED)); });
+                ui.vertical(|ui| { ui.heading(egui::RichText::new(crate::i18n::tr("Tu próximo movimiento")).size(30.)); ui.label(egui::RichText::new(crate::i18n::tr("LIBRETOON  /  ESTUDIO DE ANIMACIÓN")).small().color(crate::themes::muted())); });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.add_document(crate::fresh_document(), None); }
                     if crate::design::button(ui, crate::design::Icon::Open, "Abrir", "Abrir proyecto", false, true).clicked() { self.open(); }
@@ -635,7 +644,7 @@ impl Editor {
                     for row in rows {ui.horizontal(|ui| {
                         for (i,name,doc,recovery) in unsaved.iter().skip(row*columns).take(columns) {
                             let (r,response)=ui.allocate_exact_size(Vec2::new(width,202.),egui::Sense::click());
-                            ui.painter().rect_filled(r,10.,if response.hovered(){Color32::from_rgb(48,55,70)}else{Color32::from_rgb(34,37,46)});
+                            ui.painter().rect_filled(r,10.,if response.hovered(){crate::themes::color(Color32::from_rgb(48,55,70))}else{crate::themes::color(Color32::from_rgb(34,37,46))});
                             let preview=Rect::from_min_max(r.min+Vec2::splat(8.),r.max-Vec2::new(8.,48.));
                             ui.painter().rect_filled(preview,5.,Color32::WHITE);
                             if let Some(doc)=doc {
@@ -668,7 +677,7 @@ impl Editor {
                     for path in paths.iter().skip(row * columns).take(columns) {
                         let (r, response) = ui.allocate_exact_size(Vec2::new(width, 202.), egui::Sense::click());
                         let preview = Rect::from_min_max(r.min + Vec2::splat(8.), r.max - Vec2::new(8., 48.));
-                        ui.painter().rect_filled(r, 10., if response.hovered() { Color32::from_rgb(48,55,70) } else { Color32::from_rgb(34,37,46) });
+                        ui.painter().rect_filled(r, 10., if response.hovered() { crate::themes::color(Color32::from_rgb(48,55,70)) } else { crate::themes::color(Color32::from_rgb(34,37,46)) });
                         ui.painter().rect_filled(preview, 5., Color32::WHITE);
                         if let Some(item) = self.hub.previews.iter_mut().find(|p| &p.path == path) {
                             match &item.frames {
@@ -702,13 +711,15 @@ fn caption(ui: &egui::Ui, rect: Rect, title: &str, width: f32) {
     let mut job = egui::text::LayoutJob::simple(
         title.into(),
         egui::FontId::proportional(14.),
-        Color32::from_rgb(231, 235, 245),
+        crate::themes::color(Color32::from_rgb(231, 235, 245)),
         width - 26.,
     );
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let text = ui.painter().layout_job(job);
-    ui.painter()
-        .with_clip_rect(rect)
-        .galley(rect.min + Vec2::new(13., 161.), text, Color32::WHITE);
+    ui.painter().with_clip_rect(rect).galley(
+        rect.min + Vec2::new(13., 161.),
+        text,
+        crate::themes::color(Color32::WHITE),
+    );
 }

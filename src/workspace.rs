@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::Document;
 use crate::Editor;
-use crate::design::{ACCENT, Icon, MUTED, button, draw};
+use crate::design::{Icon, button, draw};
 #[cfg(test)]
 use eframe::egui::Pos2;
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
@@ -46,7 +46,9 @@ impl Editor {
                             ui.close();
                         }
                         if !self.doc.extras.import_warnings.is_empty()
-                            && ui.button("Informe de importación FLA…").clicked()
+                            && ui
+                                .button(crate::i18n::tr("Informe de importación FLA…"))
+                                .clicked()
                         {
                             self.import_report_open = true;
                             ui.close();
@@ -282,7 +284,7 @@ impl Editor {
                         ui.label(
                             egui::RichText::new(crate::i18n::tr(label))
                                 .size(8.)
-                                .color(MUTED),
+                                .color(crate::themes::muted()),
                         );
                         ui.separator();
                         for (left, right) in rows {
@@ -301,7 +303,7 @@ impl Editor {
                     ui.label(
                         egui::RichText::new(crate::i18n::tr("COLOR"))
                             .size(8.)
-                            .color(MUTED),
+                            .color(crate::themes::muted()),
                     );
                     ui.separator();
                     self.color_swatches(ui);
@@ -353,7 +355,7 @@ impl Editor {
                         ui.painter(),
                         Rect::from_min_size(ui.cursor().min, Vec2::splat(20.)),
                         Icon::Film,
-                        ACCENT,
+                        crate::themes::accent(),
                     );
                     ui.add_space(26.);
                     ui.label(
@@ -402,10 +404,14 @@ impl Editor {
                         }
                         let mut degrees = self.canvas.angle.to_degrees();
                         if ui
-                            .add(egui::DragValue::new(&mut degrees).speed(1.).suffix("°"))
-                            .on_hover_text(
-                                "Ángulo de la vista. Doble clic para escribir 0 y restablecer.",
+                            .add(
+                                egui::DragValue::new(&mut degrees)
+                                    .speed(1.)
+                                    .suffix(crate::i18n::tr("°")),
                             )
+                            .on_hover_text(crate::i18n::tr(
+                                "Ángulo de la vista. Doble clic para escribir 0 y restablecer.",
+                            ))
                             .changed()
                         {
                             self.canvas.angle = degrees.rem_euclid(360.).to_radians();
@@ -413,7 +419,7 @@ impl Editor {
                         ui.label(
                             egui::RichText::new(format!("{:.0}%", self.canvas.actual_scale * 100.))
                                 .size(11.)
-                                .color(MUTED),
+                                .color(crate::themes::muted()),
                         );
                     });
                 });
@@ -440,7 +446,8 @@ impl Editor {
                                 self.doc.extras.symbols.iter().find(|s| s.id == *id)
                             {
                                 ui.label(
-                                    egui::RichText::new(format!("/ {}", symbol.name)).color(ACCENT),
+                                    egui::RichText::new(format!("/ {}", symbol.name))
+                                        .color(crate::themes::accent()),
                                 );
                             }
                         }
@@ -452,7 +459,7 @@ impl Editor {
                         ui.label(
                             egui::RichText::new(crate::i18n::tr(" /  Escenario"))
                                 .size(11.)
-                                .color(MUTED),
+                                .color(crate::themes::muted()),
                         );
                     }
                 });

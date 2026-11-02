@@ -618,7 +618,7 @@ impl Editor {
             if let Some(Gesture::Create { start, end, .. }) = &self.rigging.drag {
                 p.line_segment(
                     [view.screen(*start), view.screen(*end)],
-                    Stroke::new(2., design::ACCENT),
+                    Stroke::new(2., crate::themes::accent()),
                 );
             }
             if self.rigging.paint {
@@ -656,7 +656,7 @@ impl Editor {
                     {
                         Color32::from_rgb(255, 199, 70)
                     } else {
-                        design::ACCENT
+                        crate::themes::accent()
                     };
                     p.circle(q, 7., Color32::from_gray(25), Stroke::new(2., c));
                     p.line_segment([q - Vec2::X * 4., q + Vec2::X * 4.], Stroke::new(1., c));
@@ -902,7 +902,7 @@ impl Editor {
             ui.add(egui::Slider::new(&mut self.rigging.strength, 0.01..=1.).text(tr("Intensidad")));
             ui.small(tr("Clic añade · Ctrl quita · Mayús suaviza"));
             ui.horizontal(|ui| {
-                ui.label("0");
+                ui.label(crate::i18n::tr("0"));
                 let (r, _) = ui.allocate_exact_size(Vec2::new(140., 12.), egui::Sense::hover());
                 let mut mesh = egui::Mesh::default();
                 for (pos, color) in [
@@ -916,7 +916,7 @@ impl Editor {
                 mesh.add_triangle(0, 1, 2);
                 mesh.add_triangle(0, 2, 3);
                 ui.painter().add(mesh);
-                ui.label("1");
+                ui.label(crate::i18n::tr("1"));
             });
         }
         if design::button(
@@ -942,7 +942,7 @@ impl Editor {
             .add(
                 egui::DragValue::new(&mut angle)
                     .prefix(tr("Rotación: "))
-                    .suffix("°"),
+                    .suffix(crate::i18n::tr("°")),
             )
             .changed();
         value.angle = angle.to_radians();

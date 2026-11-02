@@ -411,7 +411,7 @@ impl Editor {
                                             i == instance.first,
                                             format!("{}", i + 1),
                                         )
-                                        .on_hover_text("Select frame preview");
+                                        .on_hover_text(crate::i18n::tr("Select frame preview"));
                                     });
                                 }
                             });
@@ -535,7 +535,7 @@ impl Editor {
                 .add(
                     egui::DragValue::new(&mut alpha)
                         .range(0. ..=100.)
-                        .suffix("% opacity"),
+                        .suffix(crate::i18n::tr("% opacity")),
                 )
                 .changed()
             {
@@ -547,7 +547,7 @@ impl Editor {
                 &mut self.feature.gradient.stops[self.animation.stop].t,
                 0. ..=1.,
             )
-            .text("Position"),
+            .text(crate::i18n::tr("Position")),
         );
         ui.horizontal(|ui| {
             if button(
@@ -598,8 +598,8 @@ impl Editor {
                 .arrow(center, direction, Stroke::new(2., ACCENT));
             ui.add(
                 egui::DragValue::new(&mut angle)
-                    .suffix("°")
-                    .prefix("Rotation "),
+                    .suffix(crate::i18n::tr("°"))
+                    .prefix(crate::i18n::tr("Rotation ")),
             );
         });
         g.end = crate::vector::xy(

@@ -77,10 +77,23 @@ impl Binding {
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    #[serde(skip_serializing)]
     pub spanish: bool,
+    #[serde(deserialize_with = "crate::i18n::deserialize_language")]
+    pub language: Option<crate::i18n::Language>,
+    pub theme: crate::themes::Theme,
     pub bindings: Vec<Binding>,
     pub dpi: f32,
     pub ffmpeg: String,
+}
+impl Preferences {
+    pub fn locale(&self) -> crate::i18n::Language {
+        self.language.unwrap_or(if self.spanish {
+            crate::i18n::Language::Spanish
+        } else {
+            crate::i18n::Language::English
+        })
+    }
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -90,6 +103,8 @@ impl Default for Preferences {
         ];
         Self {
             spanish: false,
+            language: None,
+            theme: Default::default(),
             bindings: defaults.into_iter().map(Binding::new).collect(),
             dpi: 96.,
             ffmpeg: String::new(),
@@ -137,6 +152,9 @@ impl Studio {
             .ok()
             .and_then(|s| serde_json::from_slice(&s).ok())
             .unwrap_or_default();
+        if prefs.language.is_none() {
+            prefs.language = Some(prefs.locale());
+        }
         if prefs.bindings.len() != TOOLS.len() {
             let mut bindings = Preferences::default().bindings;
             for (i, b) in prefs.bindings.into_iter().enumerate().take(TOOLS.len()) {
@@ -224,7 +242,7 @@ impl Editor {
             let tip = response.rect.right_bottom() - Vec2::splat(4.);
             ui.painter().add(egui::Shape::convex_polygon(
                 vec![tip, tip - Vec2::new(5., 0.), tip - Vec2::new(0., 5.)],
-                crate::design::MUTED,
+                crate::themes::muted(),
                 Stroke::NONE,
             ));
             if response.clicked()
@@ -245,7 +263,7 @@ impl Editor {
                     ui.label(
                         egui::RichText::new(tr("Pinceles"))
                             .small()
-                            .color(crate::design::MUTED),
+                            .color(crate::themes::muted()),
                     );
                     ui.separator();
                     for t in [
@@ -265,9 +283,9 @@ impl Editor {
                                 r,
                                 3.,
                                 if self.tool == t {
-                                    Color32::from_rgb(47, 73, 104)
+                                    crate::themes::color(Color32::from_rgb(47, 73, 104))
                                 } else {
-                                    Color32::from_gray(58)
+                                    crate::themes::color(Color32::from_gray(58))
                                 },
                             );
                         }
@@ -278,14 +296,14 @@ impl Editor {
                                 Vec2::splat(20.),
                             ),
                             t.icon(),
-                            crate::design::MUTED,
+                            crate::themes::muted(),
                         );
                         ui.painter().text(
                             Pos2::new(r.left() + 38., r.center().y),
                             egui::Align2::LEFT_CENTER,
                             tr(t.name()),
                             egui::FontId::proportional(12.),
-                            Color32::from_gray(220),
+                            crate::themes::color(Color32::from_gray(220)),
                         );
                         if row.clicked() {
                             self.studio.brush = t;
@@ -327,13 +345,18 @@ impl Editor {
                     r,
                     2.,
                     if matches!(icon, crate::design::Icon::Close) {
-                        Color32::from_rgb(185, 55, 65)
+                        crate::themes::color(Color32::from_rgb(185, 55, 65))
                     } else {
-                        Color32::from_gray(65)
+                        crate::themes::color(Color32::from_gray(65))
                     },
                 );
             }
-            crate::design::draw(ui.painter(), r, icon, Color32::from_gray(210));
+            crate::design::draw(
+                ui.painter(),
+                r,
+                icon,
+                crate::themes::color(Color32::from_gray(210)),
+            );
             if response.on_hover_text(tr(tip)).clicked() {
                 if matches!(command, egui::ViewportCommand::Close) {
                     self.finish_pending_pen();
@@ -682,7 +705,7 @@ impl Editor {
                     .add(
                         egui::DragValue::new(&mut self.studio.prefs.dpi)
                             .range(1. ..=2400.)
-                            .suffix(" ppi"),
+                            .suffix(crate::i18n::tr(" ppi")),
                     )
                     .changed()
                 {
@@ -798,7 +821,7 @@ impl Editor {
             } else {
                 Rect::from_min_max(area.min, Pos2::new(area.right(), area.top() + 22.))
             };
-            p.rect_filled(rect, 0., crate::design::PANEL);
+            p.rect_filled(rect, 0., crate::themes::panel());
             let start = if vertical {
                 Pos2::new(rect.right(), rect.top())
             } else {
@@ -847,7 +870,7 @@ impl Editor {
                 };
                 p.line_segment(
                     [point, point + delta],
-                    Stroke::new(1., crate::design::MUTED),
+                    Stroke::new(1., crate::themes::muted()),
                 );
                 if major {
                     let label = if step >= 1. {
@@ -861,14 +884,14 @@ impl Editor {
                     let galley = ruler.layout_no_wrap(
                         label,
                         egui::FontId::monospace(8.),
-                        crate::design::MUTED,
+                        crate::themes::muted(),
                     );
                     if vertical {
                         ruler.add(
                             egui::epaint::TextShape::new(
                                 Pos2::new(rect.left() + 2., point.y - 3.),
                                 galley,
-                                crate::design::MUTED,
+                                crate::themes::muted(),
                             )
                             .with_angle(-std::f32::consts::FRAC_PI_2),
                         );
@@ -876,7 +899,7 @@ impl Editor {
                         ruler.galley(
                             Pos2::new(point.x + 3., rect.top() + 2.),
                             galley,
-                            crate::design::MUTED,
+                            crate::themes::muted(),
                         );
                     }
                 }
@@ -885,7 +908,7 @@ impl Editor {
         p.rect_filled(
             Rect::from_min_size(area.min, Vec2::splat(22.)),
             0.,
-            crate::design::PANEL,
+            crate::themes::panel(),
         );
     }
     pub fn paint_guides(&self, p: &egui::Painter, area: Rect, view: View) {
@@ -903,7 +926,7 @@ impl Editor {
             };
             p.line_segment(
                 [view.screen(point - d), view.screen(point + d)],
-                Stroke::new(1., Color32::from_rgb(60, 205, 230)),
+                Stroke::new(1., crate::themes::color(Color32::from_rgb(60, 205, 230))),
             );
         }
         if self.studio.horizontal || self.studio.vertical {
@@ -961,7 +984,7 @@ impl Editor {
             }
             p.add(egui::Shape::convex_polygon(
                 mask,
-                Color32::from_rgb(29, 30, 34),
+                crate::themes::color(Color32::from_rgb(29, 30, 34)),
                 Stroke::NONE,
             ));
         }
@@ -973,10 +996,10 @@ impl Editor {
         let mut open = true;
         let mut save = false;
         egui::Window::new(tr("Preferencias del programa…"))
-            .id(egui::Id::unique("preferences")).open(&mut open).default_size([700.,500.])
+            .id(egui::Id::unique("preferences")).open(&mut open).default_size([730.,620.])
             .anchor(egui::Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui| {
                 ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(Vec2::new(160.,460.),egui::Layout::top_down(egui::Align::Min),|ui|{
+                    ui.allocate_ui_with_layout(Vec2::new(155.,560.),egui::Layout::top_down(egui::Align::Min),|ui|{
                         ui.add_space(8.);
                         for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node)] {
                             if crate::design::button(ui,icon,label,label,self.studio.preference_category==index,true).clicked(){self.studio.preference_category=index;self.studio.capture=None;}
@@ -988,8 +1011,9 @@ impl Editor {
                         if self.studio.preference_category==0 {
                             ui.heading(tr("Interfaz"));ui.add_space(16.);
                             egui::Grid::new("interface-options").spacing([24.,16.]).show(ui,|ui|{
-                                ui.label(tr("Tema"));egui::ComboBox::from_id_salt("theme").selected_text(tr("Negro")).show_ui(ui,|ui|{let _=ui.selectable_label(true,tr("Negro"));});ui.end_row();
-                                ui.label(tr("Idioma"));egui::ComboBox::from_id_salt("language").selected_text(if self.studio.prefs.spanish{"Español"}else{"English"}).show_ui(ui,|ui|{save|=ui.selectable_value(&mut self.studio.prefs.spanish,false,"English").changed();save|=ui.selectable_value(&mut self.studio.prefs.spanish,true,"Español").changed();});ui.end_row();
+                                ui.label(tr("Tema"));save|=crate::themes::selector(ui,&mut self.studio.prefs.theme);ui.end_row();
+                                ui.label(tr("Idioma"));let mut locale=self.studio.prefs.locale();egui::ComboBox::from_id_salt("language").selected_text(locale.name()).show_ui(ui,|ui|{for language in crate::i18n::Language::ALL{if ui.selectable_value(&mut locale,language,language.name()).changed(){self.studio.prefs.language=Some(locale);save=true;}}});ui.end_row();
+
                             });
                         } else {
                             ui.heading(tr("Atajos de teclado"));ui.add_space(8.);
@@ -997,7 +1021,7 @@ impl Editor {
                             egui::ScrollArea::vertical().max_height(340.).show(ui,|ui|{
                                 egui::Grid::new("shortcut-options").spacing([24.,7.]).striped(true).show(ui,|ui|{
                                     for (index,tool) in TOOLS.iter().enumerate(){
-                                        ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,tool.icon(),crate::design::MUTED);ui.label(tr(tool.name()));});
+                                        ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,tool.icon(),crate::themes::muted());ui.label(tr(tool.name()));});
                                         let binding=&self.studio.prefs.bindings[index];
                                         let label=if self.studio.capture==Some(index){"…".into()}else{let s=binding.label();if s.is_empty(){"—".into()}else{s}};
                                         if ui.add_sized([110.,24.],egui::Button::new(label)).clicked(){self.studio.capture=Some(index);}ui.end_row();
@@ -1060,7 +1084,9 @@ impl Editor {
             if let Err(e) = self.studio.save() {
                 self.status = e;
             }
-            crate::i18n::set_language(self.studio.prefs.spanish);
+            crate::i18n::set_locale(self.studio.prefs.locale());
+            crate::themes::ensure(ctx, self.studio.prefs.theme);
+            crate::i18n::ensure_fonts(ctx, self.studio.prefs.locale());
         }
         self.studio.preferences_open = open;
     }

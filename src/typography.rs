@@ -401,7 +401,7 @@ impl Editor {
                 ui.add(
                     egui::DragValue::new(&mut spec.size)
                         .range(1. ..=2048.)
-                        .suffix(" px"),
+                        .suffix(crate::i18n::tr(" px")),
                 );
                 ui.end_row();
                 ui.label(crate::i18n::tr("Interlineado"));
@@ -409,21 +409,21 @@ impl Editor {
                     egui::DragValue::new(&mut spec.line_height)
                         .range(0.1..=10.)
                         .speed(0.05)
-                        .suffix(" ×"),
+                        .suffix(crate::i18n::tr(" ×")),
                 );
                 ui.end_row();
                 ui.label(crate::i18n::tr("Caracteres"));
                 ui.add(
                     egui::DragValue::new(&mut spec.letter_spacing)
                         .range(-100. ..=500.)
-                        .suffix(" px"),
+                        .suffix(crate::i18n::tr(" px")),
                 );
                 ui.end_row();
                 ui.label(crate::i18n::tr("Palabras"));
                 ui.add(
                     egui::DragValue::new(&mut spec.word_spacing)
                         .range(-100. ..=500.)
-                        .suffix(" px"),
+                        .suffix(crate::i18n::tr(" px")),
                 );
                 ui.end_row();
             });
@@ -435,7 +435,10 @@ impl Editor {
         crate::design::category(ui, "RELLENO");
         edit_color(ui, &mut spec.color);
         let mut gradient = spec.gradient.is_some();
-        if ui.checkbox(&mut gradient, "Degradado").changed() {
+        if ui
+            .checkbox(&mut gradient, crate::i18n::tr("Degradado"))
+            .changed()
+        {
             spec.gradient = if gradient {
                 Some(self.feature.gradient.clone())
             } else {
@@ -450,12 +453,12 @@ impl Editor {
         }
         let spec = &mut self.drawing.text.spec;
         crate::design::category(ui, "CONTORNO");
-        ui.checkbox(&mut spec.outline, "Outline");
+        ui.checkbox(&mut spec.outline, crate::i18n::tr("Outline"));
         if spec.outline {
             ui.add(
                 egui::Slider::new(&mut spec.outline_width, 0.1..=100.)
                     .text(crate::i18n::tr("Grosor"))
-                    .suffix(" px"),
+                    .suffix(crate::i18n::tr(" px")),
             );
             edit_color(ui, &mut spec.outline_color);
         }
@@ -476,9 +479,9 @@ impl Editor {
         {
             self.commit_text();
         }
-        ui.small(
+        ui.small(crate::i18n::tr(
             "Haz clic en el lienzo para colocar texto o sobre un texto existente para editarlo.",
-        );
+        ));
     }
 }
 fn edit_color(ui: &mut egui::Ui, rgba: &mut [u8; 4]) {

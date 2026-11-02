@@ -1,8 +1,4 @@
-use crate::{
-    Editor,
-    design::{ACCENT, Icon},
-    document::Mark,
-};
+use crate::{Editor, design::Icon, document::Mark};
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -1554,7 +1550,7 @@ impl Editor {
             }
             if !preview.stroke {
                 preview.stroke = true;
-                preview.color = ACCENT.to_array();
+                preview.color = crate::themes::accent().to_array();
             }
             paint_mark(&painter, &preview, view, false, false, None);
             paint_nodes(&painter, &pen.mark, view, None);
@@ -1570,7 +1566,7 @@ impl Editor {
                     let line = crate::vector::from_cubics(
                         &[curve],
                         &Mark {
-                            color: ACCENT.to_array(),
+                            color: crate::themes::accent().to_array(),
                             width: 1. / view.scale,
                             ..Mark::default()
                         },
@@ -1593,7 +1589,7 @@ impl Editor {
                 .collect();
                 painter.add(egui::Shape::line(
                     std::mem::take(&mut points),
-                    Stroke::new(1., ACCENT),
+                    Stroke::new(1., crate::themes::accent()),
                 ));
                 if self.tool == Tool::Transform {
                     for p in bounds.handles() {
@@ -1605,25 +1601,25 @@ impl Editor {
                         painter.rect_stroke(
                             Rect::from_center_size(view.screen(p), Vec2::splat(7.)),
                             0.,
-                            Stroke::new(1., ACCENT),
+                            Stroke::new(1., crate::themes::accent()),
                             egui::StrokeKind::Inside,
                         );
                     }
                     let top = view.screen(bounds.center_top());
                     let rot = top + rotate(Vec2::new(0., -30.), view.angle + bounds.angle);
-                    painter.line_segment([top, rot], Stroke::new(1., ACCENT));
+                    painter.line_segment([top, rot], Stroke::new(1., crate::themes::accent()));
                     painter.circle_filled(rot, 5., Color32::from_rgb(32, 36, 43));
-                    painter.circle_stroke(rot, 5., Stroke::new(1.5, ACCENT));
+                    painter.circle_stroke(rot, 5., Stroke::new(1.5, crate::themes::accent()));
                     let pivot = view.screen(state.pivot.unwrap_or(bounds.center()));
                     painter.circle_filled(pivot, 5., Color32::from_gray(28));
-                    painter.circle_stroke(pivot, 5., Stroke::new(1.5, ACCENT));
+                    painter.circle_stroke(pivot, 5., Stroke::new(1.5, crate::themes::accent()));
                     painter.line_segment(
                         [pivot - Vec2::new(8., 0.), pivot + Vec2::new(8., 0.)],
-                        Stroke::new(1., ACCENT),
+                        Stroke::new(1., crate::themes::accent()),
                     );
                     painter.line_segment(
                         [pivot - Vec2::new(0., 8.), pivot + Vec2::new(0., 8.)],
-                        Stroke::new(1., ACCENT),
+                        Stroke::new(1., crate::themes::accent()),
                     );
                 }
             }
@@ -1642,7 +1638,7 @@ impl Editor {
             .collect();
             painter.add(egui::Shape::line(
                 std::mem::take(&mut pts),
-                Stroke::new(1., ACCENT),
+                Stroke::new(1., crate::themes::accent()),
             ));
         }
         state.actual_scale = view.scale;
@@ -1651,7 +1647,10 @@ impl Editor {
             if let Some(first) = points.first().copied() {
                 points.push(first);
             }
-            painter.add(egui::Shape::line(points, Stroke::new(1., ACCENT)));
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(1., crate::themes::accent()),
+            ));
         }
         if !state.polygon_selection.is_empty() {
             let mut points: Vec<_> = state
@@ -1665,7 +1664,10 @@ impl Editor {
             if let Some(first) = points.first().copied() {
                 points.push(first);
             }
-            painter.add(egui::Shape::line(points, Stroke::new(1., ACCENT)));
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(1., crate::themes::accent()),
+            ));
         }
         if over
             && !space
@@ -2343,9 +2345,9 @@ fn paint_nodes(p: &egui::Painter, mark: &Mark, view: View, active: Option<usize>
         for h in [node.in_handle, node.out_handle] {
             let handle = view.screen(crate::vector::pos(h));
             if handle.distance(anchor) > 0.5 {
-                p.line_segment([anchor, handle], Stroke::new(1., ACCENT));
+                p.line_segment([anchor, handle], Stroke::new(1., crate::themes::accent()));
                 p.circle_filled(handle, 3.4, Color32::from_rgb(34, 36, 44));
-                p.circle_stroke(handle, 3.4, Stroke::new(1., ACCENT));
+                p.circle_stroke(handle, 3.4, Stroke::new(1., crate::themes::accent()));
             }
         }
         let rect = Rect::from_center_size(
@@ -2356,12 +2358,17 @@ fn paint_nodes(p: &egui::Painter, mark: &Mark, view: View, active: Option<usize>
             rect,
             0.,
             if active == Some(index) {
-                ACCENT
+                crate::themes::accent()
             } else {
                 Color32::from_rgb(35, 38, 44)
             },
         );
-        p.rect_stroke(rect, 0., Stroke::new(1., ACCENT), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            rect,
+            0.,
+            Stroke::new(1., crate::themes::accent()),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
@@ -2673,10 +2680,10 @@ fn paint_width_handles(p: &egui::Painter, mark: &Mark, view: View) {
             let radius = mark.width * stop.width * 0.5;
             let left = view.screen(anchor - normal * radius);
             let right = view.screen(anchor + normal * radius);
-            p.line_segment([left, right], Stroke::new(1., ACCENT));
+            p.line_segment([left, right], Stroke::new(1., crate::themes::accent()));
             for handle in [left, right] {
                 p.circle_filled(handle, 3.5, Color32::from_rgb(32, 35, 40));
-                p.circle_stroke(handle, 3.5, Stroke::new(1., ACCENT));
+                p.circle_stroke(handle, 3.5, Stroke::new(1., crate::themes::accent()));
             }
             p.circle_filled(view.screen(anchor), 2., Color32::WHITE);
         }

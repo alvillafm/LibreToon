@@ -1,6 +1,6 @@
 use crate::{
     Editor,
-    design::{ACCENT, Icon, MUTED, button, draw},
+    design::{Icon, button, draw},
     document::Layer,
     features::{Folder, LayerOptions, id},
     i18n::tr,
@@ -203,7 +203,11 @@ impl Editor {
             .exact_size(295.)
             .resizable(true)
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(tr("TIMELINE")).size(10.).color(MUTED));
+                ui.label(
+                    egui::RichText::new(tr("TIMELINE"))
+                        .size(10.)
+                        .color(crate::themes::muted()),
+                );
                 ui.separator();
                 ui.horizontal(|ui| {
                     if button(
@@ -290,7 +294,7 @@ impl Editor {
                         .add(
                             egui::DragValue::new(&mut fps)
                                 .range(1..=240)
-                                .suffix(" fps")
+                                .suffix(crate::i18n::tr(" fps"))
                                 .update_while_editing(false),
                         )
                         .changed()
@@ -305,7 +309,7 @@ impl Editor {
                         egui::DragValue::new(&mut self.timeline_duration)
                             .range(1. / self.doc.fps as f32..=10000. / self.doc.fps as f32)
                             .speed(0.05)
-                            .suffix(" s")
+                            .suffix(crate::i18n::tr(" s"))
                             .update_while_editing(false),
                     );
                     let editing = response.dragged() || response.has_focus();
@@ -323,19 +327,23 @@ impl Editor {
                     ui.add(
                         egui::DragValue::new(&mut self.studio.onion_before)
                             .range(0..=24)
-                            .prefix("< "),
+                            .prefix(crate::i18n::tr("< ")),
                     );
                     ui.add(
                         egui::DragValue::new(&mut self.studio.onion_after)
                             .range(0..=24)
-                            .suffix(" >"),
+                            .suffix(crate::i18n::tr(" >")),
                     );
                 });
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(112.);
-                        ui.label(egui::RichText::new(tr("CAPAS")).small().color(MUTED));
+                        ui.label(
+                            egui::RichText::new(tr("CAPAS"))
+                                .small()
+                                .color(crate::themes::muted()),
+                        );
                         ui.separator();
                         ui.horizontal(|ui| {
                             if button(
@@ -387,11 +395,15 @@ impl Editor {
                     let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 58.), Sense::hover());
                     ui.painter().line_segment(
                         [divider.left_top(), divider.left_bottom()],
-                        Stroke::new(1., crate::design::LINE),
+                        Stroke::new(1., crate::themes::line()),
                     );
                     ui.vertical(|ui| {
                         ui.set_width(76.);
-                        ui.label(egui::RichText::new(tr("CARPETAS")).small().color(MUTED));
+                        ui.label(
+                            egui::RichText::new(tr("CARPETAS"))
+                                .small()
+                                .color(crate::themes::muted()),
+                        );
                         ui.separator();
                         ui.horizontal(|ui| {
                             if button(
@@ -433,11 +445,15 @@ impl Editor {
                     let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 58.), Sense::hover());
                     ui.painter().line_segment(
                         [divider.left_top(), divider.left_bottom()],
-                        Stroke::new(1., crate::design::LINE),
+                        Stroke::new(1., crate::themes::line()),
                     );
                     ui.vertical(|ui| {
                         ui.set_width(240.);
-                        ui.label(egui::RichText::new(tr("FOTOGRAMAS")).small().color(MUTED));
+                        ui.label(
+                            egui::RichText::new(tr("FOTOGRAMAS"))
+                                .small()
+                                .color(crate::themes::muted()),
+                        );
                         ui.separator();
                         ui.horizontal(|ui| {
                             if button(ui, Icon::Tween, "", "Motion tween", false, true).clicked() {
@@ -508,13 +524,17 @@ impl Editor {
                             clip.bottom(),
                         );
                         let header = Rect::from_min_size(r.min, Vec2::new(r.width(), 24.));
-                        painter.rect_filled(header, 0., Color32::from_gray(31));
+                        painter.rect_filled(
+                            header,
+                            0.,
+                            crate::themes::color(Color32::from_gray(31)),
+                        );
                         painter.text(
                             r.min + Vec2::new(60., 12.),
                             egui::Align2::LEFT_CENTER,
                             tr("Nombre de capa"),
                             egui::FontId::proportional(10.),
-                            MUTED,
+                            crate::themes::muted(),
                         );
                         if Rect::from_min_size(r.min, Vec2::new(label_w, 24.))
                             .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
@@ -544,7 +564,7 @@ impl Editor {
                                     egui::Align2::CENTER_CENTER,
                                     (f + 1).to_string(),
                                     egui::FontId::monospace(10.),
-                                    MUTED,
+                                    crate::themes::muted(),
                                 );
                             }
                         }
@@ -561,9 +581,9 @@ impl Editor {
                                         label,
                                         0.,
                                         if self.feature.selected_folder == Some(folder.id) {
-                                            Color32::from_rgb(50, 70, 85)
+                                            crate::themes::color(Color32::from_rgb(50, 70, 85))
                                         } else {
-                                            Color32::from_gray(39)
+                                            crate::themes::color(Color32::from_gray(39))
                                         },
                                     );
                                     draw(
@@ -573,7 +593,7 @@ impl Editor {
                                             Vec2::splat(20.),
                                         ),
                                         Icon::Folder,
-                                        MUTED,
+                                        crate::themes::muted(),
                                     );
                                     let response = ui.interact(
                                         label,
@@ -585,7 +605,7 @@ impl Editor {
                                         egui::Align2::LEFT_CENTER,
                                         &folder.name,
                                         egui::FontId::proportional(11.),
-                                        MUTED,
+                                        crate::themes::muted(),
                                     );
                                     if response.clicked() {
                                         self.feature.selected_folder = Some(folder.id);
@@ -618,11 +638,11 @@ impl Editor {
                                         label,
                                         0.,
                                         if self.doc.layers[l].options.mannequin.is_some() {
-                                            Color32::from_rgb(69, 48, 91)
+                                            crate::themes::color(Color32::from_rgb(69, 48, 91))
                                         } else if l == self.layer {
-                                            Color32::from_rgb(43, 65, 94)
+                                            crate::themes::color(Color32::from_rgb(43, 65, 94))
                                         } else {
-                                            Color32::from_gray(42)
+                                            crate::themes::color(Color32::from_gray(42))
                                         },
                                     );
                                     let eye = Rect::from_min_size(
@@ -637,7 +657,7 @@ impl Editor {
                                         } else {
                                             Icon::EyeOff
                                         },
-                                        MUTED,
+                                        crate::themes::muted(),
                                     );
                                     if ui
                                         .interact(
@@ -658,9 +678,9 @@ impl Editor {
                                         lock,
                                         Icon::Lock,
                                         if self.doc.layers[l].options.locked {
-                                            ACCENT
+                                            crate::themes::accent()
                                         } else {
-                                            Color32::from_gray(85)
+                                            crate::themes::color(Color32::from_gray(85))
                                         },
                                     );
                                     if ui
@@ -703,7 +723,14 @@ impl Editor {
                                             egui::Align2::LEFT_CENTER,
                                             &self.doc.layers[l].name,
                                             egui::FontId::proportional(11.),
-                                            Color32::from_gray(210),
+                                            if self.doc.layers[l].options.mannequin.is_some()
+                                                && crate::themes::current()
+                                                    != crate::themes::Theme::Studio
+                                            {
+                                                Color32::from_rgb(236, 224, 248)
+                                            } else {
+                                                crate::themes::color(Color32::from_gray(210))
+                                            },
                                         );
                                         let response = ui.interact(
                                             name_rect,
@@ -732,7 +759,7 @@ impl Editor {
                                             ),
                                             egui::DragValue::new(&mut opacity)
                                                 .range(0. ..=100.)
-                                                .suffix("%")
+                                                .suffix(crate::i18n::tr("%"))
                                                 .update_while_editing(false),
                                         )
                                         .changed()
@@ -756,24 +783,27 @@ impl Editor {
                                         let key = self.doc.layers[l].key(f);
                                         let color =
                                             if self.doc.layers[l].options.mannequin.is_some() {
-                                                Color32::from_rgb(71, 49, 94)
+                                                crate::themes::color(Color32::from_rgb(71, 49, 94))
                                             } else if crate::animation::span(&self.doc.layers[l], f)
                                                 .is_some()
                                                 && f != self.frame
                                             {
-                                                Color32::from_rgb(95, 61, 145)
+                                                crate::themes::color(Color32::from_rgb(95, 61, 145))
                                             } else if f == self.frame {
-                                                Color32::from_rgb(50, 88, 130)
+                                                crate::themes::color(Color32::from_rgb(50, 88, 130))
                                             } else if key {
-                                                Color32::from_gray(54)
+                                                crate::themes::color(Color32::from_gray(54))
                                             } else {
-                                                Color32::from_gray(45)
+                                                crate::themes::color(Color32::from_gray(45))
                                             };
                                         painter.rect_filled(rect, 0., color);
                                         painter.rect_stroke(
                                             rect,
                                             0.,
-                                            Stroke::new(0.5, Color32::from_gray(30)),
+                                            Stroke::new(
+                                                0.5,
+                                                crate::themes::color(Color32::from_gray(30)),
+                                            ),
                                             egui::StrokeKind::Inside,
                                         );
                                         if self.doc.layers[l].options.mannequin.is_some() {
@@ -790,19 +820,26 @@ impl Editor {
                                                 painter.circle_stroke(
                                                     rect.center(),
                                                     3.,
-                                                    Stroke::new(1., MUTED),
+                                                    Stroke::new(1., crate::themes::muted()),
                                                 );
                                             } else {
                                                 painter.circle_filled(
                                                     rect.center(),
                                                     3.5,
-                                                    if f == self.frame { ACCENT } else { MUTED },
+                                                    if f == self.frame {
+                                                        crate::themes::accent()
+                                                    } else {
+                                                        crate::themes::muted()
+                                                    },
                                                 );
                                             }
                                         } else {
                                             painter.line_segment(
                                                 [rect.left_center(), rect.right_center()],
-                                                Stroke::new(1., Color32::from_gray(85)),
+                                                Stroke::new(
+                                                    1.,
+                                                    crate::themes::color(Color32::from_gray(85)),
+                                                ),
                                             );
                                         }
                                         if ui
@@ -820,8 +857,13 @@ impl Editor {
                                     }
                                 }
                                 Row::Rigging => {
-                                    let color = Color32::from_rgb(86, 211, 214);
-                                    painter.rect_filled(label, 0., Color32::from_rgb(29, 63, 68));
+                                    let color =
+                                        crate::themes::color(Color32::from_rgb(86, 211, 214));
+                                    painter.rect_filled(
+                                        label,
+                                        0.,
+                                        crate::themes::color(Color32::from_rgb(29, 63, 68)),
+                                    );
                                     draw(
                                         &painter,
                                         Rect::from_min_size(
@@ -834,7 +876,12 @@ impl Editor {
                                     painter.text(
                                         label.min + Vec2::new(36., 14.),
                                         egui::Align2::LEFT_CENTER,
-                                        "Rigging · Huesos / Puppet",
+                                        format!(
+                                            "{} · {} / {}",
+                                            tr("Rigging"),
+                                            tr("Huesos"),
+                                            tr("Puppet")
+                                        ),
                                         egui::FontId::proportional(11.),
                                         color,
                                     );
@@ -885,8 +932,13 @@ impl Editor {
                                     }
                                 }
                                 Row::Cameras => {
-                                    let orange = Color32::from_rgb(230, 157, 55);
-                                    painter.rect_filled(label, 0., Color32::from_rgb(80, 56, 32));
+                                    let orange =
+                                        crate::themes::color(Color32::from_rgb(230, 157, 55));
+                                    painter.rect_filled(
+                                        label,
+                                        0.,
+                                        crate::themes::color(Color32::from_rgb(80, 56, 32)),
+                                    );
                                     draw(
                                         &painter,
                                         Rect::from_min_size(
@@ -920,9 +972,11 @@ impl Editor {
                                             rect,
                                             3.,
                                             if self.feature.selected_camera == Some(c.id) {
-                                                Color32::from_rgb(159, 101, 36)
+                                                crate::themes::color(Color32::from_rgb(
+                                                    159, 101, 36,
+                                                ))
                                             } else {
-                                                Color32::from_rgb(105, 73, 39)
+                                                crate::themes::color(Color32::from_rgb(105, 73, 39))
                                             },
                                         );
                                         painter.rect_stroke(
@@ -983,7 +1037,7 @@ impl Editor {
                         let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell;
                         painter.line_segment(
                             [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
-                            Stroke::new(1., ACCENT),
+                            Stroke::new(1., crate::themes::accent()),
                         );
                     });
                 if ui.input(|i| i.pointer.primary_released()) {

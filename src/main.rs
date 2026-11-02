@@ -3,6 +3,8 @@ mod advanced;
 mod animation;
 #[cfg(test)]
 mod animation_tests;
+#[cfg(test)]
+mod appearance_tests;
 mod brush;
 mod bucket;
 mod canvas;
@@ -35,6 +37,7 @@ mod studio;
 #[cfg(test)]
 mod studio_tests;
 mod tablet;
+mod themes;
 mod tools_editor;
 mod typography;
 mod vector;
@@ -183,6 +186,9 @@ impl Editor {
             recovery_writer: recovery::RecoveryWriter::default(),
         };
         editor.initialize_documents(had_recovered);
+        i18n::set_locale(editor.studio.prefs.locale());
+        themes::ensure(&cc.egui_ctx, editor.studio.prefs.theme);
+        i18n::ensure_fonts(&cc.egui_ctx, editor.studio.prefs.locale());
         editor
     }
     fn checkpoint(&mut self) {
@@ -342,7 +348,9 @@ impl eframe::App for Editor {
             let period = Duration::from_secs_f64(1. / self.doc.fps as f64);
             ctx.request_repaint_after(period.saturating_sub(self.tick.elapsed()));
         }
-        crate::i18n::set_language(self.studio.prefs.spanish);
+        crate::i18n::set_locale(self.studio.prefs.locale());
+        themes::ensure(&ctx, self.studio.prefs.theme);
+        i18n::ensure_fonts(&ctx, self.studio.prefs.locale());
         if !self.hub.home {
             self.clipboard_shortcuts(&ctx);
         }
@@ -355,7 +363,7 @@ impl eframe::App for Editor {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(29, 30, 34))
+                        .fill(crate::themes::color(Color32::from_rgb(29, 30, 34)))
                         .inner_margin(0.),
                 )
                 .show(ui, |ui| {
