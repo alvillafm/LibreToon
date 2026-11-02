@@ -61,3 +61,7 @@ scripts/ffmpeg/POLICY.md defines the source/link/import review. reviewed-complet
 This work covers the new owned binary. Historical distributions of the Gyan executable retain their separate unresolved corresponding-source status; the new source package must not be presented as their source.
 
 The separate Rust dispatch 0.2.0 original-copyright documentation limit remains recorded in assets/licenses/supplemental/. It is not silently declared resolved by the FFmpeg work. AI-assisted asset provenance and third-party font notices remain unchanged.
+
+## Manual multiplatform packaging
+
+The packaging workflow now runs only via workflow_dispatch and produces Windows ZIP/EXE, macOS ZIP/DMG (Intel and Apple Silicon), and Linux AppImage/DEB. Existing Windows gates remain mandatory. Native FFmpeg has a separate fail-closed build/review recipe; no Windows approval is reused for Unix binaries. See [manual packaging and first-run limitations](BUILD_PACKAGES.md). No native or hosted build was run while preparing this change.

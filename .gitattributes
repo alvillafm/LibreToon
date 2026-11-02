@@ -4,3 +4,10 @@
 scripts/ffmpeg/*.sh text eol=lf
 scripts/ffmpeg/*.json text eol=lf
 scripts/*.ps1 text eol=lf
+
+# Keep native build/source receipts and packaging recipes byte-stable.
+scripts/ffmpeg/*.py text eol=lf
+scripts/packaging/*.py text eol=lf
+scripts/packaging/*.ps1 text eol=lf
+scripts/packaging/*.iss text eol=lf
+.github/workflows/*.yml text eol=lf

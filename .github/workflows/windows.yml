@@ -1,16 +1,24 @@
-name: LibreToon Windows
+name: LibreToon manual packages
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platforms to package
+        type: choice
+        default: all
+        options:
+          - all
+          - windows
+          - macos
+          - linux
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   format:
@@ -27,9 +35,11 @@ jobs:
         run: cargo fmt --all -- --check
 
   windows:
-    name: Windows tests and release
+    name: Windows portable ZIP and EXE installer
+    needs: format
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -80,38 +90,144 @@ jobs:
         shell: pwsh
         run: ./scripts/review-ffmpeg.ps1 -CandidateDirectory work/ffmpeg-owned-final/output -ReproducedDirectory work/ffmpeg-reproduced/output
 
-      - name: Package Windows application
+      - name: Ensure Inno Setup is available
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/libretoon.exe dist/
-          Copy-Item assets dist/assets -Recurse
-          # CJK font data is embedded in the EXE; retain its license, avoid a second copy.
-          Remove-Item dist/assets/fonts/NotoSansCJK-Regular.ttc
-          Copy-Item LICENSE dist/
-          # Stage the reviewed candidate; never alter the checked-in fallback during CI.
-          Copy-Item work/ffmpeg-owned-final/output/ffmpeg.exe dist/assets/tools/ffmpeg.exe -Force
-          Copy-Item work/ffmpeg-owned-final/output/THIRD-PARTY-NOTICES.txt dist/assets/tools/THIRD_PARTY.md -Force
-          Copy-Item work/ffmpeg-owned-final/output/licenses/* dist/assets/tools/licenses/ -Force
-          Copy-Item work/ffmpeg-owned-final/output/SOURCE_STATUS.json dist/assets/tools/ -Force
-          Copy-Item work/ffmpeg-owned-final/output/REVIEW.json dist/assets/tools/BUILD_EVIDENCE.json -Force
-          @"
-          LibreToon for Windows x64
-          Extract the entire ZIP and open libretoon.exe.
-          Keep the assets folder beside the executable; it includes FFmpeg.
-          Third-party notices: assets/THIRD_PARTY_NOTICES.md
-          FFmpeg source and licensing: SOURCE-ACCESS.txt
-          Build commit: ${{ github.sha }}
-          "@ | Set-Content dist/LEEME.txt
+          $pf = [Environment]::GetFolderPath("ProgramFilesX86")
+          if (-not (Test-Path "$pf/Inno Setup 6/ISCC.exe") -and -not (Test-Path "$pf/Inno Setup 7/ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) {throw "Inno Setup installation failed"}
+          }
 
-      - name: Require reviewed FFmpeg corresponding source and include it
+      - name: Gate corresponding source and create portable ZIP and EXE installer
         shell: pwsh
-        run: ./scripts/check-ffmpeg-distribution.ps1 -Destination dist -ManifestPath work/ffmpeg-owned-final/output/SOURCE_STATUS.json -BinaryPath dist/assets/tools/ffmpeg.exe
+        run: ./scripts/packaging/windows.ps1 -CandidateDirectory work/ffmpeg-owned-final/output
 
-      - name: Upload Windows application
+      - name: Upload Windows download packages
         uses: actions/upload-artifact@v4
         with:
           name: LibreToon-Windows-x64
-          path: dist/
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
+          compression-level: 0
+
+  native:
+    name: ${{ matrix.label }} packages
+    needs: format
+    if: inputs.platform == 'all' || inputs.platform == 'macos' || inputs.platform == 'linux'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+            label: macOS-arm64
+          - os: macos-15-intel
+            platform: macos
+            label: macOS-x64
+          - os: ubuntu-22.04
+            platform: linux
+            label: Linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python for source and packaging scripts
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Linux build and desktop prerequisites
+        if: matrix.platform == 'linux' && (inputs.platform == 'all' || inputs.platform == 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config clang libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libssl-dev xvfb squashfs-tools desktop-file-utils
+          wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          sudo apt-get update
+          sudo apt-get install -y powershell
+
+      - name: Install macOS build prerequisites
+        if: matrix.platform == 'macos' && (inputs.platform == 'all' || inputs.platform == 'macos')
+        run: |
+          command -v pkg-config >/dev/null || brew install pkgconf
+          command -v pwsh >/dev/null || brew install --cask powershell
+
+      - name: Isolate application and test data
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/libretoon-tests" "$RUNNER_TEMP/libretoon-appdata"
+          echo "TEMP=$RUNNER_TEMP/libretoon-tests" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP/libretoon-tests" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP/libretoon-tests/" >> "$GITHUB_ENV"
+          echo "LOCALAPPDATA=$RUNNER_TEMP/libretoon-appdata" >> "$GITHUB_ENV"
+
+      - name: Cache Rust compilation
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build native FFmpeg from the locked official sources
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: python3 scripts/ffmpeg/native.py build work/ffmpeg-native
+
+      - name: Independently reproduce native FFmpeg
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: python3 scripts/ffmpeg/native.py build work/ffmpeg-native-reproduced
+
+      - name: Validate five export formats with odd and Full HD fixtures
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        shell: pwsh
+        run: ./scripts/test-ffmpeg.ps1 -CandidateDirectory work/ffmpeg-native/output -Baseline work/ffmpeg-native-reproduced/output/ffmpeg
+
+      - name: Run regression tests
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: cargo test --locked
+
+      - name: Build release application
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: cargo build --release --locked
+
+      - name: Test actual application exports against the bundled candidate
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        shell: pwsh
+        run: ./scripts/test-ffmpeg-app.ps1 -CandidateDirectory work/ffmpeg-native/output
+
+      - name: Review exact native binary, sources, link inventory and test evidence
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: python3 scripts/ffmpeg/native.py review work/ffmpeg-native work/ffmpeg-native-reproduced
+
+      - name: Gate sources and create native download packages
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/packaging/native.py ${{ matrix.platform }}
+
+      - name: Upload native download packages
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreToon-${{ matrix.label }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.deb
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

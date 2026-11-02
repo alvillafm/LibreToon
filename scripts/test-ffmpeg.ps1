@@ -10,8 +10,10 @@ $candidate = [IO.Path]::GetFullPath((Join-Path $repo $CandidateDirectory))
 $baselineExe = [IO.Path]::GetFullPath((Join-Path $repo $Baseline))
 $resultDir = [IO.Path]::GetFullPath((Join-Path $repo $ResultsDirectory))
 New-Item -ItemType Directory -Force $resultDir | Out-Null
-$exe = Join-Path $candidate "ffmpeg.exe"
-$probe = Join-Path $candidate "ffprobe.exe"
+$binaryName = if ($IsWindows) {"ffmpeg.exe"} else {"ffmpeg"}
+$probeName = if ($IsWindows) {"ffprobe.exe"} else {"ffprobe"}
+$exe = Join-Path $candidate $binaryName
+$probe = Join-Path $candidate $probeName
 function Run([string]$program, [string[]]$arguments) {
     $info = [Diagnostics.ProcessStartInfo]::new($program)
     $info.UseShellExecute = $false
@@ -139,4 +141,4 @@ $receipt = @{
     cases=$results;limitations="Synthetic fixtures, not an exhaustive visual/performance study of every project."
 }
 $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $candidate "EXPORT_VALIDATION.json") -Encoding utf8
-Write-Output "Export contract passed: $($results.Count) format/fixture cases against bundled baseline."
+Write-Output "Export contract passed: $($results.Count) format/fixture cases against selected baseline."

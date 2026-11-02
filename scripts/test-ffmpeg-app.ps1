@@ -13,15 +13,18 @@ try {
     if (-not $artifact) {throw "No LibreToon test executable found"}
     $isolated = Join-Path $candidate "application-test"
     New-Item -ItemType Directory -Force "$isolated/assets/tools" | Out-Null
-    Copy-Item -LiteralPath $artifact.executable -Destination "$isolated/libretoon-tests.exe"
-    Copy-Item -LiteralPath "$candidate/ffmpeg.exe" -Destination "$isolated/assets/tools/ffmpeg.exe"
-    & "$isolated/libretoon-tests.exe" export_all_containers_with_ffmpeg --ignored --nocapture
+    $testName = if ($IsWindows) {"libretoon-tests.exe"} else {"libretoon-tests"}
+    $binaryName = if ($IsWindows) {"ffmpeg.exe"} else {"ffmpeg"}
+    Copy-Item -LiteralPath $artifact.executable -Destination "$isolated/$testName"
+    Copy-Item -LiteralPath "$candidate/$binaryName" -Destination "$isolated/assets/tools/$binaryName"
+    if (-not $IsWindows) { & chmod +x "$isolated/$testName" "$isolated/assets/tools/$binaryName" }
+    & "$isolated/$testName" export_all_containers_with_ffmpeg --ignored --nocapture
     $code = $LASTEXITCODE
     if ($code -ne 0) {throw "LibreToon export integration failed ($code)"}
     @{
         status="passed";testExitCode=$code
-        binarySha256=(Get-FileHash -LiteralPath "$candidate/ffmpeg.exe").Hash.ToLowerInvariant()
-        testBinarySha256=(Get-FileHash -LiteralPath "$isolated/libretoon-tests.exe").Hash.ToLowerInvariant()
+        binarySha256=(Get-FileHash -LiteralPath "$candidate/$binaryName").Hash.ToLowerInvariant()
+        testBinarySha256=(Get-FileHash -LiteralPath "$isolated/$testName").Hash.ToLowerInvariant()
         exporterSha256=(Get-FileHash -LiteralPath "$repo/src/exporter.rs").Hash.ToLowerInvariant()
         testScriptSha256=(Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant()
         command="export_all_containers_with_ffmpeg --ignored --nocapture"

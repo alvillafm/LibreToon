@@ -70,7 +70,12 @@ pub fn ffmpeg_path(configured: &str) -> PathBuf {
     }
     if let Ok(exe) = std::env::current_exe() {
         for dir in exe.ancestors().take(5) {
-            let path = dir.join("assets/tools/ffmpeg.exe");
+            let name = if cfg!(windows) {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            };
+            let path = dir.join("assets/tools").join(name);
             if path.is_file() {
                 return path;
             }
