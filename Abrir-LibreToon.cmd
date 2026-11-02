@@ -1,9 +1,12 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-if exist "target\release\libretoon.exe" (
-  start "" "target\release\libretoon.exe"
-) else (
-  cargo run --release --locked
-  if errorlevel 1 pause
+set "CARGO_TARGET_DIR=%~dp0target"
+echo Comprobando y compilando LibreToon...
+cargo build --release --locked
+if errorlevel 1 (
+  echo No se pudo compilar LibreToon. Revisa el error anterior.
+  pause
+  exit /b 1
 )
-
+start "" "%~dp0target\release\libretoon.exe"

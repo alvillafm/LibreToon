@@ -4,7 +4,7 @@ LibreToon is a native 2D animation editor built with Rust and egui/eframe, inspi
 
 ## Run and develop
 
-On Windows, open `Abrir-LibreToon.cmd` to run `target/release/libretoon.exe`. Build with `cargo build --release --locked` after source changes. `Desarrollar.cmd` runs the development workflow. Rust stable, MSVC and the Windows SDK are required to build.
+On Windows, open `Abrir-LibreToon.cmd` to build pending changes with `cargo build --release --locked` and then run `target/release/libretoon.exe`. The launcher requires Rust and stops if compilation fails, so it cannot silently open an outdated build. `Abrir-Trazo.cmd` is an alias with the same behavior. `cargo run --locked` builds and runs the separate debug executable. Build with `cargo build --release --locked` after source changes. `Desarrollar.cmd` runs the development workflow. Rust stable, MSVC and the Windows SDK are required to build.
 
 ## Project home, tabs and drawing references
 

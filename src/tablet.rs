@@ -122,6 +122,11 @@ mod native {
         max: i32,
         last: Option<f32>,
     }
+    // Virtual devices (UINT_MAX) do not identify a physical device category.
+    fn device_category(device: u32) -> Option<u32> {
+        100u32.checked_add(device)
+    }
+
     impl Wintab {
         fn initialize(&mut self) {
             // SAFETY: symbols are checked before conversion; handles are owned
@@ -151,9 +156,11 @@ mod native {
                 if info(4, 0, (&mut lc as *mut LogContext).cast()) == 0 {
                     return;
                 }
+                let Some(category) = device_category(lc.device) else {
+                    return;
+                };
                 let mut axis = Axis::default();
-                if info(100 + lc.device, 15, (&mut axis as *mut Axis).cast()) == 0
-                    || axis.max <= axis.min
+                if info(category, 15, (&mut axis as *mut Axis).cast()) == 0 || axis.max <= axis.min
                 {
                     return;
                 }
@@ -184,8 +191,8 @@ mod native {
                 let count = unsafe { packets(self.context, 128, values.as_mut_ptr().cast()) }
                     .clamp(0, 128) as usize;
                 if count > 0 {
-                    let value =
-                        (values[count - 1] as f32 - self.min as f32) / (self.max - self.min) as f32;
+                    let value = (values[count - 1] as f32 - self.min as f32)
+                        / (self.max as f64 - self.min as f64) as f32;
                     self.last = if value > 0. {
                         Some(value.clamp(0., 1.))
                     } else {
@@ -196,6 +203,19 @@ mod native {
             self.last
         }
     }
+    #[cfg(test)]
+    mod tests {
+        use super::device_category;
+
+        #[test]
+        fn virtual_and_overflowing_devices_are_rejected() {
+            assert_eq!(device_category(0), Some(100));
+            assert_eq!(device_category(1), Some(101));
+            assert_eq!(device_category(u32::MAX), None);
+            assert_eq!(device_category(u32::MAX - 99), None);
+        }
+    }
+
     impl Drop for Wintab {
         fn drop(&mut self) {
             unsafe {
