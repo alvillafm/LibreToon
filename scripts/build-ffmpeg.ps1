@@ -19,6 +19,57 @@ function Native([string]$exe, [string[]]$arguments) {
     & $exe @arguments
     if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
 }
+function Get-LockedInput($InputFile, [string]$Directory, [string]$LogPath) {
+    $path = Join-Path $Directory $InputFile.file
+    $null = [IO.Directory]::CreateDirectory($Directory)
+    $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $LogPath))
+    if (Test-Path -LiteralPath $path) {
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -eq $InputFile.sha256 -and (Get-Item -LiteralPath $path).Length -eq $InputFile.bytes) { return $path }
+        # Quarantine an incomplete/bad cache file; never overwrite or accept it.
+        $saved = "$path.rejected-$([Guid]::NewGuid().ToString('N'))"
+        Move-Item -LiteralPath $path -Destination $saved
+        @{input=$InputFile.id;source="cache";actualSha256=$actual;expectedSha256=$InputFile.sha256;preservedFile=$saved} |
+            ConvertTo-Json -Compress | Add-Content -LiteralPath $LogPath -Encoding utf8
+    }
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AutomaticDecompression = [Net.DecompressionMethods]::None
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(600)
+    $client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("identity")
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd("LibreToon-SourceVerifier/1.0")
+    try {
+        foreach ($url in @($InputFile.url) + @($InputFile.mirrors) | Where-Object { $_ }) {
+            $temporary = "$path.download-$([Guid]::NewGuid().ToString('N'))"
+            $record = [ordered]@{input=$InputFile.id;url=$url;expectedSha256=$InputFile.sha256;expectedBytes=$InputFile.bytes;preservedFile=$temporary}
+            $response = $null
+            try {
+                $response = $client.GetAsync([string]$url,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                $record.statusCode = [int]$response.StatusCode
+                $record.finalUrl = $response.RequestMessage.RequestUri.GetLeftPart([UriPartial]::Path)
+                $record.contentType = [string]$response.Content.Headers.ContentType
+                $record.contentEncoding = [string]::Join(",", $response.Content.Headers.ContentEncoding)
+                $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $outputStream = [IO.File]::Create($temporary)
+                try { $inputStream.CopyTo($outputStream) } finally {$outputStream.Dispose(); $inputStream.Dispose()}
+                $record.actualBytes = (Get-Item -LiteralPath $temporary).Length
+                $record.actualSha256 = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+                $record.accepted = $response.IsSuccessStatusCode -and $record.actualSha256 -eq $InputFile.sha256 -and $record.actualBytes -eq $InputFile.bytes
+                $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $LogPath -Encoding utf8
+                if ($record.accepted) {
+                    Move-Item -LiteralPath $temporary -Destination $path
+                    return $path
+                }
+                Write-Warning "Rejected $($InputFile.id) from $url : status=$($record.statusCode), bytes=$($record.actualBytes), SHA256=$($record.actualSha256). Expected $($InputFile.sha256). Response preserved at $temporary"
+            } catch {
+                $record.error = $_.Exception.Message
+                $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $LogPath -Encoding utf8
+                Write-Warning "Download failed for $($InputFile.id) from $url : $($_.Exception.Message)"
+            } finally { if ($response) {$response.Dispose()} }
+        }
+    } finally {$client.Dispose()}
+    throw "Locked input checksum/download failure: $($InputFile.id). All responses preserved; see $LogPath. No new hash was accepted."
+}
 $work = Under-Repo $WorkDirectory
 $downloads = Under-Repo $DownloadDirectory
 $tools = if ($ToolDirectory) { Under-Repo $ToolDirectory } else { Join-Path $work "tools" }
@@ -30,11 +81,7 @@ $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
 New-Item -ItemType Directory -Force $work, $downloads, $tools | Out-Null
 $byId = @{}
 foreach ($inputFile in $lock.inputs) {
-    $path = Join-Path $downloads $inputFile.file
-    if (-not (Test-Path -LiteralPath $path)) { Invoke-WebRequest -Uri $inputFile.url -OutFile $path -TimeoutSec 600 }
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $inputFile.sha256) {
-        throw "Locked input checksum mismatch: $($inputFile.id). File preserved for investigation."
-    }
+    $path = Get-LockedInput $inputFile $downloads (Join-Path $work "logs/downloads.jsonl")
     $byId[$inputFile.id] = $path
 }
 $toolchain = Join-Path $tools "llvm-mingw-20240619-ucrt-x86_64"

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,13 +53,139 @@ def run(args, cwd=None, env=None, log=None):
                                    stderr=subprocess.STDOUT, text=True)
 
 
-def download(url, path, sha):
+def download(url, path, sha, mirrors=(), expected_bytes=None):
     path = Path(path)
-    if not path.exists():
-        with urllib.request.urlopen(url, timeout=120) as r, path.open("wb") as f:
-            shutil.copyfileobj(r, f)
-    if digest(path) != sha:
-        raise RuntimeError("Source checksum mismatch: " + str(path))
+    history = []
+    def accepted():
+        return path.is_file() and digest(path) == sha and (expected_bytes is None or path.stat().st_size == expected_bytes)
+    if accepted():
+        return
+    if path.exists():
+        quarantine = path.with_name(path.name + ".rejected-" + uuid.uuid4().hex)
+        history.append({"source": "cache", "actualSha256": digest(path), "preserved": str(quarantine)})
+        path.rename(quarantine)
+    for location in [url, *mirrors]:
+        temporary = path.with_name(path.name + ".download-" + uuid.uuid4().hex)
+        record = {"url": location, "expectedSha256": sha, "preserved": str(temporary)}
+        try:
+            request = urllib.request.Request(location, headers={"Accept-Encoding": "identity", "User-Agent": "LibreToon-SourceVerifier/1.0"})
+            with urllib.request.urlopen(request, timeout=600) as r, temporary.open("wb") as f:
+                record.update(status=r.status, contentType=r.headers.get("Content-Type"), contentEncoding=r.headers.get("Content-Encoding"))
+                shutil.copyfileobj(r, f)
+            record.update(actualSha256=digest(temporary), actualBytes=temporary.stat().st_size)
+            record["accepted"] = record["actualSha256"] == sha and (expected_bytes is None or record["actualBytes"] == expected_bytes)
+            history.append(record)
+            write(path.with_name(path.name + ".download.json"), history)
+            if record["accepted"]:
+                temporary.rename(path)
+                return
+        except Exception as error:
+            record["error"] = str(error)
+            history.append(record)
+            write(path.with_name(path.name + ".download.json"), history)
+    raise RuntimeError("Locked download failed; responses and checksums preserved: " + str(path))
+
+def link_archives(data):
+    """Inspect ASCII archive/member delimiters without decoding arbitrary map bytes."""
+    archives = {}
+    pattern = rb"(?P<path>(?:[^\s()]+/)?(?P<name>lib[^\s/()]+\.a))(?:\[\d+\])?\("
+    for match in re.finditer(pattern, data):
+        try:
+            name = match["name"].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise RuntimeError("Unreviewed non-ASCII archive identifier") from error
+        archives.setdefault(name, set()).add(os.fsdecode(match["path"]))
+    return archives
+
+
+GCC_ARCHIVES = {"libgcc.a", "libgcc_eh.a"}
+
+
+def check_static_coverage(archives, runtime_sources):
+    names = set(archives)
+    if not {"libx264.a", "libz.a", "libavcodec.a"} <= names:
+        raise RuntimeError("Incomplete static link map: " + repr(sorted(names)))
+    extra = names - ARCHIVES
+    if not extra:
+        return
+    covered = set()
+    for source in runtime_sources:
+        if source.get("component") == "gcc-runtime" and source.get("sourceVersion") and source.get("package") == "gcc-11-source":
+            covered.update(source.get("archives", {}))
+    if not extra <= GCC_ARCHIVES or not extra <= covered:
+        raise RuntimeError("Static source coverage requires review: " + repr(sorted(extra)))
+
+
+def gcc_runtime_sources(cc, work, archives, notices, system_root=Path("/")):
+    """Bind libgcc actually selected by the linker to matching Ubuntu source packages."""
+    extra = set(archives) - ARCHIVES
+    if not extra:
+        return []
+    if sys.platform != "linux" or not extra <= GCC_ARCHIVES:
+        raise RuntimeError("Unreviewed static runtime: " + repr(sorted(extra)))
+    metadata_format = "${source:Package}\t${source:Version}\t${Version}"
+    def metadata(package):
+        values = run(["dpkg-query", "-W", "-f=" + metadata_format, package]).strip().split("\t")
+        if len(values) != 3:
+            raise RuntimeError("Missing Debian source identity for " + package)
+        return values
+    source_package, source_version, installed = metadata("gcc-11-source")
+    if source_package != "gcc-11" or source_version != installed:
+        raise RuntimeError("Unexpected GCC source package identity")
+    static = {}
+    for name in sorted(extra):
+        file = Path(run([cc, "-print-file-name=" + name]).strip()).resolve(strict=True)
+        if any(Path(p).resolve(strict=True) != file for p in archives[name]):
+            raise RuntimeError("Link map refers to a different compiler runtime: " + name)
+        owner_line = run(["dpkg-query", "-S", file]).strip().splitlines()
+        if len(owner_line) != 1:
+            raise RuntimeError("Ambiguous GCC archive owner")
+        owner = owner_line[0].split(": ", 1)[0]
+        origin, version, binary_version = metadata(owner)
+        if origin != source_package or version != source_version:
+            raise RuntimeError("GCC runtime/source package versions differ")
+        static[name] = {"path": str(file), "sha256": digest(file), "owner": owner, "version": binary_version}
+    source_root = system_root / "usr/src/gcc-11"
+    package_files = [Path(p) for p in run(["dpkg-query", "-L", "gcc-11-source"]).splitlines()]
+    source_files = sorted(p for p in package_files if p.is_file() and not p.is_symlink() and source_root in p.parents)
+    if not any(p.name == "rules" and p.parent.name == "debian" for p in source_files):
+        raise RuntimeError("GCC source packaging/build scripts absent")
+    tarballs = [p for p in source_files if p.name.startswith("gcc-") and p.name.endswith(".tar.xz")]
+    if len(tarballs) != 1:
+        raise RuntimeError("Expected the exact GCC source tarball")
+    licenses_found = set()
+    with tarfile.open(tarballs[0]) as t:
+        for member in t:
+            base = Path(member.name).name
+            if member.isfile() and base in {"COPYING.RUNTIME", "COPYING3"} and base not in licenses_found:
+                original = t.extractfile(member).read()
+                if base == "COPYING.RUNTIME" and b"GCC RUNTIME LIBRARY EXCEPTION" not in original:
+                    raise RuntimeError("GCC runtime exception text missing")
+                (notices / ("GCC-" + base + ".txt")).write_bytes(original)
+                licenses_found.add(base)
+                if len(licenses_found) == 2:
+                    break
+    if licenses_found != {"COPYING.RUNTIME", "COPYING3"}:
+        raise RuntimeError("Original GCC license/exception absent")
+    copyright_file = system_root / "usr/share/doc/gcc-11-source/copyright"
+    shutil.copy2(copyright_file, notices / "GCC-Ubuntu-COPYRIGHT.txt")
+    bundle = work / "sources/gcc-runtime-source.zip"
+    identity = {"component": "gcc-runtime", "package": "gcc-11-source",
+                "sourcePackage": source_package, "sourceVersion": source_version,
+                "archives": static, "files": {str(p): digest(p) for p in source_files}}
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in source_files:
+            z.write(p, str(p.relative_to(system_root)))
+        for p in package_files:
+            if p.is_symlink() and source_root in p.parents:
+                link = zipfile.ZipInfo(str(p.relative_to(system_root)))
+                link.create_system = 3
+                link.external_attr = 0o120777 << 16
+                z.writestr(link, os.readlink(p))
+        z.write(copyright_file, "copyright")
+        z.writestr(zipfile.ZipInfo("IDENTITY.json"), json.dumps(identity, indent=2))
+    identity.update(file=bundle.name, sha256=digest(bundle), bytes=bundle.stat().st_size)
+    return [identity]
 
 
 def unpack(archive, dest):
@@ -106,14 +233,17 @@ def build(work):
             cached = ROOT.parent / "sources" / item["file"]
             if cached.is_file():
                 shutil.copy2(cached, archive)
-            download(item["url"], archive, item["sha256"])
+            download(item["url"], archive, item["sha256"], item.get("mirrors", ()), item["bytes"])
+            log = archive.with_name(archive.name + ".download.json")
+            if log.exists():
+                shutil.copy2(log, work / "logs" / (item["id"] + "-download.json"))
             unpack(archive, work / "src" / item["id"])
     env = dict(os.environ, LC_ALL="C", TZ="UTC",
                SOURCE_DATE_EPOCH=str(lock["sourceDateEpoch"]), ZERO_AR_DATE="1")
     prefix = work / "prefix"
     env["PKG_CONFIG_LIBDIR"] = str(prefix / "lib/pkgconfig")
     env["PKG_CONFIG_PATH"] = ""
-    cc = "clang" if sys.platform == "darwin" else "gcc"
+    cc = "clang" if sys.platform == "darwin" else "gcc-11"
     cflags = "-O2 -ffile-prefix-map=" + str(work) + "=/build -fdebug-prefix-map=" + str(work) + "=/build"
     env.update(CC=cc, CFLAGS=cflags)
     jobs = str(min(os.cpu_count() or 2, 4))
@@ -171,14 +301,16 @@ def build(work):
     (logs / "license.txt").write_text(license_text)
     if "--enable-gpl" not in version or "--enable-version3" not in version or "--enable-nonfree" in version:
         raise RuntimeError("Unexpected FFmpeg licensing configuration")
-    static = set()
+    static_paths = {}
     for binary in ["ffmpeg", "ffprobe"]:
-        static.update(re.findall(r"\b(lib[^\s/()]+\.a)\(", (logs / (binary + "-link.map")).read_text()))
-    if not {"libx264.a", "libz.a", "libavcodec.a"} <= static or not static <= ARCHIVES:
-        raise RuntimeError("Static source coverage requires review: " + repr(sorted(static)))
-    libraries = {b: imports(work / "output" / b) for b in ["ffmpeg", "ffprobe"]}
+        for name, paths in link_archives((logs / (binary + "-link.map")).read_bytes()).items():
+            static_paths.setdefault(name, set()).update(paths)
     notices = work / "output/licenses"
     notices.mkdir()
+    runtime_sources = gcc_runtime_sources(cc, work, static_paths, notices)
+    check_static_coverage(static_paths, runtime_sources)
+    static = set(static_paths)
+    libraries = {b: imports(work / "output" / b) for b in ["ffmpeg", "ffprobe"]}
     for file in ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"]:
         shutil.copy2(work / "src/ffmpeg" / file, notices / file)
     shutil.copy2(work / "src/x264/COPYING", notices / "x264-COPYING")
@@ -189,6 +321,7 @@ def build(work):
         "the combined executable uses GPLv3-or-later. zlib retains its original license.\n"
         "Full source archives, exact configuration, build logs and MIT build recipes accompany this binary.\n"
         "This software is based in part on the work of the Independent JPEG Group.\n"
+        "GCC runtime, when incorporated: see original GCC COPYING3, COPYING.RUNTIME and Ubuntu copyright notices.\n"
         "No Imageio binary/code is used in this native build. LibreToon's own code remains MIT.\n")
     receipt = {
         "schema": 1, "platform": sys.platform, "architecture": platform.machine(),
@@ -197,6 +330,7 @@ def build(work):
         "recipes": {p: digest(ROOT / p) for p in RECIPES},
         "sourceInputs": [x for x in lock["inputs"] if x["id"] in SOURCE_IDS],
         "staticArchives": sorted(static), "systemImports": libraries,
+        "runtimeSourceInputs": runtime_sources,
         "toolchain": (logs / "compiler.txt").read_text(),
         "configuration": flags, "sourcePatches": [],
     }
@@ -211,6 +345,9 @@ def review(work, other):
     for field, binary in [("binarySha256", "ffmpeg"), ("probeSha256", "ffprobe")]:
         if receipt[field] != reproduction[field] or receipt[field] != digest(out / binary) or receipt[field] != digest(other / "output" / binary):
             raise RuntimeError("Independent native reproduction differs: " + binary)
+    check_static_coverage(receipt["staticArchives"], receipt.get("runtimeSourceInputs", []))
+    if receipt.get("runtimeSourceInputs", []) != reproduction.get("runtimeSourceInputs", []):
+        raise RuntimeError("Independent builds used different compiler runtime/source evidence")
     exports = read(out / "EXPORT_VALIDATION.json")
     app = read(out / "APPLICATION_TEST.json")
     if exports["status"] != "passed" or len(exports["cases"]) != 10 or exports["binarySha256"] != receipt["binarySha256"]:
@@ -224,7 +361,7 @@ def review(work, other):
             raise RuntimeError("Recipe changed: " + p)
     bundle = out / "ffmpeg-complete-source.zip"
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
-        for item in receipt["sourceInputs"]:
+        for item in receipt["sourceInputs"] + receipt.get("runtimeSourceInputs", []):
             p = work / "sources" / item["file"]
             if digest(p) != item["sha256"]:
                 raise RuntimeError("Source changed after build")
@@ -241,7 +378,9 @@ def review(work, other):
         z.writestr("REBUILD.txt", "On the recorded native OS/architecture install the compiler, make, pkg-config, Python 3.12+ and PowerShell 7. "
                    "Extract recipe into a checkout. Run python3 scripts/ffmpeg/native.py build work/rebuild. "
                    "The hash-locked official archives are included in sources; network retrieval uses exactly the same hashes. "
-                   "System libraries/tools are not redistributed. Original input sources are unmodified; see BUILD_RECEIPT.json.\n")
+                   "On Ubuntu, install the exact gcc-11/libgcc-11-dev/gcc-11-source package versions recorded in BUILD_RECEIPT.json. "
+                   "The matching GCC source tree, Debian patches/build rules and notices are in sources/gcc-runtime-source.zip when libgcc is incorporated. "
+                   "System dynamic libraries/build tools are not redistributed. Original input sources are unmodified; see BUILD_RECEIPT.json.\n")
     write(out / "SOURCE_STATUS.json", {
         "schema": 1, "status": "reviewed-native", "binarySha256": receipt["binarySha256"],
         "sourceSha256": digest(bundle), "reproducedBinarySha256": reproduction["binarySha256"],
@@ -266,10 +405,9 @@ def stage(work, destination):
     for p, sha in receipt["recipes"].items():
         if digest(ROOT / p) != sha:
             raise RuntimeError("Stale native recipe evidence: " + p)
-    if not set(receipt["staticArchives"]) <= ARCHIVES:
-        raise RuntimeError("Unknown incorporated runtime/library")
+    check_static_coverage(receipt["staticArchives"], receipt.get("runtimeSourceInputs", []))
     with zipfile.ZipFile(out / "ffmpeg-complete-source.zip") as z:
-        for item in receipt["sourceInputs"]:
+        for item in receipt["sourceInputs"] + receipt.get("runtimeSourceInputs", []):
             if hashlib.sha256(z.read("sources/" + item["file"])).hexdigest() != item["sha256"]:
                 raise RuntimeError("Missing or changed corresponding source")
     imports(out / "ffmpeg")

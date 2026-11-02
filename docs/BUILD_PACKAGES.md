@@ -83,3 +83,33 @@ Official references:
 - https://jrsoftware.org/ishelp/topic_compilercmdline.htm
 - https://github.com/AppImage/appimagetool
 - https://github.com/AppImage/type2-runtime
+
+## First hosted-run fixes
+
+- zlib 1.3.1: the official maintainer release asset and zlib.net fossil were downloaded
+  and compared byte-for-byte (1,512,791 bytes, 290 TAR members, zlib.h version 1.3.1).
+  Both match the **unchanged** locked SHA-256
+  9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23.
+  The maintainer's release asset is now primary, with the verified fossil as fallback.
+  Downloaders request identity encoding, preserve rejected files/cache entries, and
+  require the same hash and size on every origin. Windows disables automatic HTTP
+  decompression. Receipt logs record actual/expected digests and HTTP metadata.
+  The original failed Windows response was not provided and the old error omitted
+  its actual checksum, so HTML/error responses versus transport transformations
+  cannot be distinguished retrospectively; no such cause is asserted as proven.
+- macOS: raw-byte map parsing avoids UTF-8 decoding failures and accepts the actual
+  Mach-O archive/member index notation. Original maps remain unchanged in source logs.
+- Ubuntu: use gcc-11 and the matching gcc-11-source/libgcc-11-dev packages.
+  Incorporation of libgcc.a/libgcc_eh.a requires exact source-version and link-path
+  checks. Complete source/patch/build-rule files and original GPL/runtime-exception
+  notices are retained and checksum-bound, rather than adding a blind allow-list.
+- Six isolated downloader/parser/source-identity regressions run before heavy builds.
+  They do not compile or run FFmpeg/LibreToon. Only these script tests and static checks
+  were run for this correction; no new hosted or application compilation was started.
+- Failed jobs expose only diagnostic logs/receipts for seven days, never unreviewed
+  executables. Application-package uploads still require all original source/export
+  and independent reproduction gates. workflow_dispatch remains the only trigger.
+
+Official records: https://github.com/madler/zlib/releases/tag/v1.3.1,
+https://zlib.net/fossils/, https://packages.ubuntu.com/jammy-updates/gcc-11-source,
+https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html.

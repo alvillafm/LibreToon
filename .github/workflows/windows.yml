@@ -64,6 +64,15 @@ jobs:
       - name: Cache Rust compilation
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Python for downloader/parser preflight
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check source downloads and link-map guards without compiling
+        shell: pwsh
+        run: python scripts/ffmpeg/test_ci_fixes.py (Get-Command pwsh).Source
+
       - name: Build owned FFmpeg and complete corresponding source
         shell: pwsh
         run: ./scripts/build-ffmpeg.ps1 -WorkDirectory work/ffmpeg-owned-final
@@ -115,6 +124,17 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Preserve Windows failure diagnostics (no executables)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFmpeg-Windows-failure-diagnostics
+          path: |
+            work/ffmpeg-owned-final/logs/
+            work/ffmpeg-owned-final/output/BUILD_RECEIPT.json
+          if-no-files-found: warn
+          retention-days: 7
+
   native:
     name: ${{ matrix.label }} packages
     needs: format
@@ -154,7 +174,7 @@ jobs:
         if: matrix.platform == 'linux' && (inputs.platform == 'all' || inputs.platform == 'linux')
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config clang libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libssl-dev xvfb squashfs-tools desktop-file-utils
+          sudo apt-get install -y build-essential gcc-11 gcc-11-source libgcc-11-dev pkg-config clang libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libssl-dev xvfb squashfs-tools desktop-file-utils
           wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O "$RUNNER_TEMP/packages-microsoft-prod.deb"
           sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
           sudo apt-get update
@@ -179,6 +199,11 @@ jobs:
       - name: Cache Rust compilation
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         uses: Swatinem/rust-cache@v2
+
+      - name: Check source downloads and link-map guards without compiling
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        shell: bash
+        run: python3 scripts/ffmpeg/test_ci_fixes.py "$(command -v pwsh)"
 
       - name: Build native FFmpeg from the locked official sources
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
@@ -231,3 +256,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Preserve native failure diagnostics (no executables)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFmpeg-${{ matrix.label }}-failure-diagnostics
+          path: |
+            work/ffmpeg-native/logs/
+            work/ffmpeg-native/output/BUILD_RECEIPT.json
+          if-no-files-found: warn
+          retention-days: 7
