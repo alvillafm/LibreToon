@@ -36,6 +36,13 @@ pub struct RigEditor {
     pub timing: Option<usize>,
     drag: Option<Gesture>,
 }
+impl RigEditor {
+    pub fn cancel_gesture(&mut self) -> bool {
+        self.drag
+            .take()
+            .is_some_and(|g| !matches!(g, Gesture::Create { .. }))
+    }
+}
 impl Default for RigEditor {
     fn default() -> Self {
         Self {
@@ -90,6 +97,11 @@ fn crosses(a: Pos2, b: Pos2, r: Rect) -> bool {
     true
 }
 impl Editor {
+    pub fn finish_rig_gesture(&mut self) {
+        if self.rigging.cancel_gesture() {
+            self.recover();
+        }
+    }
     fn binding_delta(&self, b: &Binding) -> rig::Matrix {
         self.rig_targets()
             .iter()
@@ -1230,5 +1242,35 @@ impl Editor {
             }
         }
         self.recover();
+    }
+}
+
+#[cfg(test)]
+mod audit_gesture_tests {
+    use super::*;
+    #[test]
+    fn switching_tools_and_history_discard_pending_rig_gestures() {
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        e.recovery =
+            std::env::temp_dir().join(format!("audit-gesture-{}.json", std::process::id()));
+        e.tool = Tool::Bones;
+        e.rigging.drag = Some(Gesture::Create {
+            start: Pos2::ZERO,
+            end: Pos2::new(20., 0.),
+            parent: None,
+        });
+        e.activate_tool(Tool::Pan);
+        assert!(e.rigging.drag.is_none());
+        assert!(e.doc.extras.rig.bones.is_empty());
+        e.tool = Tool::Puppet;
+        e.checkpoint();
+        e.rigging.drag = Some(Gesture::Pin {
+            target: 123,
+            id: 456,
+        });
+        e.history(false);
+        assert!(e.rigging.drag.is_none());
     }
 }

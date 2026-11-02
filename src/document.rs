@@ -167,11 +167,17 @@ impl Document {
         if count == 0 || count > 10000 {
             return Err("Número de fotogramas no válido".into());
         }
+        let mut checked = std::collections::HashSet::new();
         for layer in &self.layers {
             if layer.frames.len() != count {
                 return Err("Capas con duraciones diferentes".into());
             }
-            for mark in layer.frames.iter().flatten() {
+            for mark in layer
+                .frames
+                .iter()
+                .filter(|f| checked.insert(f.identity()))
+                .flatten()
+            {
                 if !mark.width.is_finite()
                     || mark.width <= 0.0
                     || mark.width > 100.0

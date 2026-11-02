@@ -5,7 +5,7 @@ Antes de modificar código, leer `README.md` y `PERFORMANCE.md` y comprobar el e
 - Mantener los datos compartidos del documento y su aislamiento al editar. No introducir copias profundas del proyecto en rutas de interacción.
 - Evitar trabajo proporcional a todo el proyecto al dibujar, mover el cursor o recorrer la línea de tiempo. Calcular solo lo visible o lo invalidado cuando sea posible.
 - Mantener la serialización de recuperación fuera del hilo de interfaz, con una cola acotada y escritura de la última edición al cerrar normalmente.
-- Conservar compatibilidad con los documentos existentes. La compatibilidad FLA es limitada: no silenciar ni descartar elementos no admitidos.
+- Conservar compatibilidad con los documentos existentes. La compatibilidad FLA es limitada: importar lo compatible y registrar en el informe los elementos omitidos o aproximados, sin ejecutar scripts. Esta política de importación tolerante fue solicitada explícitamente por el usuario.
 - Para cambios en historial, pincel, línea de tiempo o recuperación, ejecutar las pruebas de regresión correspondientes y `cargo test --locked`. Comprobar también `cargo fmt --all -- --check`.
 - Si cambia una ruta de rendimiento, usar las mediciones reproducibles descritas en `PERFORMANCE.md` cuando sean relevantes. Identificar perfil de compilación, escenario y límites de cada resultado. No afirmar superioridad sobre Adobe Animate sin una comparación equivalente.
 - Las pruebas de rendimiento automáticas verifican crecimiento del trabajo y aislamiento de datos, sin umbrales de tiempo dependientes de la máquina. Los benchmarks temporales son manuales.
