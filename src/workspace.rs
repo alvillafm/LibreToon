@@ -243,6 +243,7 @@ impl Editor {
         self.document_tabs(ui);
         if self.hub.home {
             self.home_ui(ui);
+            self.preferences_ui(&ctx);
             self.notice_ui(&ctx);
             return;
         }

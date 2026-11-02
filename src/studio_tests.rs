@@ -549,3 +549,39 @@ fn render_studio_review_images() {
         }
     }
 }
+
+#[test]
+fn preferences_render_from_home() {
+    fn contains_text(shape: &egui::Shape, text: &str) -> bool {
+        match shape {
+            egui::Shape::Text(shape) => shape.galley.job.text.contains(text),
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| contains_text(shape, text)),
+            _ => false,
+        }
+    }
+    let mut e = editor();
+    e.hub.home = true;
+    e.studio.preferences_open = true;
+    crate::i18n::set_locale(crate::i18n::Language::English);
+    let ctx = egui::Context::default();
+    let mut found = false;
+    for _ in 0..3 {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400., 900.))),
+                ..Default::default()
+            },
+            |ui| e.workspace(ui),
+        );
+        found |= out
+            .shapes
+            .iter()
+            .any(|shape| contains_text(&shape.shape, "Language"));
+        out.textures_delta.clear();
+    }
+    assert!(
+        found,
+        "Home must render the language controls in Preferences"
+    );
+    assert!(e.hub.home);
+}
