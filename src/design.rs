@@ -476,7 +476,7 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         }
         Icon::ShadeBrush => {
             p.circle_filled(pt(10., 10.), 7., c);
-            p.circle_filled(pt(13., 7.), 5., PANEL);
+            p.circle_filled(pt(13., 7.), 5., crate::themes::panel());
         }
         Icon::LightBrush => {
             p.circle_stroke(pt(10., 10.), 4., s);
@@ -839,7 +839,7 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         Icon::Settings => {
             for (y, x) in [(5., 7.), (10., 13.), (15., 8.)] {
                 line((2., y), (18., y));
-                p.circle_filled(pt(x, y), 2.5, PANEL);
+                p.circle_filled(pt(x, y), 2.5, crate::themes::panel());
                 p.circle_stroke(pt(x, y), 2.5, s);
             }
         }
@@ -858,7 +858,7 @@ pub fn button(
     let text = ui.painter().layout_no_wrap(
         label.into(),
         egui::FontId::proportional(12.),
-        Color32::WHITE,
+        crate::themes::palette().text,
     );
     let width = if label.is_empty() {
         32.
@@ -874,23 +874,27 @@ pub fn button(
         },
     );
     let fill = if selected {
-        Color32::from_rgb(47, 73, 104)
+        crate::themes::color(Color32::from_rgb(47, 73, 104))
     } else if response.hovered() && enabled {
-        Color32::from_rgb(61, 64, 72)
+        crate::themes::color(Color32::from_rgb(61, 64, 72))
     } else {
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(r, 3., fill);
     if selected {
-        ui.painter()
-            .rect_stroke(r, 3., Stroke::new(1., ACCENT), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(
+            r,
+            3.,
+            Stroke::new(1., crate::themes::accent()),
+            egui::StrokeKind::Inside,
+        );
     }
     let color = if !enabled {
-        Color32::from_rgb(87, 90, 99)
+        crate::themes::color(Color32::from_rgb(87, 90, 99))
     } else if selected {
-        ACCENT
+        crate::themes::accent()
     } else {
-        Color32::from_rgb(203, 207, 216)
+        crate::themes::color(Color32::from_rgb(203, 207, 216))
     };
     draw(
         ui.painter(),
@@ -999,7 +1003,7 @@ pub fn category(ui: &mut egui::Ui, title: &str) {
         egui::RichText::new(crate::i18n::tr(title))
             .size(10.)
             .strong()
-            .color(MUTED),
+            .color(crate::themes::muted()),
     );
     ui.separator();
     ui.add_space(4.);

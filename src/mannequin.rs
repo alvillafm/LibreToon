@@ -134,10 +134,13 @@ impl Editor {
         };
         let mut model = self.doc.layers[l].options.mannequin.clone().unwrap();
         let original = model.clone();
-        ui.colored_label(COLOR, "Referencia de dibujo · no se exporta");
+        ui.colored_label(
+            COLOR,
+            crate::i18n::tr("Referencia de dibujo · no se exporta"),
+        );
         ui.add_enabled_ui(!self.doc.layers[l].options.locked,|ui|{
             crate::design::category(ui,"PROPORCIONES");
-            ui.horizontal_wrapped(|ui|{for heads in [8,7,6,4,3]{ui.selectable_value(&mut model.heads,heads,format!("{heads} cabezas"));}});
+            ui.horizontal_wrapped(|ui|{for heads in [8,7,6,4,3]{ui.selectable_value(&mut model.heads,heads,crate::i18n::message("{heads} cabezas",&[("heads",heads.to_string())]));}});
             ui.add(egui::Slider::new(&mut model.breadth,0.4..=2.).text(crate::i18n::tr("Complexión")));
             ui.add(egui::Slider::new(&mut model.unit,8. ..=150.).text(crate::i18n::tr("Escala")));
             crate::design::category(ui,"POSE");

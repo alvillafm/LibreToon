@@ -387,7 +387,7 @@ impl Editor {
                 {
                     self.animation.picker = Some((l, m, self.frame));
                 }
-                ui.label(format!("Frame {}", settings.first + 1));
+                ui.label(format!("{} {}", tr("Fotograma"), settings.first + 1));
                 if settings != instance {
                     self.checkpoint();
                     self.autokey_motion(&[(l, m)]);
@@ -634,7 +634,7 @@ impl Editor {
                 .changed();
             let mut degrees = c.angle.to_degrees();
             if ui
-                .add(egui::DragValue::new(&mut degrees).suffix("°"))
+                .add(egui::DragValue::new(&mut degrees).suffix(crate::i18n::tr("°")))
                 .changed()
             {
                 c.angle = degrees.to_radians();
@@ -648,7 +648,7 @@ impl Editor {
                 )
                 .changed();
             let old_curve = c.animation.curve.clone();
-            ui.collapsing("Camera motion · easing / path", |ui| {
+            ui.collapsing(crate::i18n::tr("Camera motion · easing / path"), |ui| {
                 crate::visual_controls::timing_controls(
                     ui,
                     &mut c.animation.curve,

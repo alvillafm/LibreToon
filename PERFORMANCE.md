@@ -190,3 +190,11 @@ Medición sintética en este entorno Linux x86_64 (AMD EPYC 9V74, tres CPU visib
 | Validación con deduplicación y controles nuevos | 0,60235 ms |
 
 Comando: `cargo test --release --locked benchmark_audit_shared_validation -- --ignored --nocapture`. Mide CPU de validación, no lectura, renderizado, latencia de entrada ni FPS. No constituye una comparación con Animate. Los costes pendientes y la matriz de compatibilidad están en `AUDIT.md`.
+
+## Temas e idiomas (noviembre de 2026)
+
+Las paletas solo afectan a decoraciones de la interfaz. Los datos del dibujo, el fondo blanco del escenario y la modulación de las texturas de previsualización conservan sus colores. La paleta actual y el idioma son estado del hilo de UI; las pruebas de renderizado paralelas no se pisan. El estilo se reconstruye solo cuando cambia el tema, y la cadena de fuentes solo cuando cambia la variante CJK. Los diccionarios se cargan una vez, desde JSON integrado en el ejecutable; no hay peticiones de traducción durante el uso de la aplicación.
+
+La colección Noto Sans CJK integrada ocupa aproximadamente 18,5 MiB de datos de fuente, compartidos como bytes estáticos. La memoria de fuentes/atlas depende de los glifos utilizados; no se afirma un límite global de RAM. El paquete Windows omite una segunda copia del TTC, conservando su licencia. Las regresiones comprueban los seis temas, los once idiomas, contraste de texto y texto secundario, cobertura de glifos, persistencia/migración y que recorrer los temas e idiomas no modifica el documento.
+
+`cargo test --locked render_studio_review_images -- --ignored --nocapture` añade vistas de los temas, preferencias y los tres idiomas asiáticos. Son capturas sin ventana para comprobar fuentes, contraste y colocación; no sustituyen una sesión manual en Windows.

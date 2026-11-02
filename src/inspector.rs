@@ -1,7 +1,7 @@
 use crate::{
     Editor,
     canvas::Tool,
-    design::{self, ACCENT, Icon, MUTED},
+    design::{self, Icon},
     shared::SharedVec,
     width::{self, WidthStop},
 };
@@ -132,7 +132,7 @@ impl Editor {
                         ui.add(
                             egui::DragValue::new(&mut settings.width)
                                 .range(1..=16384)
-                                .suffix(" px")
+                                .suffix(crate::i18n::tr(" px"))
                                 .update_while_editing(false),
                         );
                         ui.end_row();
@@ -140,7 +140,7 @@ impl Editor {
                         ui.add(
                             egui::DragValue::new(&mut settings.height)
                                 .range(1..=16384)
-                                .suffix(" px")
+                                .suffix(crate::i18n::tr(" px"))
                                 .update_while_editing(false),
                         );
                         ui.end_row();
@@ -148,7 +148,7 @@ impl Editor {
                         ui.add(
                             egui::DragValue::new(&mut settings.fps)
                                 .range(1..=240)
-                                .suffix(" fps")
+                                .suffix(crate::i18n::tr(" fps"))
                                 .update_while_editing(false),
                         );
                         ui.end_row();
@@ -188,7 +188,7 @@ impl Editor {
                     .color_edit_button_srgba(&mut self.color)
                     .on_hover_text(crate::i18n::tr("Contorno"));
                 ui.painter()
-                    .rect_filled(response.rect.shrink(5.), 0., design::PANEL);
+                    .rect_filled(response.rect.shrink(5.), 0., crate::themes::panel());
                 if response.clicked() {
                     self.active_fill = false;
                 }
@@ -290,7 +290,7 @@ impl Editor {
                     ui.painter(),
                     Rect::from_min_size(ui.cursor().min, Vec2::splat(20.)),
                     self.tool.icon(),
-                    ACCENT,
+                    crate::themes::accent(),
                 );
                 ui.add_space(27.);
                 ui.heading(self.tool.name());
@@ -341,7 +341,9 @@ impl Editor {
             ) {
                 design::category(ui, "TRAZO");
                 ui.label(crate::i18n::tr("Grosor"));
-                let response = ui.add(egui::Slider::new(&mut self.width, 1.0..=80.).suffix(" px"));
+                let response = ui.add(
+                    egui::Slider::new(&mut self.width, 1.0..=80.).suffix(crate::i18n::tr(" px")),
+                );
                 if response.changed() && self.tool == Tool::Width {
                     let ids = self.canvas.selected.clone();
                     self.checkpoint();
@@ -430,12 +432,16 @@ impl Editor {
         );
         let graph = rect.shrink2(Vec2::new(8., 10.));
         let painter = ui.painter();
-        painter.rect_filled(rect, 3., Color32::from_rgb(25, 26, 30));
+        painter.rect_filled(
+            rect,
+            3.,
+            crate::themes::color(Color32::from_rgb(25, 26, 30)),
+        );
         for i in 0..=4 {
             let y = graph.bottom() - graph.height() * i as f32 / 4.;
             painter.line_segment(
                 [Pos2::new(graph.left(), y), Pos2::new(graph.right(), y)],
-                Stroke::new(0.5, Color32::from_gray(60)),
+                Stroke::new(0.5, crate::themes::color(Color32::from_gray(60))),
             );
         }
         let screen = |stop: WidthStop| {
@@ -453,7 +459,10 @@ impl Editor {
                 })
             })
             .collect();
-        painter.add(egui::Shape::line(points, Stroke::new(2., ACCENT)));
+        painter.add(egui::Shape::line(
+            points,
+            Stroke::new(2., crate::themes::accent()),
+        ));
         for (i, stop) in self.width_profile.iter().enumerate() {
             painter.circle_filled(
                 screen(*stop),
@@ -463,9 +472,9 @@ impl Editor {
                     3.5
                 },
                 if self.profile_point == Some(i) {
-                    Color32::WHITE
+                    crate::themes::color(Color32::WHITE)
                 } else {
-                    ACCENT
+                    crate::themes::accent()
                 },
             );
         }
@@ -527,13 +536,13 @@ impl Editor {
             ui.label(
                 egui::RichText::new(crate::i18n::tr("Inicio"))
                     .size(10.)
-                    .color(MUTED),
+                    .color(crate::themes::muted()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(crate::i18n::tr("Final"))
                         .size(10.)
-                        .color(MUTED),
+                        .color(crate::themes::muted()),
                 );
             });
         });
@@ -542,8 +551,8 @@ impl Editor {
             let r = ui.add(
                 egui::DragValue::new(&mut value)
                     .range(0.0..=400.)
-                    .suffix(" %")
-                    .prefix("Grosor: ")
+                    .suffix(crate::i18n::tr(" %"))
+                    .prefix(crate::i18n::tr("Grosor: "))
                     .update_while_editing(false),
             );
             dragging |= r.dragged();

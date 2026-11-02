@@ -405,14 +405,42 @@ fn render_studio_review_images() {
         ("weights", false, Tool::Bones),
         ("puppet", false, Tool::Puppet),
         ("library", false, Tool::Select),
+        ("paper", false, Tool::Brush),
+        ("midnight", true, Tool::Select),
+        ("forest", false, Tool::Brush),
+        ("plum", false, Tool::Puppet),
+        ("graphite", false, Tool::Bones),
+        ("japanese", false, Tool::Text),
+        ("chinese", false, Tool::Bones),
+        ("korean", false, Tool::Airbrush),
+        ("preferences-paper", false, Tool::Brush),
     ] {
+        use crate::{i18n::Language, themes::Theme};
+        let (theme, language) = match name {
+            "paper" | "preferences-paper" => (Theme::Paper, Language::English),
+            "midnight" => (Theme::Midnight, Language::English),
+            "forest" => (Theme::Forest, Language::PortuguesePortugal),
+            "plum" => (Theme::Plum, Language::French),
+            "graphite" => (Theme::Graphite, Language::German),
+            "japanese" => (Theme::Midnight, Language::Japanese),
+            "chinese" => (Theme::Paper, Language::ChineseSimplified),
+            "korean" => (Theme::Forest, Language::Korean),
+            _ => (Theme::Studio, Language::Spanish),
+        };
+        e.studio.prefs.theme = theme;
+        e.studio.prefs.language = Some(language);
+        crate::themes::ensure(&ctx, theme);
+        crate::i18n::set_locale(language);
+        crate::i18n::ensure_fonts(&ctx, language);
+        e.studio.preferences_open = name == "preferences-paper";
         e.rigging.paint = name == "weights";
         e.rigging.create = name == "bones";
         e.feature.library = name == "library";
         e.hub.home = home;
         e.tool = tool;
         e.canvas.clear_selection();
-        for frame in 0..3 {
+        let frames = if name == "preferences-paper" { 12 } else { 3 };
+        for frame in 0..frames {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440., 960.))),
@@ -424,7 +452,7 @@ fn render_studio_review_images() {
                         egui::CentralPanel::default()
                             .frame(
                                 egui::Frame::new()
-                                    .fill(egui::Color32::from_gray(29))
+                                    .fill(crate::themes::color(egui::Color32::from_gray(29)))
                                     .inner_margin(0.),
                             )
                             .show(ui, |ui| e.canvas_ui(ui));
@@ -449,7 +477,7 @@ fn render_studio_review_images() {
                 }
             }
             output.textures_delta.clear();
-            if frame != 2 {
+            if frame + 1 != frames {
                 continue;
             }
             let mut rgb = vec![24u8; 1440 * 960 * 3];

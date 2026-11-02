@@ -223,7 +223,7 @@ impl Editor {
             ui.add(
                 egui::Slider::new(&mut self.drawing.radius, 0. ..=500.)
                     .text(crate::i18n::tr("Radio de esquina"))
-                    .suffix(" px"),
+                    .suffix(crate::i18n::tr(" px")),
             );
         }
         if matches!(
@@ -250,14 +250,14 @@ impl Editor {
                 self.drawing.pressure = !self.drawing.pressure;
             }
             ui.label(if self.drawing.pressure {
-                "Presión de lápiz activada"
+                crate::i18n::tr("Presión de lápiz activada")
             } else {
-                "Presión de lápiz desactivada"
+                crate::i18n::tr("Presión de lápiz desactivada")
             });
             ui.small(if self.drawing.pen.detected() {
-                "Lápiz detectado · presión → grosor"
+                crate::i18n::tr("Lápiz detectado · presión → grosor")
             } else {
-                "Ratón: grosor constante · esperando lápiz"
+                crate::i18n::tr("Ratón: grosor constante · esperando lápiz")
             });
         }
         if matches!(self.tool, Tool::Airbrush | Tool::SketchBrush) {
@@ -274,7 +274,7 @@ impl Editor {
             } else {
                 ui.colored_label(
                     Color32::from_rgb(170, 176, 196),
-                    "Boceto gris · no se exporta",
+                    crate::i18n::tr("Boceto gris · no se exporta"),
                 );
             }
         }
