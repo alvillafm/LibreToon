@@ -938,7 +938,7 @@ impl crate::Editor {
             return;
         }
         let mut open = true;
-        eframe::egui::Window::new("Importación de Animate · Compatibilidad").open(&mut open).default_width(520.).show(ctx,|ui|{ui.label("Se ha abierto la animación compatible. El código ActionScript/JavaScript no se ejecuta.");ui.label("Guardar creará una copia de LibreToon para conservar el FLA original.");ui.separator();eframe::egui::ScrollArea::vertical().max_height(350.).show(ui,|ui|{if self.doc.extras.import_warnings.is_empty(){ui.label("No se han detectado elementos omitidos en el contenido compatible.");}for message in &self.doc.extras.import_warnings{ui.label(format!("• {message}"));}});});
+        eframe::egui::Window::new(crate::i18n::tr("Importación de Animate · Compatibilidad")).open(&mut open).default_width(520.).show(ctx,|ui|{ui.label(crate::i18n::tr("Se ha abierto la animación compatible. El código ActionScript/JavaScript no se ejecuta."));ui.label(crate::i18n::tr("Guardar creará una copia de LibreToon para conservar el FLA original."));ui.separator();eframe::egui::ScrollArea::vertical().max_height(350.).show(ui,|ui|{if self.doc.extras.import_warnings.is_empty(){ui.label(crate::i18n::tr("No se han detectado elementos omitidos en el contenido compatible."));}for message in &self.doc.extras.import_warnings{ui.label(format!("• {message}"));}});});
         self.import_report_open = open;
     }
 }

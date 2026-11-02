@@ -332,7 +332,7 @@ impl Editor {
                                 .and_then(|id| {
                                     self.doc.extras.library.folders.iter().find(|f| f.id == id)
                                 })
-                                .map_or(design::ACCENT, |f| {
+                                .map_or(crate::themes::accent(), |f| {
                                     Color32::from_rgb(f.color[0], f.color[1], f.color[2])
                                 });
                             (s.name.clone(), tag, false)
@@ -348,9 +348,9 @@ impl Editor {
                             r,
                             4.,
                             if self.assets.selected == Some(asset) {
-                                Color32::from_rgb(45, 64, 87)
+                                crate::themes::color(Color32::from_rgb(45, 64, 87))
                             } else {
-                                Color32::from_gray(51)
+                                crate::themes::color(Color32::from_gray(51))
                             },
                         );
                     }
@@ -412,7 +412,7 @@ impl Editor {
                         let mut job = egui::text::LayoutJob::simple(
                             name.clone(),
                             egui::FontId::proportional(12.),
-                            Color32::from_gray(225),
+                            crate::themes::color(Color32::from_gray(225)),
                             text_rect.width(),
                         );
                         job.wrap.max_rows = 1;
@@ -420,7 +420,7 @@ impl Editor {
                         ui.painter().galley(
                             text_rect.min + Vec2::new(0., 4.),
                             galley,
-                            Color32::WHITE,
+                            crate::themes::color(Color32::WHITE),
                         );
                     }
                     // Register the row above the thumbnail's click widget, so
@@ -483,7 +483,7 @@ impl Editor {
                                 let y = if before { r.top() } else { r.bottom() };
                                 ui.painter().line_segment(
                                     [Pos2::new(r.left(), y), Pos2::new(r.right(), y)],
-                                    egui::Stroke::new(2., design::ACCENT),
+                                    egui::Stroke::new(2., crate::themes::accent()),
                                 );
                             }
                         }

@@ -105,7 +105,7 @@ impl Editor {
                                     ui.painter(),
                                     rect,
                                     Icon::Pan,
-                                    crate::design::MUTED,
+                                    crate::themes::muted(),
                                 );
                                 if drag.drag_started() {
                                     self.animation.scene_drag = Some(i);

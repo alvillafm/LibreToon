@@ -184,7 +184,7 @@ impl Editor {
                     ui.label(tr("Carpeta"));
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut s.folder);
-                        if ui.button("…").clicked() {
+                        if ui.button(crate::i18n::tr("…")).clicked() {
                             if let Some(p) = rfd::FileDialog::new()
                                 .set_directory(&s.folder)
                                 .pick_folder()
@@ -196,7 +196,7 @@ impl Editor {
                     ui.end_row();
                     ui.label(tr("Formato"));
                     if s.format == 5 {
-                        ui.label("GIF");
+                        ui.label(crate::i18n::tr("GIF"));
                     } else {
                         egui::ComboBox::from_id_salt("export-format")
                             .selected_text(FORMATS[s.format])
@@ -215,7 +215,7 @@ impl Editor {
                         ui.label(tr("Resolución"));
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut s.width).range(2..=4096));
-                            ui.label("×");
+                            ui.label(crate::i18n::tr("×"));
                             ui.add(egui::DragValue::new(&mut s.height).range(2..=4096));
                             if ui
                                 .small_button("↔")
@@ -229,7 +229,7 @@ impl Editor {
                             }
                         });
                         ui.end_row();
-                        ui.label("FPS");
+                        ui.label(crate::i18n::tr("FPS"));
                         ui.add(
                             egui::DragValue::new(&mut s.fps)
                                 .range(1..=if s.format == 5 { 100 } else { 240 }),
@@ -241,7 +241,7 @@ impl Editor {
                         ui.horizontal(|ui| {
                             let count = crate::animation::movie_count(&self.doc);
                             ui.add(egui::DragValue::new(&mut s.first).range(1..=count));
-                            ui.label("–");
+                            ui.label(crate::i18n::tr("–"));
                             ui.add(egui::DragValue::new(&mut s.last).range(s.first..=count));
                         });
                         ui.end_row();
@@ -252,17 +252,17 @@ impl Editor {
                             ui.add(egui::Slider::new(&mut s.quality, 0..=40));
                             ui.end_row();
                             ui.label(tr("Códec"));
-                            ui.label("H.264 / yuv420p");
+                            ui.label(crate::i18n::tr("H.264 / yuv420p"));
                             ui.end_row();
                         }
                         3 => {
                             ui.label(tr("Códec"));
-                            ui.label("MPEG-4 / AVI");
+                            ui.label(crate::i18n::tr("MPEG-4 / AVI"));
                             ui.end_row();
                         }
                         4 => {
                             ui.label(tr("Códec"));
-                            ui.label("Apple ProRes 422 HQ");
+                            ui.label(crate::i18n::tr("Apple ProRes 422 HQ"));
                             ui.end_row();
                         }
                         5 => {
@@ -273,7 +273,7 @@ impl Editor {
                             ui.add(egui::DragValue::new(&mut s.loops).range(0..=100));
                             ui.end_row();
                             ui.label(tr("Tramado"));
-                            ui.checkbox(&mut s.dither, "Sierra");
+                            ui.checkbox(&mut s.dither, crate::i18n::tr("Sierra"));
                             ui.end_row();
                         }
                         _ => {}
@@ -288,7 +288,7 @@ impl Editor {
                 ));
             }
             if s.format != 1 {
-                ui.collapsing("FFmpeg", |ui| {
+                ui.collapsing(crate::i18n::tr("FFmpeg"), |ui| {
                     ui.label(tr("FFmpeg incluido: no requiere descarga."));
                     ui.text_edit_singleline(&mut self.studio.prefs.ffmpeg);
                     if ui.button(tr("Buscar FFmpeg…")).clicked() {

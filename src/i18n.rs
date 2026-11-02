@@ -1,12 +1,175 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-static SPANISH: AtomicBool = AtomicBool::new(false);
+//! Embedded UI catalogues. Locale is per UI thread; no network is used at runtime.
+use serde::{Deserialize, Serialize};
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Language {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "es")]
+    Spanish,
+    #[serde(rename = "de")]
+    German,
+    #[serde(rename = "fr")]
+    French,
+    #[serde(rename = "it")]
+    Italian,
+    #[serde(rename = "pt-BR")]
+    PortugueseBrazil,
+    #[serde(rename = "pt-PT")]
+    PortuguesePortugal,
+    #[serde(rename = "ru")]
+    Russian,
+    #[serde(rename = "zh-CN")]
+    ChineseSimplified,
+    #[serde(rename = "ja")]
+    Japanese,
+    #[serde(rename = "ko")]
+    Korean,
+}
+impl Language {
+    pub const ALL: [Self; 11] = [
+        Self::English,
+        Self::Spanish,
+        Self::German,
+        Self::French,
+        Self::Italian,
+        Self::PortugueseBrazil,
+        Self::PortuguesePortugal,
+        Self::Russian,
+        Self::ChineseSimplified,
+        Self::Japanese,
+        Self::Korean,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Spanish => "Español",
+            Self::German => "Deutsch",
+            Self::French => "Français",
+            Self::Italian => "Italiano",
+            Self::PortugueseBrazil => "Português (Brasil)",
+            Self::PortuguesePortugal => "Português (Portugal)",
+            Self::Russian => "Русский",
+            Self::ChineseSimplified => "简体中文",
+            Self::Japanese => "日本語",
+            Self::Korean => "한국어",
+        }
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Spanish => "es",
+            Self::German => "de",
+            Self::French => "fr",
+            Self::Italian => "it",
+            Self::PortugueseBrazil => "pt-BR",
+            Self::PortuguesePortugal => "pt-PT",
+            Self::Russian => "ru",
+            Self::ChineseSimplified => "zh-CN",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+        }
+    }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.id() == id)
+    }
+    fn font_index(self) -> u32 {
+        match self {
+            Self::Korean => 1,
+            Self::ChineseSimplified => 2,
+            _ => 0,
+        }
+    }
+}
+thread_local! {static LOCALE:std::cell::Cell<Language>=const{std::cell::Cell::new(Language::English)};}
+pub fn set_locale(locale: Language) {
+    LOCALE.with(|v| v.set(locale));
+}
+#[cfg(test)]
 pub fn set_language(spanish: bool) {
-    SPANISH.store(spanish, Ordering::Relaxed);
+    set_locale(if spanish {
+        Language::Spanish
+    } else {
+        Language::English
+    });
+}
+pub fn locale() -> Language {
+    LOCALE.with(|l| l.get())
+}
+static CATALOGUES: std::sync::LazyLock<Vec<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| {
+        [
+            include_str!("../assets/locales/en.json"),
+            include_str!("../assets/locales/es.json"),
+            include_str!("../assets/locales/de.json"),
+            include_str!("../assets/locales/fr.json"),
+            include_str!("../assets/locales/it.json"),
+            include_str!("../assets/locales/pt-BR.json"),
+            include_str!("../assets/locales/pt-PT.json"),
+            include_str!("../assets/locales/ru.json"),
+            include_str!("../assets/locales/zh-CN.json"),
+            include_str!("../assets/locales/ja.json"),
+            include_str!("../assets/locales/ko.json"),
+        ]
+        .into_iter()
+        .map(|s| serde_json::from_str(s).expect("validated embedded UI catalogue"))
+        .collect()
+    });
+pub fn catalogue(language: Language) -> &'static std::collections::HashMap<String, String> {
+    &CATALOGUES[language as usize]
 }
 pub fn tr(text: &str) -> &str {
-    if SPANISH.load(Ordering::Relaxed) {
-        return text;
+    let language = locale();
+    catalogue(language)
+        .get(text)
+        .map(String::as_str)
+        .unwrap_or_else(|| {
+            if language == Language::Spanish {
+                text
+            } else {
+                english(text)
+            }
+        })
+}
+pub fn deserialize_language<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Language>, D::Error> {
+    let code = Option::<String>::deserialize(d)?;
+    Ok(code.and_then(|s| Language::from_id(&s)))
+}
+/// Preserve placeholders in dynamic application messages without translating user data.
+pub fn message(template: &str, args: &[(&str, String)]) -> String {
+    let mut result = tr(template).to_owned();
+    for (name, value) in args {
+        result = result.replace(&format!("{{{name}}}"), value);
     }
+    result
+}
+pub fn ensure_fonts(ctx: &eframe::egui::Context, language: Language) {
+    use eframe::egui::{FontData, FontDefinitions, FontFamily};
+    let index = language.font_index();
+    let key = eframe::egui::Id::unique("libretoon-cjk-font-index");
+    if ctx.data(|d| d.get_temp::<u32>(key)) == Some(index) {
+        return;
+    }
+    let mut fonts = FontDefinitions::default();
+    let mut font = FontData::from_static(include_bytes!("../assets/fonts/NotoSansCJK-Regular.ttc"));
+    font.index = index;
+    fonts
+        .font_data
+        .insert("libretoon-cjk".into(), std::sync::Arc::new(font));
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("libretoon-cjk".into());
+    }
+    ctx.set_fonts(fonts);
+    ctx.data_mut(|d| d.insert_temp(key, index));
+}
+
+pub fn english(text: &str) -> &str {
     match text {
         "Archivo" => "File",
         "Edición" => "Edit",

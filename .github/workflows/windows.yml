@@ -69,6 +69,8 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/libretoon.exe dist/
           Copy-Item assets dist/assets -Recurse
+          # CJK font data is embedded in the EXE; retain its license, avoid a second copy.
+          Remove-Item dist/assets/fonts/NotoSansCJK-Regular.ttc
           Copy-Item LICENSE dist/
           @"
           LibreToon for Windows x64

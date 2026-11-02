@@ -114,7 +114,7 @@ impl Editor {
                 .add(
                     egui::Slider::new(&mut self.width, 0.1..=100.)
                         .text(crate::i18n::tr("Grosor"))
-                        .suffix(" px"),
+                        .suffix(crate::i18n::tr(" px")),
                 )
                 .changed()
             {
