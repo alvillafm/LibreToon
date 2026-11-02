@@ -57,11 +57,11 @@ impl ExportSettings {
         Ok(path)
     }
 }
-fn hidden(command: &mut Command) {
+fn hidden(_command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        _command.creation_flags(0x08000000);
     }
 }
 pub fn ffmpeg_path(configured: &str) -> PathBuf {
@@ -378,6 +378,15 @@ fn run_export(
     progress: Arc<AtomicUsize>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    if s.format > 5
+        || s.first == 0
+        || s.first > s.last
+        || s.last > crate::animation::movie_count(doc)
+        || !(1..=240).contains(&s.fps)
+        || (s.format != 1 && (!(2..=4096).contains(&s.width) || !(2..=4096).contains(&s.height)))
+    {
+        return Err("Parámetros de exportación fuera de rango".into());
+    }
     if s.format == 1 {
         if s.svg_sequence {
             for f in s.first..=s.last {
@@ -494,11 +503,7 @@ fn run_export(
         )
     })?;
     let mut stderr = child.stderr.take().unwrap();
-    let log = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
+    let log = std::thread::spawn(move || read_log(&mut stderr));
     let mut input = child.stdin.take().unwrap();
     let ctx = egui::Context::default();
     let mut cache = crate::paint::RenderCache::default();
@@ -884,5 +889,36 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Drain stderr fully to avoid pipe deadlocks, retaining only the last 64 KiB.
+fn read_log(reader: &mut impl Read) -> String {
+    let mut tail = Vec::new();
+    let mut block = [0u8; 4096];
+    loop {
+        match reader.read(&mut block) {
+            Ok(0) => break,
+            Ok(n) => {
+                if tail.len() + n > 65536 {
+                    let remove = tail.len() + n - 65536;
+                    tail.drain(..remove);
+                }
+                tail.extend_from_slice(&block[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+#[cfg(test)]
+mod audit_log_tests {
+    #[test]
+    fn ffmpeg_logs_are_drained_with_bounded_storage() {
+        let mut bytes = std::io::Cursor::new(vec![b'x'; 300000]);
+        let result = super::read_log(&mut bytes);
+        assert_eq!(bytes.position(), 300000);
+        assert_eq!(result.len(), 65536);
     }
 }

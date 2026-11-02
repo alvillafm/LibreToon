@@ -288,6 +288,12 @@ pub fn interpolate(a: &Mark, b: &Mark, t: f32, curve: &Curve) -> Mark {
     if let (Some(first), Some(last)) = (out.style.instance.as_mut(), b.style.instance.as_ref()) {
         first.first = (first.first as f32 * (1. - t) + last.first as f32 * t).round() as usize;
     }
+    let identity = [1., 1., 1., 1., 0., 0., 0., 0.];
+    if a.style.instance_color.is_some() || b.style.instance_color.is_some() {
+        let first = a.style.instance_color.unwrap_or(identity);
+        let last = b.style.instance_color.unwrap_or(identity);
+        out.style.instance_color = Some(std::array::from_fn(|i| first[i] * (1. - t) + last[i] * t));
+    }
     out
 }
 pub fn span(layer: &Layer, frame: usize) -> Option<&Tween> {
@@ -309,6 +315,10 @@ pub fn segment(layer: &Layer, frame: usize) -> Option<(usize, usize, &Tween)> {
     (a < b).then_some((a, b, span))
 }
 pub fn marks(layer: &Layer, frame: usize) -> SharedVec<Mark> {
+    if layer.frames.is_empty() {
+        return Default::default();
+    }
+    let frame = frame.min(layer.frames.len() - 1);
     if layer.key(frame) {
         return layer.frames[frame].clone();
     }

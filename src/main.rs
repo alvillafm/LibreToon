@@ -6,6 +6,8 @@ mod animation_tests;
 mod brush;
 mod bucket;
 mod canvas;
+#[cfg(test)]
+mod compat_tests;
 mod design;
 mod document;
 mod documents;
@@ -18,6 +20,7 @@ mod fla_zip;
 mod i18n;
 mod inspector;
 mod library;
+mod loading;
 mod mannequin;
 mod paint;
 mod recovery;
@@ -38,6 +41,7 @@ mod vector;
 mod visual_controls;
 mod width;
 mod workspace;
+mod xfl;
 use document::{Document, Mark};
 use eframe::egui::{self, Color32};
 use std::{
@@ -46,6 +50,8 @@ use std::{
 };
 
 struct Editor {
+    loader: loading::Loader,
+    import_report_open: bool,
     rigging: rig_ui::RigEditor,
     assets: library::LibraryState,
     hub: documents::Hub,
@@ -97,11 +103,18 @@ struct Editor {
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         design::theme(&cc.egui_ctx);
+        #[cfg(not(test))]
         let recovery = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
             .join("Trazo")
             .join("recovery.json");
+        #[cfg(test)]
+        let recovery = std::env::temp_dir().join(format!(
+            "libretoon-startup-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let hub = documents::Hub::default();
         let recovered = if hub.has_sessions() {
             None
@@ -119,6 +132,8 @@ impl Editor {
         }
         .into();
         let mut editor = Self {
+            loader: Default::default(),
+            import_report_open: false,
             rigging: Default::default(),
             assets: Default::default(),
             hub,
@@ -187,7 +202,7 @@ impl Editor {
     }
     fn save_project(&mut self, save_as: bool) {
         self.finish_pending_pen();
-        let target = if save_as || self.path.is_none() {
+        let target = if save_as || self.path.is_none() || self.doc.extras.imported {
             rfd::FileDialog::new()
                 .add_filter("Adobe Animate / LibreToon", &["fla"])
                 .set_file_name("animacion.fla")
@@ -196,8 +211,14 @@ impl Editor {
             self.path.clone()
         };
         if let Some(path) = target {
-            match write_document(&path, &self.project_document()) {
+            let mut saved = self.project_document();
+            saved.extras.imported = false;
+            match write_document(&path, &saved) {
                 Ok(()) => {
+                    self.doc.extras.imported = false;
+                    for (parent, _, _, _) in &mut self.feature.symbol_stack {
+                        parent.extras.imported = false;
+                    }
                     self.status = "Proyecto guardado".into();
                     self.path = Some(path);
                     self.saved_document();
@@ -216,6 +237,7 @@ impl Editor {
         }
     }
     fn history(&mut self, redo: bool) {
+        self.rigging.cancel_gesture();
         let entry = if redo {
             self.redo.pop()
         } else {
@@ -264,6 +286,7 @@ fn write_document(path: &std::path::Path, doc: &Document) -> Result<(), String> 
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_open(&ctx);
         self.drawing.pen.update(&ctx);
         if let Some(error) = self.recovery_writer.take_error() {
             self.status = format!("No se pudo recuperar sesión: {error}");

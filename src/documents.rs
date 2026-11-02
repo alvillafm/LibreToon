@@ -138,8 +138,26 @@ fn catalogue_path() -> PathBuf {
 }
 
 pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let d: Document = if bytes.starts_with(b"PK") {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(256 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 256 * 1024 * 1024 {
+        return Err("El proyecto supera el límite de lectura de 256 MiB".into());
+    }
+    let json = bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'{');
+    let d: Document = if bytes.starts_with(b"PK")
+        || path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
+            && !json
+    {
         crate::fla::decode(&bytes)?
     } else {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?
@@ -250,6 +268,7 @@ impl Editor {
         self.hub.home = true;
     }
     fn park_document(&mut self) {
+        self.finish_rig_gesture();
         self.finish_pending_pen();
         self.playing = false;
         self.draft = None;
@@ -299,6 +318,7 @@ impl Editor {
             self.hub.active = Some(i);
         }
         self.hub.home = false;
+        self.import_report_open = false;
         self.drawing.scroll_to_tab = true;
         self.style_transaction = false;
         self.profile_transaction = false;
@@ -348,11 +368,10 @@ impl Editor {
             self.activate_document(i);
             return;
         }
-        match read_project(&path) {
-            Ok(doc) => self.add_document(doc, Some(path)),
-            Err(e) => self.status = format!("No se pudo abrir: {e}"),
-        }
+        self.status = "Abriendo proyecto…".into();
+        self.loader.request(path);
     }
+
     pub fn persist_documents(&mut self) {
         if let Err(e) = self.hub.persist() {
             self.status = format!("No se pudo guardar la lista de proyectos: {e}");

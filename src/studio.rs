@@ -104,6 +104,7 @@ pub struct Studio {
     pub onion_before: usize,
     pub onion_after: usize,
     pub clipboard: Vec<Mark>,
+    pub clipboard_symbols: crate::shared::SharedVec<crate::features::Symbol>,
     pub horizontal: bool,
     pub vertical: bool,
     pub rulers: bool,
@@ -155,6 +156,7 @@ impl Studio {
             onion_before: 1,
             onion_after: 1,
             clipboard: vec![],
+            clipboard_symbols: Default::default(),
             horizontal: false,
             vertical: false,
             rulers: false,
@@ -400,6 +402,7 @@ impl Editor {
         if ids.is_empty() {
             return;
         }
+        self.studio.clipboard_symbols = self.doc.extras.symbols.clone();
         self.studio.clipboard = ids
             .iter()
             .filter_map(|&(l, m)| {
@@ -420,6 +423,32 @@ impl Editor {
             self.recover();
         }
     }
+    fn clipboard_symbol_matches(
+        &self,
+        id: u64,
+        checked: &mut std::collections::HashSet<u64>,
+    ) -> bool {
+        if !checked.insert(id) {
+            return true;
+        }
+        let Some(source) = self.studio.clipboard_symbols.iter().find(|s| s.id == id) else {
+            return false;
+        };
+        let Some(target) = self.doc.extras.symbols.iter().find(|s| s.id == id) else {
+            return false;
+        };
+        // A shared definition is the common same-document path, with no serialization.
+        if source.layers.identity() != target.layers.identity() {
+            if serde_json::to_vec(source).ok() != serde_json::to_vec(target).ok() {
+                return false;
+            }
+        }
+        crate::features::symbol_graph(std::slice::from_ref(source))
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .all(|child| self.clipboard_symbol_matches(*child, checked))
+    }
     pub fn paste_selection(&mut self) {
         if self.studio.clipboard.is_empty()
             || !self.doc.layers[self.layer].visible
@@ -435,20 +464,61 @@ impl Editor {
             .filter_map(|m| m.style.instance.as_ref())
             .any(|i| {
                 !self.doc.extras.symbols.iter().any(|s| s.id == i.symbol)
+                    || !self
+                        .clipboard_symbol_matches(i.symbol, &mut std::collections::HashSet::new())
                     || !self.symbol_insert_allowed(i.symbol)
             })
         {
             self.status =
-                "No se pueden pegar símbolos ausentes o recursivos en este documento".into();
+                "No se pueden pegar símbolos ausentes, incompatibles o recursivos en este documento".into();
+            return;
+        }
+        let bound = self
+            .studio
+            .clipboard
+            .iter()
+            .filter(|m| {
+                self.doc
+                    .extras
+                    .rig
+                    .bindings
+                    .iter()
+                    .any(|b| b.target == m.style.track)
+            })
+            .count();
+        if self.doc.extras.rig.bindings.len() + bound > 512 {
+            self.status = "No se pueden duplicar más instancias articuladas (límite: 512)".into();
             return;
         }
         self.finish_pending_pen();
         self.checkpoint();
+        let mut pasted_marks = vec![];
+        for mark in &self.studio.clipboard {
+            let mut pasted = mark.clone();
+            let track = crate::features::id();
+            if let Some(mut binding) = self
+                .doc
+                .extras
+                .rig
+                .bindings
+                .iter()
+                .find(|b| b.target == mark.style.track)
+                .cloned()
+            {
+                binding.target = track;
+                self.doc.extras.rig.bindings.push(binding);
+                for bone in &mut self.doc.extras.rig.bones {
+                    if bone.targets.contains(&mark.style.track) {
+                        bone.targets.push(track);
+                    }
+                }
+            }
+            pasted.style.track = track;
+            pasted_marks.push(pasted);
+        }
         let frame = &mut self.doc.layers[self.layer].frames[self.frame];
         let start = frame.len();
-        for mark in &self.studio.clipboard {
-            frame.push(mark.clone());
-        }
+        frame.extend(pasted_marks);
         self.canvas.selected = (start..frame.len()).map(|m| (self.layer, m)).collect();
         self.activate_tool(Tool::Select);
         self.recover();
@@ -995,6 +1065,7 @@ impl Editor {
         self.studio.preferences_open = open;
     }
     pub fn notice_ui(&mut self, ctx: &egui::Context) {
+        self.import_notice_ui(ctx);
         if self.studio.last_status.is_empty() {
             self.studio.last_status = self.status.clone();
             return;
