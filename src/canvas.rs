@@ -253,7 +253,26 @@ impl Canvas {
             let marks = evaluated
                 .entry(l)
                 .or_insert_with(|| crate::animation::marks(&e.doc.layers[l], e.frame));
-            for p in vertices(&marks[m]) {
+            let mark = &marks[m];
+            let points = mark
+                .style
+                .instance
+                .as_ref()
+                .and_then(|instance| {
+                    let bounds = e.symbol_bounds(instance.symbol)?;
+                    Some(
+                        [
+                            bounds.left_top(),
+                            bounds.right_top(),
+                            bounds.right_bottom(),
+                            bounds.left_bottom(),
+                        ]
+                        .map(|point| crate::rig::point(instance.matrix, point))
+                        .to_vec(),
+                    )
+                })
+                .unwrap_or_else(|| vertices(mark));
+            for p in points {
                 r.extend_with(Pos2::ZERO + rotate(p.to_vec2(), -self.orientation));
             }
         }
@@ -396,6 +415,17 @@ fn paint_mark(
     crate::paint::draw(p, m, v, ghost, selected, cache)
 }
 impl Editor {
+    pub(crate) fn selection_hit(&self, mark: &Mark, point: Pos2, tolerance: f32) -> bool {
+        if let Some(instance) = &mark.style.instance
+            && let Some(bounds) = self.symbol_bounds(instance.symbol)
+            && let Some(inverse) = crate::rig::inverse(instance.matrix)
+        {
+            let local = crate::rig::point(inverse, point);
+            return bounds.contains(local);
+        }
+        hit(mark, point, tolerance)
+    }
+
     pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
         let mut state = std::mem::take(&mut self.canvas);
         state.stage_size = Vec2::new(self.doc.width as f32, self.doc.height as f32);
@@ -434,6 +464,29 @@ impl Editor {
         let stage_view = state.view(area);
         let mut view = self.camera_view(stage_view);
         let ctx = ui.ctx().clone();
+        if let Some(id) = response.dnd_release_payload::<crate::media::MediaDrag>()
+            && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
+            && area.contains(pos)
+        {
+            self.place_media_at(id.0, self.frame, None, Some(view.world(pos)));
+        }
+        if ctx.input(|i| i.pointer.primary_released()) {
+            let drag = self.assets.drag.take();
+            if !self.playing
+                && let Some(crate::library::Asset::Symbol(id)) = drag
+                && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
+                && area.contains(pos)
+                && ui.rect_contains_pointer(area)
+            {
+                self.canvas = state;
+                self.insert_symbol_at(id, Some(view.world(pos)));
+                state = std::mem::take(&mut self.canvas);
+            }
+        }
+        let video_input = self.video_transform_input(ui, area, view);
+        if video_input {
+            state.clear_selection();
+        }
         let wants_keyboard = ctx.egui_wants_keyboard_input()
             || self.animation.scenes_open
             || self.animation.picker.is_some()
@@ -454,7 +507,7 @@ impl Editor {
         ) = ctx.input(|i| {
             (
                 i.pointer.interact_pos(),
-                i.pointer.button_pressed(PointerButton::Primary),
+                !video_input && i.pointer.button_pressed(PointerButton::Primary),
                 i.pointer.button_pressed(PointerButton::Middle),
                 i.pointer.button_down(PointerButton::Primary),
                 i.pointer.button_down(PointerButton::Middle),
@@ -511,7 +564,8 @@ impl Editor {
             state = std::mem::take(&mut self.canvas);
             ctx.request_repaint();
         }
-        if response.double_clicked()
+        if !video_input
+            && response.double_clicked()
             && matches!(self.tool, Tool::Select | Tool::Object | Tool::Transform)
         {
             if let Some(screen) = pointer {
@@ -522,14 +576,17 @@ impl Editor {
                     .iter()
                     .rev()
                     .filter(|l| l.visible && !l.options.locked)
-                    .flat_map(|l| l.frames[self.frame].iter().rev())
-                    .find_map(|m| {
-                        m.style
-                            .instance
-                            .as_ref()
-                            .filter(|_| crate::vector::contains_fill(m, world))
-                            .map(|i| i.symbol)
-                    });
+                    .find_map(|layer| {
+                        let marks = crate::animation::marks(layer, self.frame);
+                        marks
+                            .iter()
+                            .rev()
+                            .find(|mark| self.selection_hit(mark, world, 0.))
+                            .map(|mark| {
+                                mark.style.instance.as_ref().map(|instance| instance.symbol)
+                            })
+                    })
+                    .flatten();
                 if let Some(id) = symbol {
                     self.canvas = state;
                     self.enter_symbol(id);
@@ -856,7 +913,7 @@ impl Editor {
                         && bounds.contains(world)
                         && (self.tool == Tool::Transform
                             || state.selected.iter().any(|&(l, m)| {
-                                hit(
+                                self.selection_hit(
                                     &crate::animation::marks(&self.doc.layers[l], self.frame)[m],
                                     world,
                                     4. / view.scale,
@@ -881,7 +938,7 @@ impl Editor {
                             .enumerate()
                             .rev()
                         {
-                            if !force_marquee && hit(mark, world, 6. / view.scale) {
+                            if !force_marquee && self.selection_hit(mark, world, 6. / view.scale) {
                                 found = Some((l, m));
                                 break 'layers;
                             }
@@ -891,7 +948,17 @@ impl Editor {
                         if self.tool == Tool::Object {
                             self.select_connected_object(&mut state, id, shift);
                         }
-                        if self.tool == Tool::Select && !state.selected.contains(&id) {
+                        if self.tool == Tool::Select
+                            && !state.selected.contains(&id)
+                            && self.doc.layers[id.0].frames[self.frame][id.1]
+                                .style
+                                .instance
+                                .is_none()
+                            && self.doc.layers[id.0].frames[self.frame][id.1]
+                                .style
+                                .media_image
+                                .is_none()
+                        {
                             let wants_stroke = stroke_hit(
                                 &self.doc.layers[id.0].frames[self.frame][id.1],
                                 world,
@@ -1493,9 +1560,13 @@ impl Editor {
         .into_iter()
         .peekable();
         for l in 0..self.doc.layers.len() {
+            self.paint_media_video(&painter, view, self.frame, l);
             self.paint_mannequin_layer(&painter, view, l);
             while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
                 let (layer, m, mark) = marks.next().unwrap();
+                if self.paint_media_image(&painter, view, &mark) {
+                    continue;
+                }
                 paint_mark(
                     &painter,
                     &mark,
@@ -1506,6 +1577,8 @@ impl Editor {
                 );
             }
         }
+        self.paint_media_video(&painter, view, self.frame, self.doc.layers.len());
+        self.paint_video_selection(&painter, view);
         self.paint_mannequin_gizmo(&painter, view);
         self.text_canvas_ui(ui, &painter, view);
         if self.tool == Tool::Text {

@@ -9,10 +9,30 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 #[derive(Clone, Copy)]
 enum Row {
     Layer(usize, usize),
+    Media(usize),
     Folder(usize, usize),
     Cameras,
     Rigging,
 }
+#[derive(Clone, Copy)]
+struct TimelineViewport {
+    cell: f32,
+    offset: f32,
+    area: Rect,
+    panning: bool,
+}
+
+impl Default for TimelineViewport {
+    fn default() -> Self {
+        Self {
+            cell: 22.,
+            offset: 0.,
+            area: Rect::NOTHING,
+            panning: false,
+        }
+    }
+}
+
 fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
     if depth > 200 {
         return;
@@ -661,17 +681,61 @@ impl Editor {
                     all.push(Row::Rigging);
                 }
                 rows(self, None, 0, &mut all);
+                for (index, track) in self.doc.extras.media.tracks.iter().enumerate().rev() {
+                    let slot = track.slot.min(self.doc.layers.len());
+                    let at = all.iter().position(|row| matches!(row, Row::Layer(layer, _) if *layer < slot)).unwrap_or(all.len());
+                    all.insert(at, Row::Media(index));
+                }
                 let mut layer_menu_action = None;
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.feature.frame_drag = None; }
                 if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
                 let mut target = None;
                 let mut camera_target = None;
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                let viewport_id = ui.scope_id().with("timeline-viewport");
+                let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
+                let label_w = 300.;
+                let mut scroll = egui::ScrollArea::both().id_salt("timeline-scroll").auto_shrink([false, false])
+                    .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
+                let mut offset = viewport.offset;
+                let (hover, delta, wheel, middle_pressed, middle_down) = ui.input(|i| (
+                    i.pointer.hover_pos(), i.pointer.delta().x,
+                    if i.modifiers.shift { 0. } else { i.smooth_scroll_delta().y },
+                    i.pointer.button_pressed(egui::PointerButton::Middle),
+                    i.pointer.button_down(egui::PointerButton::Middle),
+                ));
+                let over = hover.is_some_and(|pos| viewport.area.contains(pos)) && ui.rect_contains_pointer(viewport.area);
+                if middle_pressed { viewport.panning = over; }
+                viewport.panning &= middle_down;
+                if viewport.panning {
+                    offset -= delta;
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+                if over && wheel != 0. {
+                    let x = hover.unwrap().x - viewport.area.left();
+                    let old = viewport.cell;
+                    viewport.cell = (old * (wheel * 0.004).exp()).clamp(6., 66.);
+                    let frame = ((offset + x - label_w) / old).max(0.);
+                    offset += frame * (viewport.cell - old);
+                    ui.input_mut(|i| i.smooth_scroll_delta.y = 0.);
+                }
+                if viewport.panning || (over && wheel != 0.) {
+                    scroll = scroll.horizontal_scroll_offset(offset.max(0.));
+                }
+                let original_style = ui.style().clone();
+                let cell = viewport.cell;
+                let output = ui.scope(|ui| {
+                    ui.style_mut().spacing.scroll = egui::style::ScrollStyle {
+                        bar_width: 12.,
+                        ..egui::style::ScrollStyle::solid()
+                    };
+                    let accent = crate::themes::accent();
+                    let visuals = ui.visuals_mut();
+                    visuals.widgets.inactive.bg_fill = accent.gamma_multiply(0.75);
+                    visuals.widgets.hovered.bg_fill = accent;
+                    visuals.widgets.active.bg_fill = accent;
+                    scroll.show(ui, |ui| {
+                        ui.set_style(original_style);
                         let count = self.doc.layers[0].frames.len();
-                        let label_w = 300.;
-                        let cell = 22.;
                         let row_h = 28.;
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
@@ -719,7 +783,7 @@ impl Editor {
                             ui.scope_id().with("scrub"),
                             Sense::click_and_drag(),
                         );
-                        if scrub.is_pointer_button_down_on() {
+                        if scrub.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) {
                             if let Some(p) = scrub.interact_pointer_pos() {
                                 self.frame = (((p.x - r.left() - label_w) / cell).floor().max(0.)
                                     as usize)
@@ -795,7 +859,7 @@ impl Editor {
                                             self.recover();
                                         }
                                     });
-                                    if response.drag_started() {
+                                    if response.drag_started_by(egui::PointerButton::Primary) {
                                         self.feature.row_drag = Some((true, index));
                                     }
                                     if label.contains(
@@ -806,7 +870,27 @@ impl Editor {
                                         target = Some((true, index));
                                     }
                                 }
+                                Row::Media(index) => {
+                                    let track_at = |pos: Pos2| {
+                                        if pos.x < r.left() + label_w || !clip.contains(pos) { return None; }
+                                        let index = ((pos.y - r.top() - 24.) / row_h).floor();
+                                        if index < 0. { return None; }
+                                        match all.get(index as usize) {
+                                            Some(Row::Media(track)) => Some((*track, r.top() + 24. + index * row_h)),
+                                            _ => None,
+                                        }
+                                    };
+                                    self.media_track_ui(ui, index, Rect::from_min_size(label.min, Vec2::new(r.width(), row_h)), label_w, cell, count, track_at);
+                                }
                                 Row::Layer(l, depth) => {
+                                    let drop = ui.interact(label, ui.scope_id().with(("media-layer-drop", l)), Sense::hover());
+                                    if drop.container_contains_pointer() && ui.input(|i| i.pointer.primary_released())
+                                        && egui::DragAndDrop::has_payload_of_type::<crate::media::MediaTrackDrag>(ui.ctx())
+                                        && let Some(track) = egui::DragAndDrop::take_payload::<crate::media::MediaTrackDrag>(ui.ctx())
+                                    {
+                                        let above = ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| pos.y < label.center().y);
+                                        self.move_media_track(track.0, l + usize::from(above), None);
+                                    }
                                     painter.rect_filled(
                                         label,
                                         0.,
@@ -919,7 +1003,7 @@ impl Editor {
                                             self.renaming_layer = Some(l);
                                             self.rename_focus = true;
                                         }
-                                        if response.drag_started() {
+                                        if response.drag_started_by(egui::PointerButton::Primary) {
                                             self.feature.row_drag = Some((false, l));
                                         }
                                         if response.secondary_clicked() { self.layer = l; }
@@ -1040,6 +1124,13 @@ impl Editor {
                                         );
                                         let editable = !self.doc.layers[l].options.locked
                                             && self.doc.layers[l].options.mannequin.is_none();
+                                        if let Some(asset) = response.dnd_release_payload::<crate::media::MediaDrag>() {
+                                            if editable {
+                                                self.layer = l;
+                                                self.place_media(asset.0, f, None);
+                                            }
+                                        }
+
                                         if response.clicked() || response.secondary_clicked() {
                                             self.layer = l;
                                             self.frame = f;
@@ -1049,7 +1140,7 @@ impl Editor {
                                             self.feature.frame_selection = Some((l,
                                                 if ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
                                         }
-                                        if response.drag_started() && editable {
+                                        if response.drag_started_by(egui::PointerButton::Primary) && editable {
                                             let (mut a, mut b) = self.feature.frame_selection
                                                 .filter(|s| s.0 == l && (s.1.min(s.2)..=s.1.max(s.2)).contains(&f))
                                                 .map_or((f, f), |s| (s.1.min(s.2), s.1.max(s.2)));
@@ -1229,17 +1320,52 @@ impl Editor {
                                                 color.gamma_multiply(0.5),
                                             );
                                         }
-                                        if ui
-                                            .interact(
-                                                Rect::from_center_size(q, Vec2::new(cell, row_h)),
-                                                ui.scope_id().with(("rig-frame", f)),
-                                                Sense::click(),
-                                            )
-                                            .clicked()
-                                        {
+                                        let response = ui.interact(
+                                            Rect::from_center_size(q, Vec2::new(cell, row_h)),
+                                            ui.scope_id().with(("rig-frame", f)),
+                                            if keyed { Sense::click_and_drag() } else { Sense::click() },
+                                        );
+                                        if response.clicked() || response.secondary_clicked() {
                                             self.frame = f;
                                             self.playing = false;
                                         }
+                                        if self.frame == f {
+                                            painter.rect_stroke(response.rect.shrink(1.), 2., Stroke::new(2., color), egui::StrokeKind::Inside);
+                                        }
+                                        if response.dragged_by(egui::PointerButton::Primary) && f > 0 {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                            if let Some(pos) = response.interact_pointer_pos()
+                                                && (pos.y - q.y).abs() < row_h / 2. && pos.x >= r.left() + label_w
+                                            {
+                                                let to = ((pos.x - r.left() - label_w) / cell) as usize;
+                                                if to < count {
+                                                    let dest = Rect::from_min_size(Pos2::new(r.left() + label_w + to as f32 * cell, y), Vec2::new(cell, row_h));
+                                                    timeline_drop_marker(&painter, dest, self.rig_key_drop_valid(f, to));
+                                                }
+                                            }
+                                        }
+                                        if response.drag_stopped_by(egui::PointerButton::Primary) && let Some(pos) = response.interact_pointer_pos()
+                                            && (pos.y - q.y).abs() < row_h / 2. && pos.x >= r.left() + label_w
+                                        {
+                                            let to = ((pos.x - r.left() - label_w) / cell) as usize;
+                                            self.move_rig_keys(f, to);
+                                        }
+                                        response.context_menu(|ui| {
+                                            for (action, icon, label) in [
+                                                (0, Icon::Keyframe, "Clave"),
+                                                (4, Icon::Trash, "Eliminar clave actual"),
+                                            ] {
+                                                let enabled = if action == 4 { keyed && f > 0 } else {
+                                                    (self.tool == crate::canvas::Tool::Bones && self.rigging.bone.is_some())
+                                                        || (self.tool == crate::canvas::Tool::Puppet && self.rigging.pin.is_some())
+                                                };
+                                                if button(ui, icon, label, label, false, enabled).clicked() {
+                                                    self.frame = f;
+                                                    if action == 4 { self.delete_rig_keys(f); } else { self.rig_key_action(action); }
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
                                     }
                                 }
                                 Row::Cameras => {
@@ -1341,15 +1467,47 @@ impl Editor {
                                                 Stroke::NONE,
                                             ));
                                         }
-                                        if response.drag_started()
-                                            && self.feature.camera_trim.is_none()
+                                        let key_drag = response.id.with("key-drag");
+                                        let local_at = |pos: Pos2| {
+                                            ((pos.x - rect.left()) / cell).floor() as usize
+                                        };
+                                        if response.drag_started_by(egui::PointerButton::Primary) && self.feature.camera_trim.is_none() {
+                                            let source = ui.input(|i| i.pointer.press_origin())
+                                                .filter(|pos| pos.y >= rect.bottom() - 9.)
+                                                .map(local_at)
+                                                .filter(|frame| c.animation.keys.iter().any(|key| key.frame == *frame));
+                                            if let Some(source) = source {
+                                                ui.data_mut(|data| data.insert_temp(key_drag, source));
+                                            } else {
+                                                self.feature.camera_drag = Some(index);
+                                            }
+                                        }
+                                        if response.dragged_by(egui::PointerButton::Primary)
+                                            && let Some(from) = ui.data(|data| data.get_temp::<usize>(key_drag))
+                                            && let Some(pos) = response.interact_pointer_pos()
+                                            && rect.contains(pos)
                                         {
-                                            self.feature.camera_drag = Some(index);
+                                            let to = local_at(pos);
+                                            let dest = Rect::from_min_size(Pos2::new(rect.left() + to as f32 * cell, rect.top()), Vec2::new(cell, rect.height()));
+                                            let valid = from > 0 && to > 0 && to != from && !c.animation.keys.iter().any(|key| key.frame == to);
+                                            timeline_drop_marker(&painter, dest, valid);
+                                        }
+                                        if response.drag_stopped_by(egui::PointerButton::Primary) {
+                                            let source = ui.data_mut(|data| data.remove_temp::<usize>(key_drag));
+                                            if let (Some(from), Some(pos)) = (source, response.interact_pointer_pos())
+                                                && rect.contains(pos)
+                                            {
+                                                self.move_camera_key(c.id, from, local_at(pos));
+                                            }
                                         }
                                         if rect.contains(ui.input(|i| {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         })) {
                                             camera_target = Some(index);
+                                            if let Some(source) = self.feature.camera_drag.filter(|&source| source != index) {
+                                                let x = if source < index { rect.right() } else { rect.left() };
+                                                painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(3., crate::themes::accent()));
+                                            }
                                         }
                                         if response.clicked() || response.secondary_clicked() {
                                             self.feature.selected_camera = Some(c.id);
@@ -1403,14 +1561,14 @@ impl Editor {
                                         if index + 1 < self.doc.extras.cameras.len() {
                                             let edge = Rect::from_center_size(
                                                 rect.right_center(),
-                                                Vec2::new(10., row_h),
+                                                Vec2::new((cell * 0.4).clamp(3., 10.), row_h),
                                             );
                                             let handle = ui.interact(
                                                 edge,
                                                 ui.scope_id().with(("camera-edge", c.id)),
                                                 Sense::drag(),
                                             );
-                                            if handle.hovered() || handle.dragged() {
+                                            if handle.hovered() || handle.dragged_by(egui::PointerButton::Primary) {
                                                 ui.ctx().set_cursor_icon(
                                                     egui::CursorIcon::ResizeHorizontal,
                                                 );
@@ -1419,7 +1577,7 @@ impl Editor {
                                                     Stroke::new(3., crate::themes::accent()),
                                                 );
                                             }
-                                            if handle.drag_started() {
+                                            if handle.drag_started_by(egui::PointerButton::Primary) {
                                                 self.checkpoint();
                                                 self.feature.camera_drag = None;
                                                 self.feature.camera_trim =
@@ -1435,6 +1593,38 @@ impl Editor {
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                            && clip.contains(pos) && r.contains(pos)
+                        {
+                            let local_row = ((pos.y - r.top() - 24.) / row_h).floor();
+                            let row = (local_row >= 0.).then(|| all.get(local_row as usize)).flatten();
+                            let top = r.top() + 24. + local_row * row_h;
+                            let x = r.left() + label_w;
+                            if let Some(Row::Layer(layer, _)) = row
+                                && pos.x >= x
+                                && egui::DragAndDrop::has_payload_of_type::<crate::media::MediaDrag>(ui.ctx())
+                            {
+                                let frame = ((pos.x - x) / cell).floor() as usize;
+                                if frame < count {
+                                    let dest = Rect::from_min_size(Pos2::new(x + frame as f32 * cell, top), Vec2::new(cell, row_h));
+                                    let options = &self.doc.layers[*layer].options;
+                                    timeline_drop_marker(&painter, dest, !options.locked && options.mannequin.is_none());
+                                }
+                            }
+                            if pos.x < x && let Some(row) = row {
+                                if matches!(row, Row::Layer(..) | Row::Media(..))
+                                    && egui::DragAndDrop::has_payload_of_type::<crate::media::MediaTrackDrag>(ui.ctx())
+                                {
+                                    let y = if pos.y < top + row_h / 2. || matches!(row, Row::Media(..)) { top } else { top + row_h };
+                                    painter.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], Stroke::new(3., crate::themes::accent()));
+                                } else if self.feature.row_drag.is_some() && target.is_some()
+                                    && matches!(row, Row::Layer(..) | Row::Folder(..))
+                                {
+                                    let dest = Rect::from_min_size(Pos2::new(r.left(), top), Vec2::new(label_w, row_h));
+                                    timeline_drop_marker(&painter, dest, true);
                                 }
                             }
                         }
@@ -1456,7 +1646,11 @@ impl Editor {
                             [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
                             Stroke::new(1., crate::themes::accent()),
                         );
-                    });
+                    })
+                }).inner;
+                viewport.area = output.inner_rect;
+                viewport.offset = output.state.clamped_offset().x;
+                ui.data_mut(|data| data.insert_temp(viewport_id, viewport));
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
                     if let Some(drag) = self.feature.frame_drag.take() {
@@ -1570,6 +1764,110 @@ impl Editor {
         }
         r.animation.keys = keys.into();
     }
+    fn rig_key_drop_valid(&self, from: usize, to: usize) -> bool {
+        if from == 0 || to == 0 || from == to || to >= self.doc.layers[0].frames.len() {
+            return false;
+        }
+        let rig = &self.doc.extras.rig;
+        let tracks = rig
+            .bones
+            .iter()
+            .map(|bone| key_slots(bone.keys.iter().map(|key| key.frame), from, to))
+            .chain(
+                rig.bindings
+                    .iter()
+                    .flat_map(|binding| binding.pins.iter())
+                    .map(|pin| key_slots(pin.keys.iter().map(|key| key.frame), from, to)),
+            );
+        let mut has_source = false;
+        for (source, destination) in tracks {
+            if source && destination {
+                return false;
+            }
+            has_source |= source;
+        }
+        has_source
+    }
+
+    fn move_rig_keys(&mut self, from: usize, to: usize) {
+        if !self.rig_key_drop_valid(from, to) {
+            return;
+        }
+        self.checkpoint();
+        let rig = &mut self.doc.extras.rig;
+        for bone in &mut rig.bones {
+            if let Some(key) = bone.keys.iter_mut().find(|key| key.frame == from) {
+                key.frame = to;
+                bone.keys.sort_by_key(|key| key.frame);
+            }
+        }
+        for binding in &mut rig.bindings {
+            for pin in &mut binding.pins {
+                if let Some(key) = pin.keys.iter_mut().find(|key| key.frame == from) {
+                    key.frame = to;
+                    pin.keys.sort_by_key(|key| key.frame);
+                }
+            }
+        }
+        self.frame = to;
+        self.playing = false;
+        self.recover();
+    }
+
+    fn delete_rig_keys(&mut self, frame: usize) {
+        if frame == 0 {
+            return;
+        }
+        self.checkpoint();
+        let rig = &mut self.doc.extras.rig;
+        for bone in &mut rig.bones {
+            bone.keys.retain(|key| key.frame != frame);
+        }
+        for binding in &mut rig.bindings {
+            for pin in &mut binding.pins {
+                pin.keys.retain(|key| key.frame != frame);
+            }
+        }
+        self.recover();
+    }
+
+    fn move_camera_key(&mut self, id: u64, from: usize, to: usize) {
+        let Some(index) = self
+            .doc
+            .extras
+            .cameras
+            .iter()
+            .position(|camera| camera.id == id)
+        else {
+            return;
+        };
+        let camera = &self.doc.extras.cameras[index];
+        if from == 0
+            || to == 0
+            || from == to
+            || to >= camera.duration
+            || key_slots(camera.animation.keys.iter().map(|key| key.frame), from, to)
+                != (true, false)
+        {
+            return;
+        }
+        self.checkpoint();
+        let camera = &mut self.doc.extras.cameras[index];
+        if let Some(key) = camera
+            .animation
+            .keys
+            .iter_mut()
+            .find(|key| key.frame == from)
+        {
+            key.frame = to;
+            camera.animation.keys.sort_by_key(|key| key.frame);
+        }
+        self.frame = camera.start + to;
+        self.feature.selected_camera = Some(id);
+        self.playing = false;
+        self.recover();
+    }
+
     pub fn camera_timeline_action(&mut self, id: u64, frame: usize, action: usize) {
         let Some(index) = self.doc.extras.cameras.iter().position(|c| c.id == id) else {
             return;
@@ -1660,5 +1958,187 @@ impl Editor {
         self.normalize_cameras();
         self.frame = frame.min(self.doc.layers[0].frames.len() - 1);
         self.recover();
+    }
+}
+
+fn key_slots(frames: impl Iterator<Item = usize>, from: usize, to: usize) -> (bool, bool) {
+    frames.fold((false, false), |(source, destination), frame| {
+        (source || frame == from, destination || frame == to)
+    })
+}
+
+#[cfg(test)]
+mod special_track_tests {
+    use super::*;
+    use crate::{
+        animation::{CameraAnimation, CameraKey},
+        features::Camera,
+        rig::BoneKey,
+    };
+
+    #[test]
+    fn moving_special_track_keys_preserves_values_and_protects_occupied_frames() {
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        editor.recovery = std::env::temp_dir().join(format!(
+            "libretoon-special-tracks-{}.json",
+            std::process::id()
+        ));
+        editor.set_duration(2.);
+        editor.add_bone(Pos2::ZERO, Pos2::new(50., 0.), None);
+        let id = editor.doc.extras.rig.bones[0].id;
+        editor.doc.extras.rig.set_bone_key(
+            id,
+            BoneKey {
+                frame: 3,
+                translation: [15., -4.],
+                ..Default::default()
+            },
+        );
+        editor.doc.extras.rig.set_bone_key(
+            id,
+            BoneKey {
+                frame: 8,
+                ..Default::default()
+            },
+        );
+        editor.move_rig_keys(3, 8);
+        assert_eq!(editor.doc.extras.rig.bones[0].keys[1].frame, 3);
+        editor.move_rig_keys(3, 5);
+        let key = &editor.doc.extras.rig.bones[0].keys[1];
+        assert_eq!((key.frame, key.translation), (5, [15., -4.]));
+        editor.delete_rig_keys(5);
+        assert_eq!(editor.doc.extras.rig.bones[0].keys.len(), 2);
+
+        editor.doc.extras.cameras.push(Camera {
+            id: 9,
+            name: "Camera".into(),
+            start: 0,
+            duration: 12,
+            center: [10., 20.],
+            zoom: 1.,
+            angle: 0.,
+            animation: CameraAnimation {
+                keys: vec![
+                    CameraKey {
+                        frame: 0,
+                        center: [10., 20.],
+                        zoom: 1.,
+                        angle: 0.,
+                    },
+                    CameraKey {
+                        frame: 3,
+                        center: [20., 40.],
+                        zoom: 2.,
+                        angle: 0.,
+                    },
+                ]
+                .into(),
+                ..Default::default()
+            },
+        });
+        editor.move_camera_key(9, 3, 12);
+        assert_eq!(editor.doc.extras.cameras[0].animation.keys[1].frame, 3);
+        editor.move_camera_key(9, 3, 7);
+        let camera = &editor.doc.extras.cameras[0];
+        assert_eq!(camera.duration, 12);
+        assert_eq!(
+            (
+                camera.animation.keys[1].frame,
+                camera.animation.keys[1].zoom
+            ),
+            (7, 2.)
+        );
+        assert_eq!(editor.frame, 7);
+        editor.history(false);
+        assert_eq!(editor.doc.extras.cameras[0].animation.keys[1].frame, 3);
+    }
+}
+
+pub(crate) fn timeline_drop_marker(painter: &egui::Painter, rect: Rect, valid: bool) {
+    let color = if valid {
+        crate::themes::accent()
+    } else {
+        Color32::LIGHT_RED
+    };
+    painter.rect_filled(rect, 2., color.gamma_multiply(0.23));
+    painter.rect_stroke(
+        rect.shrink(1.),
+        2.,
+        Stroke::new(2., color),
+        egui::StrokeKind::Inside,
+    );
+}
+
+#[cfg(test)]
+mod viewport_input_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_zooms_at_the_pointer_and_middle_drag_pans_without_scrubbing() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        editor.doc.layers[0].frames.resize(100, Default::default());
+        let mut time = 0.;
+        let mut render = |editor: &mut Editor, events| {
+            time += 1. / 60.;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200., 760.))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| editor.sequencer(ui),
+            );
+            output.textures_delta.clear();
+            let label = |number: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| {
+                        if let egui::Shape::Text(text) = &shape.shape
+                            && text.galley.job.text == number
+                            && text.pos.y > 520.
+                        {
+                            return Some(text.visual_bounding_rect().center());
+                        }
+                        None
+                    })
+                    .unwrap_or_else(|| panic!("timeline ruler label {number} missing"))
+            };
+            [label("5"), label("10")]
+        };
+        render(&mut editor, vec![]);
+        let before = render(&mut editor, vec![]);
+        let pointer = before[0];
+        let zoomed = render(
+            &mut editor,
+            vec![
+                egui::Event::PointerMoved(pointer),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    delta: Vec2::new(0., 120.),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(zoomed[1].x - zoomed[0].x > before[1].x - before[0].x);
+        let press = egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Middle,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let before_pan = render(&mut editor, vec![press]);
+        let panned = render(
+            &mut editor,
+            vec![egui::Event::PointerMoved(pointer - Vec2::new(40., 0.))],
+        );
+        assert!(panned[1].x < before_pan[1].x - 20.);
+        assert_eq!(editor.frame, 0);
     }
 }

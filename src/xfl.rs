@@ -108,6 +108,7 @@ fn parse(xml: &str) -> Result<Node, String> {
 struct Importer<'a> {
     archive: crate::fla_zip::Archive<'a>,
     names: HashMap<String, u64>,
+    bitmaps: HashMap<String, (u64, u32, u32)>,
     kinds: HashMap<u64, String>,
     warnings: BTreeSet<String>,
     next_track: u64,
@@ -147,6 +148,25 @@ impl Importer<'_> {
                     }
                 }
                 out
+            }
+            "DOMBitmapInstance" => {
+                let name = n.a("libraryItemName").unwrap_or("");
+                let Some(&(id, width, height)) = self.bitmaps.get(name) else {
+                    self.warn(format!(
+                        "DOMBitmapInstance sin imagen incrustada compatible: {name}"
+                    ));
+                    return Ok(vec![]);
+                };
+                let mut mark = Mark {
+                    points: vec![[0., 0.], [width as f32, height as f32]].into(),
+                    rectangle: true,
+                    closed: true,
+                    stroke: false,
+                    fill: Some([0, 0, 0, 0]),
+                    ..Default::default()
+                };
+                mark.style.media_image = Some(id);
+                vec![mark]
             }
             "DOMSymbolInstance" => {
                 let name = n.a("libraryItemName").unwrap_or("");
@@ -642,6 +662,80 @@ fn color_hex(s: &str) -> Result<[u8; 4], String> {
         255,
     ])
 }
+// Animate's lossless bitmap entries store little-endian dimensions and
+// rows of ABGR pixels, optionally wrapped in length-prefixed zlib blocks.
+fn decode_bitmap(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    use std::io::Read;
+    let invalid = || "Datos de imagen XFL no válidos".to_owned();
+    if !bytes.starts_with(&[3, 5]) {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|_| invalid())?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(4096);
+        limits.max_image_height = Some(4096);
+        reader.limits(limits);
+        let image = reader.decode().map_err(|_| invalid())?.to_rgba8();
+        let (w, h) = image.dimensions();
+        return Ok((image.into_raw(), w, h));
+    }
+    let word = |at: usize| -> Option<usize> {
+        Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize)
+    };
+    let stride = word(2).ok_or_else(invalid)?;
+    let w = word(4).ok_or_else(invalid)?;
+    let h = word(6).ok_or_else(invalid)?;
+    if !(1..=4096).contains(&w)
+        || !(1..=4096).contains(&h)
+        || stride < w * 4
+        || stride * h > 64 * 1024 * 1024
+    {
+        return Err(invalid());
+    }
+    let alpha = bytes.get(24).ok_or_else(invalid)? & 1 != 0;
+    let expected = stride * h;
+    let mut raw = Vec::new();
+    match bytes.get(25) {
+        Some(0) => raw.extend_from_slice(bytes.get(26..26 + expected).ok_or_else(invalid)?),
+        Some(1) => {
+            let mut compressed = Vec::new();
+            let mut at = 26;
+            loop {
+                let n = word(at).ok_or_else(invalid)?;
+                at += 2;
+                if n == 0 {
+                    break;
+                }
+                compressed.extend_from_slice(bytes.get(at..at + n).ok_or_else(invalid)?);
+                at += n;
+            }
+            flate2::read::ZlibDecoder::new(compressed.as_slice())
+                .take(expected as u64 + 1)
+                .read_to_end(&mut raw)
+                .map_err(|_| invalid())?;
+        }
+        _ => return Err(invalid()),
+    }
+    if raw.len() != expected {
+        return Err(invalid());
+    }
+    let mut pixels = Vec::with_capacity(w * h * 4);
+    for row in raw.chunks_exact(stride) {
+        for p in row[..w * 4].chunks_exact(4) {
+            let a = if alpha { p[0] } else { 255 };
+            let channel = |value: u8| {
+                if a == 0 {
+                    0
+                } else {
+                    ((value as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8
+                }
+            };
+            pixels.extend([channel(p[3]), channel(p[2]), channel(p[1]), a]);
+        }
+    }
+    Ok((pixels, w as u32, h as u32))
+}
+
 pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     let root = parse(xml)?;
     if root.name != "DOMDocument" {
@@ -659,6 +753,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     let mut imp = Importer {
         archive: crate::fla_zip::Archive::new(bytes)?,
         names: HashMap::new(),
+        bitmaps: HashMap::new(),
         kinds: HashMap::new(),
         warnings: BTreeSet::new(),
         next_track: 1,
@@ -669,6 +764,43 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     }
     if fps.fract() != 0. {
         imp.warn(format!("FPS fraccionarios {fps} redondeados a {}", doc.fps));
+    }
+    if let Some(media) = root.child("media") {
+        let mut used = 0usize;
+        for item in &media.children {
+            let name = item.a("name").unwrap_or("").trim();
+            if item.name != "DOMBitmapItem" {
+                imp.warn(format!("Recurso {} omitido: {name}", item.name));
+                continue;
+            }
+            if name.is_empty() || imp.bitmaps.contains_key(name) {
+                continue;
+            }
+            let candidates = [
+                item.a("bitmapDataHRef").map(|href| format!("bin/{href}")),
+                item.a("href").map(|href| format!("LIBRARY/{href}")),
+                item.a("href").map(str::to_owned),
+            ];
+            let decoded = candidates.into_iter().flatten().find_map(|path| {
+                imp.archive
+                    .entry(path.as_bytes())
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| decode_bitmap(&bytes).ok())
+            });
+            if let Some((pixels, width, height)) = decoded
+                && used.saturating_add(pixels.len()) <= 256 * 1024 * 1024
+            {
+                used += pixels.len();
+                let asset = crate::media::bitmap(pixels, width, height, name.into());
+                imp.bitmaps.insert(name.into(), (asset.id, width, height));
+                doc.extras.media.assets.push(asset);
+            } else {
+                imp.warn(format!(
+                    "Imagen incrustada ausente, no compatible o demasiado grande: {name}"
+                ));
+            }
+        }
     }
     let background = root.a("backgroundColor").map(color_hex).transpose()?;
     let mut definitions = vec![];
@@ -875,13 +1007,10 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     if doc.extras.scenes.len() == 1 {
         doc.extras.scenes.clear();
     }
-    if root.child("media").is_some() {
-        imp.warn("Imágenes, vídeo y audio incrustados no importados; se conserva el resto de la animación");
-    }
     let mut scripts = vec![];
     root.descendants("ActionScript", &mut scripts);
     if !scripts.is_empty() {
-        imp.warn("ActionScript, JavaScript y audio se omiten; no se ejecuta código");
+        imp.warn("ActionScript y JavaScript se omiten; no se ejecuta código");
     }
     doc.extras.import_warnings = imp.warnings.into_iter().collect();
     doc.extras.imported = true;
@@ -943,5 +1072,44 @@ impl crate::Editor {
         let mut open = true;
         eframe::egui::Window::new(crate::i18n::tr("Importación de Animate · Compatibilidad")).open(&mut open).default_width(520.).show(ctx,|ui|{ui.label(crate::i18n::tr("Se ha abierto la animación compatible. El código ActionScript/JavaScript no se ejecuta."));ui.label(crate::i18n::tr("Guardar creará una copia de LibreToon para conservar el FLA original."));ui.separator();eframe::egui::ScrollArea::vertical().max_height(350.).show(ui,|ui|{if self.doc.extras.import_warnings.is_empty(){ui.label(crate::i18n::tr("No se han detectado elementos omitidos en el contenido compatible."));}for message in &self.doc.extras.import_warnings{ui.label(format!("• {message}"));}});});
         self.import_report_open = open;
+    }
+}
+
+#[cfg(test)]
+mod bitmap_tests {
+    use super::*;
+
+    #[test]
+    fn embedded_animate_bitmap_becomes_a_positioned_media_instance() {
+        use std::io::Write;
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(&[255, 0, 0, 255, 128, 0, 64, 0]).unwrap();
+        let block = zlib.finish().unwrap();
+        let mut data = vec![0u8; 26];
+        data[..8].copy_from_slice(&[3, 5, 8, 0, 2, 0, 1, 0]);
+        data[24..26].copy_from_slice(&[1, 1]);
+        data.extend_from_slice(&(block.len() as u16).to_le_bytes());
+        data.extend_from_slice(&block);
+        data.extend_from_slice(&[0, 0]);
+        let xml = r#"<DOMDocument width="12" height="12"><media>
+          <DOMBitmapItem name="photo.png" bitmapDataHRef="photo.dat"/>
+        </media><timelines><DOMTimeline><layers><DOMLayer name="Art"><frames>
+          <DOMFrame index="0"><elements><DOMBitmapInstance libraryItemName="photo.png">
+            <matrix><Matrix tx="3" ty="5"/></matrix>
+          </DOMBitmapInstance></elements></DOMFrame>
+        </frames></DOMLayer></layers></DOMTimeline></timelines></DOMDocument>"#;
+        let archive = crate::fla_zip::pack(&[
+            ("DOMDocument.xml", xml.as_bytes().to_vec()),
+            ("bin/photo.dat", data),
+        ]);
+        let doc = crate::fla::decode(&archive).unwrap();
+        let mark = &doc.layers[0].frames[0][0];
+        let id = mark.style.media_image.unwrap();
+        let (size, rgba) = doc.extras.media.pixels(id).unwrap();
+        assert_eq!(size, [2, 1]);
+        assert_eq!(rgba, [255, 0, 0, 255, 0, 128, 0, 128]);
+        assert_eq!(crate::vector::control_bounds(mark).min, Pos2::new(3., 5.));
+        let reopened = crate::fla::decode(&crate::fla::encode(&doc).unwrap()).unwrap();
+        assert_eq!(reopened.extras.media.pixels(id).unwrap().1, rgba);
     }
 }

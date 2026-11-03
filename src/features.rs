@@ -128,6 +128,8 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_image: Option<u64>,
     pub instance_color: Option<[f32; 8]>,
     pub guide: bool,
     pub text: Option<Box<crate::typography::TextSpec>>,
@@ -174,6 +176,8 @@ pub fn default_extras(extras: &ProjectExtras) -> bool {
         && extras.import_warnings.is_empty()
         && extras.rig.is_empty()
         && extras.library.is_empty()
+        && extras.media.assets.is_empty()
+        && extras.media.tracks.is_empty()
         && extras.scenes.is_empty()
         && extras.active_scene == 0
         && extras.folders.is_empty()
@@ -238,6 +242,7 @@ pub struct ProjectExtras {
     pub import_warnings: SharedVec<String>,
     pub rig: crate::rig::Rig,
     pub library: crate::library::Library,
+    pub media: crate::media::MediaLibrary,
     pub scenes: SharedVec<crate::animation::Scene>,
     pub active_scene: usize,
     pub folders: SharedVec<Folder>,

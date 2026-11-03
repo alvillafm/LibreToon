@@ -64,7 +64,7 @@ fn h264_crf(quality: u32) -> u32 {
         40 - (quality.clamp(1, 99) - 1) * 30 / 98
     }
 }
-fn hidden(_command: &mut Command) {
+pub(crate) fn hidden(_command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -551,7 +551,7 @@ fn run_export(
             .as_nanos(),
         s.extension()
     ));
-    let mut command = Command::new(ffmpeg);
+    let mut command = Command::new(&ffmpeg);
     hidden(&mut command);
     command.args([
         "-hide_banner",
@@ -569,8 +569,13 @@ fn run_export(
         &s.fps.to_string(),
         "-i",
         "pipe:0",
-        "-an",
     ]);
+    let _audio = if s.format == 5 {
+        command.arg("-an");
+        Vec::new()
+    } else {
+        crate::media::audio_export(doc, &mut command, s.first - 1, s.last, s.format == 3, true)?
+    };
     match s.format {
         0 | 2 => {
             command.args([
@@ -649,6 +654,7 @@ fn run_export(
     let mut cache = crate::paint::RenderCache::default();
     let count = s.last - s.first + 1;
     let frames = ((count as f64 * s.fps as f64 / doc.fps as f64).ceil() as usize).max(1);
+    let mut video = crate::media::VideoExport::default();
     let result = (|| {
         for index in 0..frames {
             if cancel.load(Ordering::Relaxed) {
@@ -656,7 +662,8 @@ fn run_export(
             }
             let frame = s.first - 1
                 + ((index as u64 * doc.fps as u64 / s.fps as u64) as usize).min(count - 1);
-            let pixels = raster(doc, frame, w, h, &ctx, &mut cache);
+            let video_frames = video.frames(doc, frame, &ffmpeg)?;
+            let pixels = raster_with_video(doc, frame, w, h, &ctx, &mut cache, &video_frames);
             input.write_all(&pixels).map_err(|e| e.to_string())?;
             progress.store((index + 1) * 950 / frames, Ordering::Relaxed);
         }
@@ -707,6 +714,18 @@ pub(crate) fn raster(
     ctx: &egui::Context,
     cache: &mut crate::paint::RenderCache,
 ) -> Vec<u8> {
+    raster_with_video(doc, frame, w, h, ctx, cache, &[])
+}
+
+fn raster_with_video(
+    doc: &Document,
+    frame: usize,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+) -> Vec<u8> {
     let size = Vec2::new(w as f32, h as f32);
     let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
     let view = View {
@@ -725,8 +744,32 @@ pub(crate) fn raster(
             let painter = ui
                 .painter()
                 .with_clip_rect(Rect::from_min_size(Pos2::ZERO, size));
-            for (_, _, m) in crate::animation::resolve_movie(doc, frame, true) {
-                crate::paint::draw(&painter, &m, view, false, false, Some(cache));
+            let mut clips = video.iter().enumerate().peekable();
+            let paint_video = |index, clip: &crate::media::ExportVideoFrame| {
+                if let Some(mesh) = crate::media::image_mesh(
+                    &clip.mark,
+                    view,
+                    egui::TextureId::User(u64::MAX - index as u64),
+                ) {
+                    painter.add(mesh);
+                }
+            };
+            for (layer, _, m) in crate::animation::resolve_movie(doc, frame, true) {
+                while clips.peek().is_some_and(|(_, clip)| clip.slot <= layer) {
+                    let (index, clip) = clips.next().unwrap();
+                    paint_video(index, clip);
+                }
+                if let Some(id) = m.style.media_image
+                    && let Some(mesh) =
+                        crate::media::image_mesh(&m, view, egui::TextureId::User(id))
+                {
+                    painter.add(mesh);
+                } else {
+                    crate::paint::draw(&painter, &m, view, false, false, Some(cache));
+                }
+            }
+            for (index, clip) in clips {
+                paint_video(index, clip);
             }
         },
     );
@@ -738,19 +781,39 @@ pub(crate) fn raster(
             let clip = primitive
                 .clip_rect
                 .intersect(Rect::from_min_size(Pos2::ZERO, size));
+            let texture = match mesh.texture_id {
+                egui::TextureId::User(id) => video
+                    .get((u64::MAX - id) as usize)
+                    .map(|clip| {
+                        let pixels = &clip.pixels;
+                        (
+                            [pixels.width() as usize, pixels.height() as usize],
+                            pixels.as_raw().as_slice(),
+                        )
+                    })
+                    .or_else(|| doc.extras.media.pixels(id)),
+                _ => None,
+            };
             for t in mesh.indices.chunks_exact(3) {
                 let vertices = [
                     mesh.vertices[t[0] as usize],
                     mesh.vertices[t[1] as usize],
                     mesh.vertices[t[2] as usize],
                 ];
-                triangle(&mut pixels, w, h, vertices, clip);
+                triangle(&mut pixels, w, h, vertices, clip, texture);
             }
         }
     }
     pixels
 }
-fn triangle(pixels: &mut [u8], w: u32, h: u32, v: [egui::epaint::Vertex; 3], clip: Rect) {
+fn triangle(
+    pixels: &mut [u8],
+    w: u32,
+    h: u32,
+    v: [egui::epaint::Vertex; 3],
+    clip: Rect,
+    texture: Option<([usize; 2], &[u8])>,
+) {
     let [a, b, c] = v.map(|v| v.pos);
     let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
     let det = cross(b - a, c - a);
@@ -789,11 +852,25 @@ fn triangle(pixels: &mut [u8], w: u32, h: u32, v: [egui::epaint::Vertex; 3], cli
             if !covered {
                 continue;
             }
+            let offset = ((y * w + x) * 3) as usize;
+            if let Some(([width, height], data)) = texture {
+                let u = (0..3).map(|i| weights[i] * v[i].uv.x).sum::<f32>();
+                let v = (0..3).map(|i| weights[i] * v[i].uv.y).sum::<f32>();
+                let ix = ((u * width as f32) as usize).min(width - 1);
+                let iy = ((v * height as f32) as usize).min(height - 1);
+                let sample = &data[(iy * width + ix) * 4..][..4];
+                let alpha = sample[3] as f32 / 255.;
+                for channel in 0..3 {
+                    pixels[offset + channel] = (sample[channel] as f32 * alpha
+                        + pixels[offset + channel] as f32 * (1. - alpha))
+                        .round() as u8;
+                }
+                continue;
+            }
             let alpha = (0..3)
                 .map(|i| weights[i] * colors[i][3] as f32)
                 .sum::<f32>()
                 / 255.;
-            let offset = ((y * w + x) * 3) as usize;
             for channel in 0..3 {
                 let source = (0..3)
                     .map(|i| weights[i] * colors[i][channel] as f32)
@@ -808,6 +885,39 @@ fn triangle(pixels: &mut [u8], w: u32, h: u32, v: [egui::epaint::Vertex; 3], cli
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn video_slot_controls_compositing_above_and_below_animation() {
+        let mut doc = crate::fresh_document();
+        doc.width = 8;
+        doc.height = 8;
+        doc.layers[0].frames[0].push(crate::Mark {
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            fill: Some([0, 0, 255, 255]),
+            points: vec![[0., 0.], [8., 8.]].into(),
+            ..Default::default()
+        });
+        let pixels = std::sync::Arc::new(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        let mut clip = crate::media::ExportVideoFrame {
+            slot: 0,
+            mark: crate::media::video_mark(&doc, Vec2::splat(4.)),
+            pixels,
+        };
+        let ctx = egui::Context::default();
+        let mut cache = crate::paint::RenderCache::default();
+        let center = (4 * 8 + 4) * 3;
+        let below = raster_with_video(&doc, 0, 8, 8, &ctx, &mut cache, std::slice::from_ref(&clip));
+        assert_eq!(&below[center..center + 3], &[0, 0, 255]);
+        clip.slot = 1;
+        let above = raster_with_video(&doc, 0, 8, 8, &ctx, &mut cache, &[clip]);
+        assert_eq!(&above[center..center + 3], &[255, 0, 0]);
+    }
+
     #[test]
     fn movie_raster_respects_scene_order_motion_and_camera_keys() {
         let mut d = crate::fresh_document();

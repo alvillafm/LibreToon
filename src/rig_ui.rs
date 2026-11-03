@@ -17,6 +17,12 @@ enum Gesture {
     Bone {
         id: u64,
     },
+    MoveBone {
+        id: u64,
+        grab: Pos2,
+        translation: Vec2,
+        parent_angle: f32,
+    },
     Pin {
         target: u64,
         id: u64,
@@ -441,7 +447,28 @@ impl Editor {
                     if let Some(id) = id {
                         self.rigging.bone = Some(id);
                         self.checkpoint();
-                        self.rigging.drag = Some(Gesture::Bone { id });
+                        self.rigging.drag = if ui.input(|i| i.modifiers.shift) {
+                            let bone = self
+                                .doc
+                                .extras
+                                .rig
+                                .bones
+                                .iter()
+                                .find(|bone| bone.id == id)
+                                .unwrap();
+                            let key = rig::bone_value(bone, self.frame);
+                            Some(Gesture::MoveBone {
+                                id,
+                                grab: world,
+                                translation: vector::pos(key.translation).to_vec2(),
+                                parent_angle: bone
+                                    .parent
+                                    .and_then(|parent| poses.get(&parent))
+                                    .map_or(0., |pose| pose.angle),
+                            })
+                        } else {
+                            Some(Gesture::Bone { id })
+                        };
                     }
                 }
             } else {
@@ -510,6 +537,22 @@ impl Editor {
                                 self.doc.extras.rig.set_bone_key(id, key);
                             }
                         }
+                    }
+                }
+                Gesture::MoveBone {
+                    id,
+                    grab,
+                    translation,
+                    parent_angle,
+                } => {
+                    if let Some(bone) = self.doc.extras.rig.bones.iter().find(|bone| bone.id == id)
+                    {
+                        let mut key = rig::bone_value(bone, self.frame);
+                        let moved =
+                            translation + crate::canvas::rotate(world - grab, -parent_angle);
+                        key.translation = vector::xy(moved.to_pos2());
+                        key.frame = self.frame;
+                        self.doc.extras.rig.set_bone_key(id, key);
                     }
                 }
                 Gesture::Pin { target, id } => {
@@ -786,7 +829,7 @@ impl Editor {
                 ui,
                 Icon::Rotate,
                 "Posar",
-                "FK rota · IK mueve",
+                "FK rota · IK mueve · Mayús+arrastrar desplaza",
                 !self.rigging.create && !self.rigging.paint,
                 true,
             )
@@ -958,6 +1001,18 @@ impl Editor {
         pose_changed |= ui
             .add(egui::Slider::new(&mut value.scale, 0.1..=10.).text(tr("Escala")))
             .changed();
+        ui.horizontal(|ui| {
+            ui.label(tr("Posición"));
+            for (coordinate, axis) in value.translation.iter_mut().zip(["X ", "Y "]) {
+                pose_changed |= ui
+                    .add(
+                        egui::DragValue::new(coordinate)
+                            .prefix(axis)
+                            .range(-100000.0..=100000.0),
+                    )
+                    .changed();
+            }
+        });
         if pose_changed {
             self.checkpoint();
             value.frame = self.frame;

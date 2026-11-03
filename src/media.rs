@@ -1,0 +1,2176 @@
+use crate::{Editor, canvas::View, features::id, i18n::tr, shared::SharedVec};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
+use serde::{Deserialize, Serialize};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+const ASSET_LIMIT: usize = 64 * 1024 * 1024;
+const LIBRARY_LIMIT: usize = 256 * 1024 * 1024;
+const DEMUXERS: &str =
+    "mov,matroska,avi,mp3,wav,ogg,flac,aac,png_pipe,jpeg_pipe,bmp_pipe,tiff_pipe,webp_pipe,image2";
+type StagedVideo = std::sync::Arc<MediaFile>;
+type VideoFrame = (u64, StagedVideo, image::RgbaImage);
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum Kind {
+    Image,
+    Video,
+    Audio,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Asset {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) folder: Option<u64>,
+    kind: Kind,
+    pub(crate) data: SharedVec<u8>,
+    size: [u32; 2],
+    seconds: f64,
+    #[serde(default)]
+    peaks: SharedVec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Clip {
+    asset: u64,
+    start: usize,
+    offset: usize,
+    length: usize,
+    #[serde(default)]
+    transform: VideoTransform,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+struct VideoTransform {
+    offset: [f32; 2],
+    scale_log2: f32,
+    angle: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Track {
+    id: u64,
+    #[serde(default)]
+    pub(crate) slot: usize,
+    name: String,
+    kind: Kind,
+    clips: SharedVec<Clip>,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    locked: bool,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct MediaLibrary {
+    pub(crate) assets: SharedVec<Asset>,
+    pub(crate) tracks: SharedVec<Track>,
+}
+
+#[derive(Default)]
+pub struct MediaEditor {
+    audio_destination: Option<(u64, usize)>,
+    importing: Option<(
+        PathBuf,
+        std::sync::mpsc::Receiver<Vec<Result<Asset, String>>>,
+    )>,
+    audio: AudioPreview,
+    videos: std::collections::HashMap<u64, SceneVideoPreview>,
+    selected_video: Option<u64>,
+    waveform_cache: std::collections::HashMap<u64, SharedVec<u8>>,
+    waveform_job: Option<std::sync::mpsc::Receiver<(u64, SharedVec<u8>)>>,
+    video_drag: Option<(u64, usize, Pos2, VideoTransform)>,
+    video_drag_started: bool,
+    video_drag_modifiers: egui::Modifiers,
+    video_resize_center: Option<Pos2>,
+    library_video: Option<(u64, std::time::Instant)>,
+    library_job: Option<std::sync::mpsc::Receiver<Option<VideoFrame>>>,
+    library_preview: Option<(u64, egui::TextureHandle)>,
+    library_file: Option<(u64, StagedVideo)>,
+    library_request: Option<(u64, usize)>,
+    textures: std::collections::HashMap<u64, egui::TextureHandle>,
+}
+
+#[derive(Default)]
+struct SceneVideoPreview {
+    request: Option<(u64, usize)>,
+    job: Option<std::sync::mpsc::Receiver<Option<VideoFrame>>>,
+    file: Option<(u64, StagedVideo)>,
+    texture: Option<(u64, egui::TextureHandle)>,
+}
+
+#[derive(Clone)]
+pub struct MediaDrag(pub u64);
+
+#[derive(Clone)]
+pub(crate) struct MediaTrackDrag(pub usize);
+
+pub(crate) fn bitmap(data: Vec<u8>, width: u32, height: u32, name: String) -> Asset {
+    Asset {
+        id: id(),
+        name,
+        folder: None,
+        kind: Kind::Image,
+        data: data.into(),
+        size: [width, height],
+        seconds: 0.,
+        peaks: Default::default(),
+    }
+}
+
+fn duration(text: &str) -> Option<f64> {
+    let value = text.split_once("Duration: ")?.1.split(',').next()?.trim();
+    let mut seconds = 0.;
+    for part in value.split(':') {
+        seconds = seconds * 60. + part.parse::<f64>().ok()?;
+    }
+    (seconds.is_finite() && seconds > 0.).then_some(seconds)
+}
+
+impl Editor {
+    fn read_media(path: &Path, ffmpeg_path: &Path) -> Result<Asset, String> {
+        let name = path
+            .file_name()
+            .ok_or("Invalid file name")?
+            .to_string_lossy()
+            .into_owned();
+        let kind = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" | "webp" => Kind::Image,
+            "mp4" | "avi" | "mov" | "mkv" | "webm" => Kind::Video,
+            "wav" | "ogg" | "mp3" | "flac" | "m4a" | "aac" => Kind::Audio,
+            _ => return Err("Unsupported media format".into()),
+        };
+        if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > ASSET_LIMIT as u64 {
+            return Err("Media file exceeds 64 MiB".into());
+        }
+        let ffmpeg = || {
+            let mut command = Command::new(ffmpeg_path);
+            command
+                .args([
+                    "-hide_banner",
+                    "-nostdin",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-format_whitelist",
+                    DEMUXERS,
+                    "-i",
+                ])
+                .arg(path);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            command
+        };
+        let asset = if kind == Kind::Image {
+            let decoded = image::open(path).or_else(|_| {
+                let result = ffmpeg().args(["-frames:v", "1", "-vf", "scale=w=min(iw\\,4096):h=min(ih\\,4096):force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]).output()
+                    .map_err(image::ImageError::IoError)?;
+                image::load_from_memory(&result.stdout)
+            }).map_err(|error| format!("Cannot decode image. JPEG and WebP require FFmpeg: {error}"))?.to_rgba8();
+            if decoded.width() > 4096 || decoded.height() > 4096 {
+                return Err("Image dimensions exceed 4096 pixels".into());
+            }
+            let (w, h) = decoded.dimensions();
+            bitmap(decoded.into_raw(), w, h, name)
+        } else {
+            let output = ffmpeg()
+                .args(["-t", "0", "-f", "null", "-"])
+                .output()
+                .map_err(|e| format!("FFmpeg is required to import video and audio: {e}"))?;
+            let details = String::from_utf8_lossy(&output.stderr);
+            let stream = if kind == Kind::Video {
+                "Video:"
+            } else {
+                "Audio:"
+            };
+            let seconds = duration(&details)
+                .filter(|_| details.contains(stream))
+                .ok_or("Cannot determine media duration or find a compatible stream")?;
+            Asset {
+                id: id(),
+                name,
+                folder: None,
+                kind,
+                data: std::fs::read(path).map_err(|e| e.to_string())?.into(),
+                size: [0; 2],
+                seconds,
+                peaks: if kind == Kind::Audio {
+                    ffmpeg()
+                        .args([
+                            "-map", "0:a:0", "-t", "420", "-ac", "1", "-ar", "8000", "-f", "s16le",
+                            "pipe:1",
+                        ])
+                        .output()
+                        .ok()
+                        .filter(|output| output.status.success())
+                        .map(|output| waveform(&output.stdout))
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                },
+            }
+        };
+        Ok(asset)
+    }
+
+    pub fn media_library_ui(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                self.media.importing.is_none(),
+                egui::Button::new(tr("Importar medios…")),
+            )
+            .clicked()
+        {
+            let files = rfd::FileDialog::new()
+                .add_filter(
+                    tr("Medios"),
+                    &[
+                        "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "mp4", "avi", "mov",
+                        "mkv", "webm", "wav", "ogg", "mp3", "flac", "m4a", "aac",
+                    ],
+                )
+                .pick_files();
+            if let Some(files) = files {
+                let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+                let ctx = ui.ctx().clone();
+                let (send, receive) = std::sync::mpsc::channel();
+                self.media.importing = Some((self.recovery.clone(), receive));
+                std::thread::spawn(move || {
+                    let mut bytes = 0usize;
+                    let results = files
+                        .into_iter()
+                        .map(|path| {
+                            let asset = Self::read_media(&path, &ffmpeg)
+                                .map_err(|error| format!("{}: {error}", path.display()))?;
+                            if bytes.saturating_add(asset.data.len()) > LIBRARY_LIMIT {
+                                return Err("Media library exceeds 256 MiB".into());
+                            }
+                            bytes += asset.data.len();
+                            Ok(asset)
+                        })
+                        .collect();
+                    let _ = send.send(results);
+                    ctx.request_repaint();
+                });
+            }
+        }
+        if self.media.importing.is_some() {
+            ui.spinner();
+        }
+    }
+
+    pub fn clear_media_asset_preview(&mut self) {
+        self.media.library_video = None;
+        self.media.library_preview = None;
+        self.media.library_request = None;
+        self.media.library_job = None;
+        self.media.library_file = None;
+    }
+
+    pub fn media_asset_preview(&mut self, ui: &mut egui::Ui, id: u64) {
+        let Some(asset) = self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .find(|asset| asset.id == id)
+        else {
+            return;
+        };
+        if asset.kind != Kind::Video {
+            self.media.library_video = None;
+            self.media.library_file = None;
+            self.media.library_job = None;
+        }
+        if asset.kind == Kind::Image {
+            let Some((size, pixels)) = self.doc.extras.media.pixels(id) else {
+                return;
+            };
+            let texture = self.media.textures.entry(id).or_insert_with(|| {
+                ui.ctx().load_texture(
+                    format!("media-{id}"),
+                    egui::ColorImage::from_rgba_unmultiplied(size, pixels),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            show_preview(ui, texture);
+        } else if asset.kind == Kind::Video {
+            if self
+                .media
+                .library_video
+                .is_none_or(|(selected, _)| selected != id)
+            {
+                self.media.library_video = Some((id, std::time::Instant::now()));
+                self.media.library_preview = None;
+                self.media.library_request = None;
+                self.media.library_file = None;
+                self.media.library_job = None;
+            }
+            if let Some(job) = &self.media.library_job
+                && let Ok(result) = job.try_recv()
+            {
+                self.media.library_job = None;
+                if let Some((id, file, image)) = result {
+                    self.media.library_file = Some((id, file));
+                    let size = [image.width() as usize, image.height() as usize];
+                    self.media.library_preview = Some((
+                        id,
+                        ui.ctx().load_texture(
+                            "library-video",
+                            egui::ColorImage::from_rgba_unmultiplied(size, &image),
+                            egui::TextureOptions::LINEAR,
+                        ),
+                    ));
+                }
+            }
+            let elapsed = self.media.library_video.unwrap().1.elapsed().as_secs_f64();
+            let duration = asset.seconds.min(3.);
+            let sample = (elapsed.min((duration - 0.15).max(0.)) * 6.) as usize;
+            if self.media.library_job.is_none() && self.media.library_request != Some((id, sample))
+            {
+                self.media.library_request = Some((id, sample));
+                let asset = asset.clone();
+                let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+                let ctx = ui.ctx().clone();
+                let (send, receive) = std::sync::mpsc::channel();
+                self.media.library_job = Some(receive);
+                let cached = self
+                    .media
+                    .library_file
+                    .as_ref()
+                    .filter(|(asset_id, _)| *asset_id == id)
+                    .map(|(_, file)| file.clone());
+                std::thread::spawn(move || {
+                    let result = (|| {
+                        let file = match cached {
+                            Some(file) => file,
+                            None => StagedVideo::new(MediaFile::new(&asset.data).ok()?),
+                        };
+                        let image = decode_video_file(&file, sample as f64 / 6., &ffmpeg)?;
+                        Some((id, file, image))
+                    })();
+                    let _ = send.send(result);
+                    ctx.request_repaint();
+                });
+            }
+            if elapsed < duration {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            if let Some((preview_id, texture)) = &self.media.library_preview
+                && *preview_id == id
+            {
+                show_preview(ui, texture);
+            }
+        } else {
+            ui.label(format!("{:.1} s", asset.seconds));
+        }
+    }
+
+    pub fn paste_media_image(&mut self) -> bool {
+        if self.doc.layers[self.layer].options.locked {
+            return false;
+        }
+        let Ok(image) = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_image())
+        else {
+            return false;
+        };
+        if image.width == 0 || image.height == 0 || image.width > 4096 || image.height > 4096 {
+            self.status = "Clipboard image exceeds supported dimensions".into();
+            return true;
+        }
+        let asset = bitmap(
+            image.bytes.into_owned(),
+            image.width as u32,
+            image.height as u32,
+            tr("Imagen del portapapeles").into(),
+        );
+        if !self.doc.extras.media.can_add(&asset) {
+            self.status = "Media library exceeds 256 MiB".into();
+            return true;
+        }
+        self.checkpoint();
+        self.insert_image(&asset, self.frame, None);
+        self.doc.extras.media.assets.push(asset);
+        self.recover();
+        true
+    }
+
+    fn insert_image(&mut self, asset: &Asset, frame: usize, position: Option<Pos2>) {
+        let size = Vec2::new(asset.size[0] as f32, asset.size[1] as f32);
+        let center = position
+            .unwrap_or_else(|| Pos2::new(self.doc.width as f32 / 2., self.doc.height as f32 / 2.));
+        let rect = Rect::from_center_size(center, size);
+        let mut mark = crate::Mark {
+            points: vec![crate::vector::xy(rect.min), crate::vector::xy(rect.max)].into(),
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            fill: Some([0, 0, 0, 0]),
+            ..Default::default()
+        };
+        mark.style.media_image = Some(asset.id);
+        self.doc.layers[self.layer].frames[frame].push(mark);
+    }
+
+    pub fn paint_media_video(
+        &mut self,
+        painter: &egui::Painter,
+        view: View,
+        frame: usize,
+        slot: usize,
+    ) {
+        let library = &self.doc.extras.media;
+        let layers = self.doc.layers.len();
+        for track in library.tracks.iter().filter(|track| {
+            track.kind == Kind::Video && !track.hidden && track.slot.min(layers) == slot
+        }) {
+            let Some(clip) = track
+                .clips
+                .iter()
+                .find(|clip| frame >= clip.start && frame - clip.start < clip.length)
+            else {
+                continue;
+            };
+            let preview = self.media.videos.entry(track.id).or_default();
+            let current = Some((clip.asset, clip.offset + frame - clip.start));
+            if let Some(job) = &preview.job {
+                match job.try_recv() {
+                    Ok(result) => {
+                        preview.job = None;
+                        if let Some((id, file, image)) = result {
+                            preview.file = Some((id, file));
+                            let size = [image.width() as usize, image.height() as usize];
+                            let color = egui::ColorImage::from_rgba_unmultiplied(size, &image);
+                            preview.texture = Some((
+                                id,
+                                painter.ctx().load_texture(
+                                    "video-preview",
+                                    color,
+                                    egui::TextureOptions::LINEAR,
+                                ),
+                            ));
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => preview.job = None,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            let Some((id, source)) = current else {
+                return;
+            };
+            if preview.job.is_none()
+                && preview.request != current
+                && let Some(asset) = library.assets.iter().find(|asset| asset.id == id)
+            {
+                let asset = asset.clone();
+                let time = source as f64 / self.doc.fps as f64;
+                let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let ctx = painter.ctx().clone();
+                preview.job = Some(receiver);
+                preview.request = current;
+                let cached = preview
+                    .file
+                    .as_ref()
+                    .filter(|(file_id, _)| *file_id == id)
+                    .map(|(_, file)| file.clone());
+                std::thread::spawn(move || {
+                    let frame = (|| {
+                        let file = match cached {
+                            Some(file) => file,
+                            None => StagedVideo::new(MediaFile::new(&asset.data).ok()?),
+                        };
+                        let image = decode_video_file(&file, time, &ffmpeg)?;
+                        Some((id, file, image))
+                    })();
+                    let _ = sender.send(frame);
+                    ctx.request_repaint();
+                });
+            }
+
+            if let Some((preview_id, texture)) = &preview.texture
+                && *preview_id == id
+            {
+                let mark = transformed_video_mark(&self.doc, texture.size_vec2(), clip.transform);
+                if let Some(mesh) = image_mesh(&mark, view, texture.id()) {
+                    painter.add(mesh);
+                }
+            }
+        }
+    }
+
+    fn video_selection_mark(&self, track: &Track, clip: &Clip) -> crate::Mark {
+        let dimensions = self
+            .media
+            .videos
+            .get(&track.id)
+            .and_then(|preview| preview.texture.as_ref())
+            .map_or(
+                Vec2::new(self.doc.width as f32, self.doc.height as f32),
+                |(_, texture)| texture.size_vec2(),
+            );
+        transformed_video_mark(&self.doc, dimensions, clip.transform)
+    }
+
+    pub(crate) fn paint_video_selection(&self, painter: &egui::Painter, view: View) {
+        if self.playing
+            || !matches!(
+                self.tool,
+                crate::canvas::Tool::Select
+                    | crate::canvas::Tool::Object
+                    | crate::canvas::Tool::Transform
+            )
+        {
+            return;
+        }
+        let Some((t, c)) = self
+            .media
+            .selected_video
+            .and_then(|id| self.video_clip_indices(id))
+        else {
+            return;
+        };
+        let track = &self.doc.extras.media.tracks[t];
+        if track.hidden || track.locked {
+            return;
+        }
+        let mark = self.video_selection_mark(track, &track.clips[c]);
+        let points: Vec<_> = crate::canvas::vertices(&mark)
+            .into_iter()
+            .take(4)
+            .map(|point| view.screen(point))
+            .collect();
+        if points.len() < 4 {
+            return;
+        }
+        let accent = crate::themes::accent();
+        painter.add(egui::Shape::closed_line(
+            points.clone(),
+            egui::Stroke::new(1., accent),
+        ));
+        if self.tool == crate::canvas::Tool::Transform {
+            for point in points {
+                painter.rect_filled(Rect::from_center_size(point, Vec2::splat(7.)), 1., accent);
+            }
+        }
+    }
+
+    pub(crate) fn video_transform_input(&mut self, ui: &egui::Ui, area: Rect, view: View) -> bool {
+        if !matches!(
+            self.tool,
+            crate::canvas::Tool::Select
+                | crate::canvas::Tool::Object
+                | crate::canvas::Tool::Transform
+        ) || self.playing
+        {
+            return false;
+        }
+        if self.media.video_drag.is_none()
+            && self
+                .doc
+                .extras
+                .media
+                .active_videos(self.frame, self.doc.layers.len())
+                .next()
+                .is_none()
+        {
+            self.media.selected_video = None;
+            return false;
+        }
+        let (position, pressed, down, released, modifiers) = ui.input(|i| {
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.modifiers,
+            )
+        });
+        let Some(position) = position else {
+            return false;
+        };
+        let world = view.world(position);
+        if pressed
+            && area.contains(position)
+            && ui.ctx().layer_id_at(position) == Some(ui.layer_id())
+        {
+            let layer_above = self
+                .doc
+                .layers
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, layer)| layer.visible && !layer.options.locked)
+                .find_map(|(index, layer)| {
+                    crate::animation::marks(layer, self.frame)
+                        .iter()
+                        .rev()
+                        .any(|mark| self.selection_hit(mark, world, 4. / view.scale))
+                        .then_some(index)
+                });
+            let tracks = &self.doc.extras.media;
+            let hit = |track: &Track, clip: &Clip, handles: bool| {
+                if track.locked || track.hidden {
+                    return false;
+                }
+                let mark = self.video_selection_mark(track, clip);
+                crate::vector::contains_fill(&mark, world)
+                    || (handles
+                        && crate::canvas::vertices(&mark)
+                            .into_iter()
+                            .take(4)
+                            .any(|p| view.screen(p).distance(position) <= 9.))
+            };
+            let explicit = self
+                .media
+                .selected_video
+                .filter(|_| self.tool == crate::canvas::Tool::Transform)
+                .and_then(|id| self.video_clip_indices(id))
+                .filter(|&(t, c)| hit(&tracks.tracks[t], &tracks.tracks[t].clips[c], true));
+            let picked = explicit.or_else(|| {
+                let (track, _) = tracks
+                    .active_videos(self.frame, self.doc.layers.len())
+                    .filter(|(track, clip)| {
+                        layer_above.is_none_or(|l| track.slot > l) && hit(track, clip, false)
+                    })
+                    .last()?;
+                self.video_clip_indices(track.id)
+            });
+            if let Some((t, c)) = picked {
+                let track = &tracks.tracks[t];
+                let clip = &track.clips[c];
+                let mark = self.video_selection_mark(track, clip);
+                self.media.video_resize_center = (self.tool == crate::canvas::Tool::Transform
+                    && crate::canvas::vertices(&mark)
+                        .into_iter()
+                        .take(4)
+                        .any(|p| view.screen(p).distance(position) <= 9.))
+                .then(|| crate::vector::control_bounds(&mark).center());
+                self.media.selected_video = Some(track.id);
+                self.media.video_drag = Some((track.id, c, world, clip.transform));
+                self.media.video_drag_started = false;
+                self.media.video_drag_modifiers = modifiers;
+            } else {
+                self.media.selected_video = None;
+            }
+        }
+        if let Some((id, c, origin, initial)) = self.media.video_drag {
+            let delta = world - origin;
+            if !self.media.video_drag_started && delta.length() * view.scale > 2. {
+                self.checkpoint();
+                self.media.video_drag_started = true;
+            }
+            if self.media.video_drag_started
+                && let Some(t) = self
+                    .doc
+                    .extras
+                    .media
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == id)
+                && let Some(clip) = self.doc.extras.media.tracks[t].clips.get_mut(c)
+            {
+                clip.transform = initial;
+                if let Some(center) = self.media.video_resize_center {
+                    let ratio =
+                        (world.distance(center) / origin.distance(center).max(0.1)).max(0.01);
+                    clip.transform.scale_log2 = (initial.scale_log2 + ratio.log2()).clamp(-5., 5.);
+                } else if self.media.video_drag_modifiers.shift {
+                    clip.transform.scale_log2 =
+                        (initial.scale_log2 + delta.x / 180.).clamp(-5., 5.);
+                } else if self.media.video_drag_modifiers.alt {
+                    clip.transform.angle = initial.angle + delta.x / 140.;
+                } else {
+                    clip.transform.offset =
+                        [initial.offset[0] + delta.x, initial.offset[1] + delta.y];
+                }
+            }
+            if released || !down {
+                self.media.video_drag = None;
+                self.media.video_resize_center = None;
+                if self.media.video_drag_started {
+                    self.recover();
+                }
+                self.media.video_drag_started = false;
+            }
+            return true;
+        }
+        false
+    }
+
+    fn video_clip_indices(&self, track_id: u64) -> Option<(usize, usize)> {
+        let t = self
+            .doc
+            .extras
+            .media
+            .tracks
+            .iter()
+            .position(|track| track.id == track_id && track.kind == Kind::Video)?;
+        let c = self.doc.extras.media.tracks[t]
+            .clips
+            .iter()
+            .position(|clip| self.frame >= clip.start && self.frame - clip.start < clip.length)?;
+        Some((t, c))
+    }
+
+    pub fn paint_media_image(
+        &mut self,
+        painter: &egui::Painter,
+        view: View,
+        mark: &crate::Mark,
+    ) -> bool {
+        let Some(id) = mark.style.media_image else {
+            return false;
+        };
+        let Some(asset) = self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .find(|asset| asset.id == id)
+        else {
+            return false;
+        };
+        let dimensions = asset.size.map(|n| n as usize);
+        if dimensions[0]
+            .checked_mul(dimensions[1])
+            .and_then(|n| n.checked_mul(4))
+            != Some(asset.data.len())
+        {
+            return false;
+        }
+        let texture = self.media.textures.entry(id).or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied(dimensions, &asset.data);
+            painter
+                .ctx()
+                .load_texture(format!("media-{id}"), image, egui::TextureOptions::LINEAR)
+        });
+        if let Some(mesh) = image_mesh(mark, view, texture.id()) {
+            painter.add(mesh);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn place_media(&mut self, asset_id: u64, frame: usize, track_id: Option<u64>) {
+        self.place_media_at(asset_id, frame, track_id, None);
+    }
+
+    pub fn place_media_at(
+        &mut self,
+        asset_id: u64,
+        frame: usize,
+        track_id: Option<u64>,
+        position: Option<Pos2>,
+    ) {
+        let Some(asset) = self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .find(|asset| asset.id == asset_id)
+            .cloned()
+        else {
+            return;
+        };
+        match asset.kind {
+            Kind::Image => {
+                if self.doc.layers[self.layer].options.locked
+                    || frame >= self.doc.layers[self.layer].frames.len()
+                {
+                    return;
+                }
+                self.checkpoint();
+                self.frame = frame;
+                self.insert_image(&asset, frame, position);
+                self.recover();
+            }
+            Kind::Audio if track_id.is_none() => {
+                self.media.audio_destination = Some((asset_id, frame))
+            }
+            _ => self.add_media_clip(
+                &asset,
+                frame,
+                track_id,
+                if asset.kind == Kind::Video {
+                    tr("Pista de vídeo")
+                } else {
+                    tr("Sonido")
+                },
+            ),
+        }
+    }
+
+    fn add_media_clip(&mut self, asset: &Asset, frame: usize, track_id: Option<u64>, name: &str) {
+        if !self.feature.symbol_stack.is_empty() {
+            self.status = "Add audio and video to a scene timeline.".into();
+            return;
+        }
+        let length = (asset.seconds * self.doc.fps as f64)
+            .ceil()
+            .clamp(1., 10000.) as usize;
+        if frame >= 10000 {
+            return;
+        }
+        let length = length.min(10000 - frame);
+        let index = track_id.and_then(|id| {
+            self.doc
+                .extras
+                .media
+                .tracks
+                .iter()
+                .position(|track| track.id == id && track.kind == asset.kind && !track.locked)
+        });
+        if track_id.is_some() && index.is_none() {
+            return;
+        }
+        if let Some(index) = index
+            && self.doc.extras.media.tracks[index]
+                .clips
+                .iter()
+                .any(|clip| overlaps(clip, frame, length))
+        {
+            self.status = "Choose a free span on this track.".into();
+            return;
+        }
+        self.checkpoint();
+        self.extend_media_timeline(frame + length);
+        let tracks = &mut self.doc.extras.media.tracks;
+        let index = index.unwrap_or_else(|| {
+            tracks.push(Track {
+                id: id(),
+                name: name.into(),
+                kind: asset.kind,
+                clips: Default::default(),
+                slot: 0,
+                hidden: false,
+                locked: false,
+            });
+            tracks.len() - 1
+        });
+        tracks[index].clips.push(Clip {
+            asset: asset.id,
+            start: frame,
+            offset: 0,
+            length,
+            transform: Default::default(),
+        });
+        self.recover();
+    }
+
+    fn extend_media_timeline(&mut self, end: usize) {
+        if end <= self.doc.layers[0].frames.len() {
+            return;
+        }
+        for layer in &mut self.doc.layers {
+            layer.init_keys();
+            let held = layer.frames.last().cloned().unwrap_or_default();
+            layer.frames.resize(end, held);
+            layer.options.keys.resize(end, false);
+        }
+        self.fit_camera_duration();
+    }
+
+    pub fn media_dialog(&mut self, ctx: &egui::Context) {
+        if let Some((document, result)) =
+            self.media
+                .importing
+                .as_ref()
+                .and_then(|(document, job)| match job.try_recv() {
+                    Ok(result) => Some((document.clone(), result)),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((
+                        document.clone(),
+                        vec![Err("Media import interrupted".into())],
+                    )),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                })
+        {
+            self.media.importing = None;
+            if document == self.recovery && !self.hub.home {
+                let mut added = false;
+                for asset in result {
+                    match asset {
+                        Ok(asset) if self.doc.extras.media.can_add(&asset) => {
+                            if !added {
+                                self.checkpoint();
+                            }
+                            added = true;
+                            self.doc.extras.media.assets.push(asset);
+                        }
+                        Ok(_) => self.status = "Media library exceeds 256 MiB".into(),
+                        Err(error) => self.status = error,
+                    }
+                }
+                if added {
+                    self.recover();
+                }
+            } else {
+                self.status = "Import cancelled because the active document changed.".into();
+            }
+        }
+        let Some((id, frame)) = self.media.audio_destination else {
+            return;
+        };
+        let Some(asset) = self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .find(|asset| asset.id == id)
+            .cloned()
+        else {
+            self.media.audio_destination = None;
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(tr("Añadir audio a una pista"))
+            .id(egui::Id::unique("audio-destination"))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .min_width(320.)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&asset.name).strong());
+                ui.add_space(6.);
+                for name in [tr("Diálogo"), tr("Música"), tr("Sonido")] {
+                    if ui.button(name).clicked() {
+                        self.add_media_clip(&asset, frame, None, name);
+                        self.media.audio_destination = None;
+                    }
+                }
+                let tracks = self.doc.extras.media.tracks.clone();
+                if tracks.iter().any(|track| track.kind == Kind::Audio) {
+                    ui.separator();
+                    ui.label(tr("Pista existente"));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(180.)
+                    .show(ui, |ui| {
+                        for track in tracks
+                            .iter()
+                            .filter(|track| track.kind == Kind::Audio && !track.locked)
+                        {
+                            if ui.button(&track.name).clicked() {
+                                self.add_media_clip(&asset, frame, Some(track.id), &track.name);
+                                self.media.audio_destination = None;
+                            }
+                        }
+                    });
+            });
+        if !open {
+            self.media.audio_destination = None;
+        }
+    }
+
+    pub(crate) fn media_track_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: usize,
+        row: Rect,
+        width: f32,
+        cell: f32,
+        total: usize,
+        track_at: impl Fn(Pos2) -> Option<(usize, f32)>,
+    ) {
+        let tracks = self.doc.extras.media.tracks.clone();
+        let Some(track) = tracks.get(t) else {
+            return;
+        };
+        let frame_at = |pos: Pos2| ((pos.x - row.left() - width) / cell).floor().max(0.) as usize;
+        let title = ui.interact(
+            Rect::from_min_size(row.min, Vec2::new(width - 55., row.height())),
+            ui.scope_id().with(("media-row-title", track.id)),
+            Sense::drag(),
+        );
+        if !track.locked && title.drag_started_by(egui::PointerButton::Primary) {
+            title.dnd_set_drag_payload(MediaTrackDrag(t));
+        }
+        let row_response = ui.interact(
+            Rect::from_min_max(row.min + Vec2::new(width, 0.), row.max),
+            ui.scope_id().with(("media-row-drop", track.id)),
+            Sense::hover(),
+        );
+        let mut delete_track = false;
+        title.context_menu(|ui| {
+            let key = title.id.with("track-name");
+            let mut name = ui
+                .data_mut(|data| data.get_temp::<String>(key))
+                .unwrap_or_else(|| track.name.clone());
+            ui.label(tr("Renombrar"));
+            let edit = ui.add_enabled(!track.locked, egui::TextEdit::singleline(&mut name));
+            ui.data_mut(|data| data.insert_temp(key, name.clone()));
+            if ui
+                .add_enabled(
+                    !track.locked && !name.trim().is_empty() && name.trim() != track.name,
+                    egui::Button::new(tr("Renombrar")),
+                )
+                .clicked()
+                || (edit.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !track.locked
+                    && !name.trim().is_empty())
+            {
+                self.checkpoint();
+                self.doc.extras.media.tracks[t].name = name.trim().chars().take(100).collect();
+                self.recover();
+                ui.close();
+            }
+            if ui
+                .add_enabled(!track.locked, egui::Button::new(tr("Borrar pista")))
+                .clicked()
+            {
+                delete_track = true;
+                ui.close();
+            }
+        });
+        if delete_track {
+            self.checkpoint();
+            self.doc.extras.media.tracks.remove(t);
+            self.restart_media_audio();
+            self.recover();
+            return;
+        }
+        if let Some(source) = title.dnd_release_payload::<MediaTrackDrag>() {
+            self.move_media_track(source.0, track.slot, Some(t));
+            return;
+        }
+        let color = if track.kind == Kind::Video {
+            Color32::from_rgb(35, 116, 67)
+        } else {
+            Color32::from_rgb(150, 52, 56)
+        };
+        ui.painter()
+            .rect_filled(row, 3., color.gamma_multiply(0.45));
+        ui.painter().text(
+            row.left_center() + Vec2::new(28., 0.),
+            egui::Align2::LEFT_CENTER,
+            &track.name,
+            egui::FontId::proportional(12.),
+            Color32::WHITE,
+        );
+        let icon = if track.kind == Kind::Video {
+            "▶"
+        } else {
+            "♪"
+        };
+        ui.painter().text(
+            row.left_center() + Vec2::new(8., 0.),
+            egui::Align2::LEFT_CENTER,
+            icon,
+            egui::FontId::proportional(13.),
+            Color32::WHITE,
+        );
+        for (column, glyph, active) in [
+            (
+                0,
+                if track.hidden {
+                    crate::design::Icon::EyeOff
+                } else {
+                    crate::design::Icon::Eye
+                },
+                track.hidden,
+            ),
+            (1, crate::design::Icon::Lock, track.locked),
+        ] {
+            let rect = Rect::from_center_size(
+                row.left_center() + Vec2::new(width - 42. + column as f32 * 23., 0.),
+                Vec2::splat(20.),
+            );
+            let response = ui.interact(
+                rect,
+                ui.scope_id().with(("media-state", track.id, column)),
+                Sense::click(),
+            );
+            crate::design::draw(
+                ui.painter(),
+                rect.shrink(3.),
+                glyph,
+                if active {
+                    crate::themes::accent()
+                } else {
+                    Color32::WHITE
+                },
+            );
+            if response
+                .on_hover_text(if column == 0 {
+                    tr("Mostrar u ocultar pista")
+                } else {
+                    tr("Bloquear o desbloquear pista")
+                })
+                .clicked()
+            {
+                self.checkpoint();
+                if column == 0 {
+                    self.doc.extras.media.tracks[t].hidden = !track.hidden;
+                } else {
+                    self.doc.extras.media.tracks[t].locked = !track.locked;
+                }
+                self.restart_media_audio();
+                self.recover();
+            }
+        }
+        if row_response.container_contains_pointer()
+            && let Some(payload) = egui::DragAndDrop::payload::<MediaDrag>(ui.ctx())
+            && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let frame = frame_at(pos).min(total - 1);
+            let valid = !track.locked
+                && self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == payload.0)
+                    .is_some_and(|asset| {
+                        let length = (asset.seconds * self.doc.fps as f64)
+                            .ceil()
+                            .clamp(1., 10000.) as usize;
+                        asset.kind == track.kind
+                            && !track.clips.iter().any(|clip| overlaps(clip, frame, length))
+                    });
+            crate::sequencer::timeline_drop_marker(
+                ui.painter(),
+                Rect::from_min_size(
+                    Pos2::new(row.left() + width + frame as f32 * cell, row.top()),
+                    Vec2::new(cell, row.height()),
+                ),
+                valid,
+            );
+        }
+        if !track.locked
+            && let Some(asset) = row_response.dnd_release_payload::<MediaDrag>()
+        {
+            let frame = ui
+                .input(|i| i.pointer.interact_pos())
+                .map_or(self.frame, frame_at);
+            self.place_media(asset.0, frame.min(total - 1), Some(track.id));
+        }
+        for (c, clip) in track.clips.iter().enumerate() {
+            let rect = Rect::from_min_size(
+                row.min + Vec2::new(width + clip.start as f32 * cell, 1.),
+                Vec2::new(clip.length as f32 * cell, 22.),
+            );
+            if !ui.is_rect_visible(rect) {
+                continue;
+            }
+            let Some(asset) = self
+                .doc
+                .extras
+                .media
+                .assets
+                .iter()
+                .find(|asset| asset.id == clip.asset)
+            else {
+                continue;
+            };
+            let name = asset.name.clone();
+            let source = (asset.seconds * self.doc.fps as f64)
+                .ceil()
+                .clamp(1., 10000.) as usize;
+            let peaks = if track.kind == Kind::Audio && asset.peaks.is_empty() {
+                let asset = asset.clone();
+                self.media_waveform(ui.ctx(), asset)
+            } else {
+                asset.peaks.clone()
+            };
+
+            let response = ui.interact(
+                rect,
+                ui.scope_id().with((track.id, c)),
+                Sense::click_and_drag(),
+            );
+            let grab = response.id.with("clip-edge");
+            if response.clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                self.frame = frame_at(pos).min(total - 1);
+                self.media.selected_video = (track.kind == Kind::Video).then_some(track.id);
+                self.playing = false;
+            }
+
+            if response.hovered() {
+                let edge = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|p| (p.x - rect.left()).min(rect.right() - p.x) < 6.);
+                ui.ctx().set_cursor_icon(if edge {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::Grab
+                });
+            }
+            if response.drag_started_by(egui::PointerButton::Primary) && !track.locked {
+                let origin = ui
+                    .input(|i| i.pointer.press_origin())
+                    .unwrap_or(rect.center());
+                let edge = if origin.x - rect.left() < 6. {
+                    -1i8
+                } else if rect.right() - origin.x < 6. {
+                    1
+                } else {
+                    0
+                };
+                ui.data_mut(|data| data.insert_temp(grab, (edge, origin.x)));
+            }
+            let mut preview = clip.clone();
+            let mut preview_y = row.top();
+            let mut valid_preview = true;
+            if let Some((edge, origin)) = ui.data(|data| data.get_temp::<(i8, f32)>(grab))
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let delta = ((pos.x - origin) / cell).round() as isize;
+                if edge < 0 {
+                    let delta = delta.clamp(
+                        -(clip.start.min(clip.offset) as isize),
+                        clip.length.saturating_sub(1) as isize,
+                    );
+                    preview.start = clip.start.saturating_add_signed(delta);
+                    preview.offset = clip.offset.saturating_add_signed(delta);
+                    preview.length = clip.length.saturating_add_signed(-delta);
+                } else if edge > 0 {
+                    preview.length = clip.length.saturating_add_signed(delta).clamp(
+                        1,
+                        source
+                            .saturating_sub(clip.offset)
+                            .min(10000 - clip.start)
+                            .max(1),
+                    );
+                } else {
+                    preview.start = clip
+                        .start
+                        .saturating_add_signed(delta)
+                        .min(10000usize.saturating_sub(clip.length));
+                }
+                let candidate = if edge == 0 {
+                    track_at(pos)
+                } else {
+                    Some((t, row.top()))
+                };
+                let (destination, y) = candidate.unwrap_or((t, row.top()));
+                preview_y = y;
+                valid_preview = candidate.is_some()
+                    && tracks.get(destination).is_some_and(|target| {
+                        target.kind == track.kind
+                            && !target.locked
+                            && !target.clips.iter().enumerate().any(|(i, other)| {
+                                (destination != t || i != c)
+                                    && overlaps(other, preview.start, preview.length)
+                            })
+                    });
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    ui.data_mut(|data| {
+                        data.remove_temp::<(i8, f32)>(grab);
+                    });
+                    if valid_preview {
+                        self.checkpoint();
+                        self.extend_media_timeline(preview.start + preview.length);
+                        if destination == t {
+                            self.doc.extras.media.tracks[t].clips[c] = preview.clone();
+                        } else {
+                            self.doc.extras.media.tracks[t].clips.remove(c);
+                            self.doc.extras.media.tracks[destination]
+                                .clips
+                                .push(preview.clone());
+                        }
+                        self.recover();
+                    } else {
+                        preview = clip.clone();
+                        preview_y = row.top();
+                    }
+                }
+            }
+            let display = Rect::from_min_size(
+                Pos2::new(
+                    row.left() + width + preview.start as f32 * cell,
+                    preview_y + 1.,
+                ),
+                Vec2::new(preview.length as f32 * cell, 22.),
+            );
+            ui.painter().rect_filled(
+                display,
+                3.,
+                if track.hidden {
+                    color.gamma_multiply(0.45)
+                } else {
+                    color
+                },
+            );
+            if response.dragged_by(egui::PointerButton::Primary) {
+                crate::sequencer::timeline_drop_marker(
+                    &ui.ctx()
+                        .layer_painter(egui::LayerId::new(egui::Order::Foreground, response.id))
+                        .with_clip_rect(ui.clip_rect()),
+                    display,
+                    valid_preview,
+                );
+            }
+            if track.kind == Kind::Audio {
+                draw_waveform(ui, display, &peaks, &preview, self.doc.fps);
+            }
+            ui.painter()
+                .with_clip_rect(display.intersect(ui.clip_rect()))
+                .text(
+                    display.left_center() + Vec2::new(7., 0.),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    egui::FontId::proportional(12.),
+                    Color32::WHITE,
+                );
+            response.context_menu(|ui| {
+                if track.kind == Kind::Video && !track.locked {
+                    if ui.button(tr("Transformar vídeo")).clicked() {
+                        self.frame = clip.start.min(total - 1);
+                        self.playing = false;
+                        self.media.selected_video = Some(track.id);
+                        self.activate_tool(crate::canvas::Tool::Transform);
+                        ui.close();
+                    }
+                    let mut value = clip.transform;
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut value.offset[0]).prefix("X "));
+                        ui.add(egui::DragValue::new(&mut value.offset[1]).prefix("Y "));
+                    });
+                    let mut percent = value.scale_log2.exp2() * 100.;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut percent)
+                                .range(3.125..=3200.)
+                                .prefix(tr("Escala"))
+                                .suffix(" %"),
+                        )
+                        .changed()
+                    {
+                        value.scale_log2 = (percent / 100.).log2();
+                    }
+                    let mut angle = value.angle.to_degrees();
+                    if ui
+                        .add(egui::DragValue::new(&mut angle).suffix("°"))
+                        .changed()
+                    {
+                        value.angle = angle.to_radians();
+                    }
+                    if value != clip.transform {
+                        self.checkpoint();
+                        self.doc.extras.media.tracks[t].clips[c].transform = value;
+                        self.recover();
+                    }
+                }
+                if ui
+                    .add_enabled(!track.locked, egui::Button::new(tr("Borrar clip")))
+                    .clicked()
+                {
+                    self.checkpoint();
+                    self.doc.extras.media.tracks[t].clips.remove(c);
+                    self.recover();
+                    ui.close();
+                }
+            });
+        }
+    }
+
+    fn media_waveform(&mut self, ctx: &egui::Context, asset: Asset) -> SharedVec<u8> {
+        if let Some(job) = &self.media.waveform_job {
+            match job.try_recv() {
+                Ok((id, peaks)) => {
+                    self.media.waveform_job = None;
+                    self.media.waveform_cache.insert(id, peaks);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.media.waveform_job = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(peaks) = self.media.waveform_cache.get(&asset.id) {
+            return peaks.clone();
+        }
+        if self.media.waveform_job.is_none() {
+            let (send, receive) = std::sync::mpsc::channel();
+            self.media.waveform_job = Some(receive);
+            let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let peaks = (|| {
+                    let file = MediaFile::new(&asset.data).ok()?;
+                    let mut command = Command::new(ffmpeg);
+                    crate::exporter::hidden(&mut command);
+                    let output = command
+                        .args([
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-nostdin",
+                            "-protocol_whitelist",
+                            "file,pipe",
+                            "-format_whitelist",
+                            DEMUXERS,
+                            "-i",
+                        ])
+                        .arg(&file.0)
+                        .args([
+                            "-map", "0:a:0", "-t", "420", "-ac", "1", "-ar", "8000", "-f", "s16le",
+                            "pipe:1",
+                        ])
+                        .output()
+                        .ok()?;
+                    output.status.success().then(|| waveform(&output.stdout))
+                })()
+                .unwrap_or_default();
+                let _ = send.send((asset.id, peaks));
+                ctx.request_repaint();
+            });
+        }
+        Default::default()
+    }
+
+    pub(crate) fn move_media_track(&mut self, source: usize, slot: usize, target: Option<usize>) {
+        let tracks = &self.doc.extras.media.tracks;
+        if source >= tracks.len() || tracks[source].locked || target == Some(source) {
+            return;
+        }
+        self.checkpoint();
+        let tracks = &mut self.doc.extras.media.tracks;
+        let mut moved = tracks.remove(source);
+        moved.slot = slot.min(self.doc.layers.len());
+        let at = target
+            .map(|target| target - usize::from(source < target))
+            .unwrap_or(tracks.len());
+        let at = at.min(tracks.len());
+        tracks.insert(at, moved);
+        self.recover();
+    }
+}
+
+impl MediaLibrary {
+    fn can_add(&self, asset: &Asset) -> bool {
+        asset.data.len() <= ASSET_LIMIT
+            && self
+                .assets
+                .iter()
+                .map(|asset| asset.data.len())
+                .fold(asset.data.len(), usize::saturating_add)
+                <= LIBRARY_LIMIT
+    }
+
+    pub(crate) fn validate(&self, scenes: &[crate::animation::Scene]) -> Result<(), String> {
+        use std::collections::HashMap;
+        let mut assets = HashMap::new();
+        let mut total = 0usize;
+        for asset in &self.assets {
+            total = total.saturating_add(asset.data.len());
+            if asset.id == 0
+                || asset.data.is_empty()
+                || asset.data.len() > ASSET_LIMIT
+                || total > LIBRARY_LIMIT
+                || assets.insert(asset.id, asset.kind).is_some()
+                || (asset.kind == Kind::Image && self.pixels(asset.id).is_none())
+                || (asset.kind != Kind::Image
+                    && (!asset.seconds.is_finite() || asset.seconds <= 0.))
+            {
+                return Err("Invalid or oversized media asset".into());
+            }
+        }
+        for tracks in
+            std::iter::once(&self.tracks).chain(scenes.iter().map(|scene| &scene.media_tracks))
+        {
+            for track in tracks {
+                if track.kind == Kind::Image
+                    || track.clips.iter().any(|clip| {
+                        assets.get(&clip.asset) != Some(&track.kind)
+                            || clip.length == 0
+                            || clip.start.saturating_add(clip.length) > 10000
+                            || clip.offset.saturating_add(clip.length) > 10000
+                    })
+                {
+                    return Err("Invalid media track or clip".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pixels(&self, id: u64) -> Option<([usize; 2], &[u8])> {
+        let asset = self
+            .assets
+            .iter()
+            .find(|asset| asset.id == id && asset.kind == Kind::Image)?;
+        let size = asset.size.map(|dimension| dimension as usize);
+        if size.contains(&0) || size[0].checked_mul(size[1])?.checked_mul(4)? != asset.data.len() {
+            return None;
+        }
+        Some((size, &asset.data))
+    }
+}
+
+pub(crate) fn image_mesh(
+    mark: &crate::Mark,
+    view: View,
+    texture: egui::TextureId,
+) -> Option<egui::Mesh> {
+    let points = crate::canvas::vertices(mark);
+    if points.len() < 4 {
+        return None;
+    }
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for (point, uv) in points.into_iter().zip([
+        Pos2::ZERO,
+        Pos2::new(1., 0.),
+        Pos2::new(1., 1.),
+        Pos2::new(0., 1.),
+    ]) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: view.screen(point),
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    Some(mesh)
+}
+
+fn decode_video_file(file: &MediaFile, time: f64, ffmpeg: &Path) -> Option<image::RgbaImage> {
+    let mut command = Command::new(ffmpeg);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-format_whitelist",
+            DEMUXERS,
+            "-ss",
+        ])
+        .arg(format!("{time:.6}"))
+        .arg("-i")
+        .arg(&file.0)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(image::load_from_memory(&output.stdout).ok()?.to_rgba8())
+}
+
+pub(crate) struct MediaFile(std::path::PathBuf);
+
+impl MediaFile {
+    fn new(data: &[u8]) -> Result<Self, String> {
+        use std::io::Write;
+        let nonce = id();
+        let path =
+            std::env::temp_dir().join(format!("libretoon-media-{}-{nonce}", std::process::id()));
+        let mut file = std::fs::File::create_new(&path).map_err(|e| e.to_string())?;
+        let temporary = Self(path);
+        file.write_all(data).map_err(|e| e.to_string())?;
+        Ok(temporary)
+    }
+}
+impl Drop for MediaFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+pub(crate) fn audio_export(
+    doc: &crate::Document,
+    command: &mut Command,
+    first: usize,
+    last: usize,
+    avi: bool,
+    include_video: bool,
+) -> Result<Vec<MediaFile>, String> {
+    let mut files = Vec::new();
+    let mut filters = Vec::new();
+    let fps = doc.fps as f64;
+    let mut scene_start = 0usize;
+    for scene_index in 0..doc.extras.scenes.len().max(1) {
+        let scene = crate::animation::scene_doc(doc, scene_index);
+        let scene_end = scene_start + scene.layers[0].frames.len();
+        for track in scene
+            .extras
+            .media
+            .tracks
+            .iter()
+            .filter(|track| track.kind == Kind::Audio && !track.hidden)
+        {
+            for clip in &track.clips {
+                let start = scene_start.saturating_add(clip.start);
+                let from = start.max(first);
+                let to = start.saturating_add(clip.length).min(last).min(scene_end);
+                if from >= to {
+                    continue;
+                }
+                let Some(asset) = doc
+                    .extras
+                    .media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == clip.asset && asset.kind == Kind::Audio)
+                else {
+                    continue;
+                };
+                let file = MediaFile::new(&asset.data)?;
+                let offset = (clip.offset.saturating_add(from - start)) as f64 / fps;
+                let duration = (to - from) as f64 / fps;
+                let delay = ((from - first) as f64 * 1000. / fps).round() as usize;
+                command
+                    .args([
+                        "-protocol_whitelist",
+                        "file,pipe",
+                        "-format_whitelist",
+                        DEMUXERS,
+                        "-ss",
+                    ])
+                    .arg(format!("{offset:.6}"))
+                    .arg("-t")
+                    .arg(format!("{duration:.6}"))
+                    .arg("-i")
+                    .arg(&file.0);
+                files.push(file);
+                let input = files.len();
+                filters.push(format!(
+                    "[{input}:a:0]asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{input}]"
+                ));
+            }
+        }
+        scene_start = scene_end;
+    }
+    if files.is_empty() {
+        command.arg("-an");
+    } else {
+        let labels = (1..=files.len())
+            .map(|i| format!("[a{i}]"))
+            .collect::<String>();
+        let duration = (last - first) as f64 / fps;
+        filters.push(format!(
+            "{labels}amix=inputs={}:normalize=0,apad,atrim=duration={duration:.6}[sound]",
+            files.len()
+        ));
+        command.arg("-filter_complex").arg(filters.join(";"));
+        if include_video {
+            command.args(["-map", "0:v:0"]);
+        }
+        command.args([
+            "-map",
+            "[sound]",
+            "-c:a",
+            if avi { "pcm_s16le" } else { "aac" },
+        ]);
+    }
+    Ok(files)
+}
+
+fn overlaps(clip: &Clip, start: usize, length: usize) -> bool {
+    start < clip.start.saturating_add(clip.length) && clip.start < start.saturating_add(length)
+}
+
+impl MediaLibrary {
+    fn active_videos(&self, frame: usize, layers: usize) -> impl Iterator<Item = (&Track, &Clip)> {
+        let mut videos: Vec<_> = self
+            .tracks
+            .iter()
+            .filter(|track| track.kind == Kind::Video && !track.hidden)
+            .filter_map(|track| {
+                let clip = track
+                    .clips
+                    .iter()
+                    .find(|clip| frame >= clip.start && frame - clip.start < clip.length)?;
+                Some((track, clip))
+            })
+            .collect();
+        videos.sort_by_key(|(track, _)| track.slot.min(layers));
+        videos.into_iter()
+    }
+}
+
+pub(crate) fn video_mark(doc: &crate::Document, dimensions: Vec2) -> crate::Mark {
+    let stage = Vec2::new(doc.width as f32, doc.height as f32);
+    let fit = (stage.x / dimensions.x).min(stage.y / dimensions.y);
+    let rect = Rect::from_center_size(stage.to_pos2() / 2., dimensions * fit);
+    crate::Mark {
+        rectangle: true,
+        points: vec![crate::vector::xy(rect.min), crate::vector::xy(rect.max)].into(),
+        ..Default::default()
+    }
+}
+
+fn transformed_video_mark(
+    doc: &crate::Document,
+    dimensions: Vec2,
+    transform: VideoTransform,
+) -> crate::Mark {
+    let mut mark = video_mark(doc, dimensions);
+    mark.closed = true;
+    mark.fill = Some([0, 0, 0, 0]);
+    let center = Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.);
+    crate::vector::transform(&mark, |point| {
+        center
+            + crate::canvas::rotate(
+                (point - center) * transform.scale_log2.exp2(),
+                transform.angle,
+            )
+            + Vec2::new(transform.offset[0], transform.offset[1])
+    })
+}
+
+pub(crate) struct ExportVideoFrame {
+    pub slot: usize,
+    pub mark: crate::Mark,
+    pub pixels: std::sync::Arc<image::RgbaImage>,
+}
+
+#[derive(Default)]
+pub(crate) struct VideoExport {
+    files: std::collections::HashMap<u64, MediaFile>,
+    last: std::collections::HashMap<u64, ((u64, usize), std::sync::Arc<image::RgbaImage>)>,
+}
+
+impl VideoExport {
+    pub(crate) fn frames(
+        &mut self,
+        doc: &crate::Document,
+        frame: usize,
+        ffmpeg: &Path,
+    ) -> Result<Vec<ExportVideoFrame>, String> {
+        let (scene, local) = crate::animation::locate(doc, frame);
+        let scene = crate::animation::scene_doc(doc, scene);
+        let media = &scene.extras.media;
+        let mut result = Vec::new();
+        for (track, clip) in media.active_videos(local, scene.layers.len()) {
+            let id = clip.asset;
+            let source = clip.offset + local - clip.start;
+            let key = (id, source);
+            if self
+                .last
+                .get(&track.id)
+                .is_none_or(|(cached, _)| *cached != key)
+            {
+                let asset = media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == id)
+                    .ok_or("Video asset is missing")?;
+                let file = match self.files.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(MediaFile::new(&asset.data)?)
+                    }
+                };
+                let time = source as f64 / doc.fps as f64;
+                let image = decode_video_file(file, time, ffmpeg)
+                    .or_else(|| {
+                        decode_video_file(file, (time - 0.5 / doc.fps as f64).max(0.), ffmpeg)
+                    })
+                    .ok_or_else(|| {
+                        format!("Could not decode video {} at {time:.2}s", asset.name)
+                    })?;
+                self.last
+                    .insert(track.id, (key, std::sync::Arc::new(image)));
+            }
+            let pixels = self.last[&track.id].1.clone();
+            let mut mark = transformed_video_mark(
+                doc,
+                Vec2::new(pixels.width() as f32, pixels.height() as f32),
+                clip.transform,
+            );
+            if let Some(camera) = scene
+                .extras
+                .cameras
+                .iter()
+                .find(|camera| local >= camera.start && local - camera.start < camera.duration)
+            {
+                let camera = crate::animation::camera_at(camera, local);
+                mark = crate::vector::transform(&mark, |p| {
+                    Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.)
+                        + crate::canvas::rotate(
+                            p - crate::vector::pos(camera.center),
+                            -camera.angle,
+                        ) * camera.zoom
+                });
+            }
+            result.push(ExportVideoFrame {
+                slot: track.slot.min(scene.layers.len()),
+                mark,
+                pixels,
+            });
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Default)]
+enum AudioPreview {
+    #[default]
+    Idle,
+    Preparing(std::sync::mpsc::Receiver<Result<Option<MediaFile>, String>>),
+    Playing {
+        child: std::process::Child,
+        _file: MediaFile,
+    },
+    Silent,
+}
+
+impl AudioPreview {
+    fn stop(&mut self) {
+        if let Self::Playing { child, .. } = self {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *self = Self::Idle;
+    }
+}
+
+impl Drop for MediaEditor {
+    fn drop(&mut self) {
+        self.audio.stop();
+    }
+}
+
+impl Editor {
+    pub(crate) fn media_audio_ready(&mut self, ctx: &egui::Context) -> bool {
+        if !self.playing || self.hub.home {
+            self.media.audio.stop();
+            return false;
+        }
+        if matches!(self.media.audio, AudioPreview::Idle) {
+            let has_audio = |tracks: &[Track]| {
+                tracks
+                    .iter()
+                    .any(|t| t.kind == Kind::Audio && !t.clips.is_empty())
+            };
+            let all = self.animation.play_all;
+            if !has_audio(&self.doc.extras.media.tracks)
+                && !(all
+                    && self
+                        .doc
+                        .extras
+                        .scenes
+                        .iter()
+                        .any(|scene| has_audio(&scene.media_tracks)))
+            {
+                self.media.audio = AudioPreview::Silent;
+                return true;
+            }
+            let doc = if all {
+                self.doc.clone()
+            } else {
+                crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene)
+            };
+            let first = if all {
+                crate::animation::movie_offset(&doc, self.frame)
+            } else {
+                self.frame
+            };
+            let last = crate::animation::movie_count(&doc);
+            let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+            let (send, receive) = std::sync::mpsc::channel();
+            let ctx = ctx.clone();
+            self.media.audio = AudioPreview::Preparing(receive);
+            std::thread::spawn(move || {
+                let _ = send.send(prepare_audio(&doc, first, last, &ffmpeg));
+                ctx.request_repaint();
+            });
+            return false;
+        }
+        if let AudioPreview::Preparing(job) = &self.media.audio {
+            let result = match job.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("Audio preview stopped".into())
+                }
+            };
+            self.media.audio = AudioPreview::Silent;
+            match result {
+                Ok(Some(file)) => match play_audio(&file.0) {
+                    Ok(child) => self.media.audio = AudioPreview::Playing { child, _file: file },
+                    Err(error) => self.status = error,
+                },
+                Ok(None) => {}
+                Err(error) => self.status = error,
+            }
+            self.tick = std::time::Instant::now();
+        }
+        true
+    }
+
+    pub(crate) fn restart_media_audio(&mut self) {
+        self.media.audio.stop();
+    }
+}
+
+fn prepare_audio(
+    doc: &crate::Document,
+    first: usize,
+    last: usize,
+    ffmpeg: &Path,
+) -> Result<Option<MediaFile>, String> {
+    let mut command = Command::new(ffmpeg);
+    crate::exporter::hidden(&mut command);
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=48000:cl=stereo",
+    ]);
+    let inputs = audio_export(doc, &mut command, first, last, true, false)?;
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let output = MediaFile::new(&[])?;
+    let result = command
+        .args(["-ar", "48000", "-ac", "2", "-f", "wav"])
+        .arg(&output.0)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !result.status.success() {
+        return Err(format!(
+            "Audio preview failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    Ok(Some(output))
+}
+
+fn play_audio(path: &Path) -> Result<std::process::Child, String> {
+    use std::process::Stdio;
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object System.Media.SoundPlayer -ArgumentList $env:LIBRETOON_PREVIEW_WAV).PlaySync()"])
+            .env("LIBRETOON_PREVIEW_WAV", path);
+        command
+    } else {
+        let mut command = Command::new(if cfg!(target_os = "macos") {
+            "/usr/bin/afplay"
+        } else {
+            "paplay"
+        });
+        command.arg(path);
+        command
+    };
+    crate::exporter::hidden(&mut command);
+    let result = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if cfg!(target_os = "linux")
+        && result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Command::new("aplay")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Audio preview needs paplay or aplay: {e}"));
+    }
+    result.map_err(|e| format!("Could not play audio preview: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imported_bitmap_survives_native_serialization_and_renders_in_export() {
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        editor.doc = crate::fresh_document();
+        editor.doc.width = 8;
+        editor.doc.height = 8;
+        let asset = bitmap([255, 0, 0, 255].repeat(16), 4, 4, "fixture.png".into());
+        editor.insert_image(&asset, 0, None);
+        editor.doc.extras.media.assets.push(asset);
+        let restored = crate::fla::decode(&crate::fla::encode(&editor.doc).unwrap()).unwrap();
+        restored.validate().unwrap();
+        let pixels = crate::exporter::raster(
+            &restored,
+            0,
+            8,
+            8,
+            &egui::Context::default(),
+            &mut Default::default(),
+        );
+        assert_eq!(&pixels[(4 * 8 + 4) * 3..][..3], &[255, 0, 0]);
+        assert_eq!(&pixels[..3], &[255, 255, 255]);
+    }
+
+    #[test]
+    #[ignore = "requires configured FFmpeg"]
+    fn media_decodes_video_and_builds_audio_mix() {
+        let ffmpeg = crate::exporter::ffmpeg_path("");
+        let audio = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.5",
+                "-f",
+                "wav",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(audio.status.success());
+        let video = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x48:d=0.5",
+                "-c:v",
+                "mpeg4",
+                "-f",
+                "matroska",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(video.status.success());
+        let mut doc = crate::fresh_document();
+        doc.extras.media.assets.push(Asset {
+            id: 1,
+            name: "test.wav".into(),
+            folder: None,
+            kind: Kind::Audio,
+            data: audio.stdout.into(),
+            size: [0; 2],
+            seconds: 0.5,
+            peaks: Default::default(),
+        });
+        doc.extras.media.assets.push(Asset {
+            id: 2,
+            name: "test.mkv".into(),
+            folder: None,
+            kind: Kind::Video,
+            data: video.stdout.into(),
+            size: [0; 2],
+            seconds: 0.5,
+            peaks: Default::default(),
+        });
+        for (asset, kind) in [(1, Kind::Audio), (2, Kind::Video)] {
+            doc.extras.media.tracks.push(Track {
+                id: asset + 2,
+                name: "fixture".into(),
+                slot: 0,
+                hidden: false,
+                locked: false,
+                kind,
+                clips: vec![Clip {
+                    asset,
+                    start: 0,
+                    offset: 2,
+                    length: 6,
+                    transform: Default::default(),
+                }]
+                .into(),
+            });
+        }
+        let mix = prepare_audio(&doc, 0, 6, &ffmpeg).unwrap().unwrap();
+        assert!(std::fs::metadata(&mix.0).unwrap().len() > 1024);
+        let mut decoder = VideoExport::default();
+        let frames = decoder.frames(&doc, 1, &ffmpeg).unwrap();
+        let frame = &frames[0].pixels;
+        let [r, g, b, _] = frame.get_pixel(10, 10).0;
+        assert!(r > 200 && g < 20 && b < 20);
+    }
+}
+
+fn waveform(samples: &[u8]) -> SharedVec<u8> {
+    samples
+        .chunks(320)
+        .map(|block| {
+            block
+                .chunks_exact(2)
+                .map(|sample| i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs())
+                .max()
+                .unwrap_or(0)
+                .div_ceil(129) as u8
+        })
+        .collect()
+}
+
+fn draw_waveform(ui: &egui::Ui, rect: Rect, peaks: &[u8], clip: &Clip, fps: u32) {
+    let visible = rect.intersect(ui.clip_rect());
+    if !visible.is_positive() || peaks.is_empty() {
+        return;
+    }
+    for x in (visible.left().ceil() as i32..visible.right().floor() as i32).step_by(2) {
+        let x = x as f32;
+        let frame = clip.offset as f32 + (x - rect.left()) / rect.width() * clip.length as f32;
+        let index = (frame * 50. / fps.max(1) as f32) as usize;
+        let height = peaks.get(index).copied().unwrap_or(0) as f32 / 255. * rect.height() * 0.38;
+        let center = rect.center().y;
+        ui.painter().line_segment(
+            [Pos2::new(x, center - height), Pos2::new(x, center + height)],
+            egui::Stroke::new(1., Color32::from_white_alpha(100)),
+        );
+    }
+}
+
+impl Asset {
+    pub(crate) fn icon(&self) -> &'static str {
+        match self.kind {
+            Kind::Image => "▧",
+            Kind::Video => "▶",
+            Kind::Audio => "♪",
+        }
+    }
+}
+
+fn show_preview(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
+    let size = texture.size_vec2();
+    let scale = (ui.available_width() / size.x).min(100. / size.y).min(1.);
+    ui.image((texture.id(), size * scale));
+}

@@ -116,7 +116,7 @@ fn hidden(command: &mut Command) {
     #[cfg(not(windows))]
     let _ = command;
 }
-fn system_program(name: &str) -> PathBuf {
+pub(crate) fn system_program(name: &str) -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
             .join("System32")
@@ -188,7 +188,7 @@ fn hash_token(text: &str) -> Option<String> {
         .find(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .map(str::to_ascii_lowercase)
 }
-fn verify_hash(
+pub(crate) fn verify_hash(
     archive: &Path,
     expected: &str,
     scratch: &Path,
@@ -216,7 +216,7 @@ fn verify_hash(
     let bytes = fs::read(output).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&bytes);
     if hash_token(&text).as_deref() != Some(expected) {
-        return Err("FFmpeg download checksum mismatch; nothing was installed".into());
+        return Err("Download checksum mismatch; nothing was installed".into());
     }
     Ok(())
 }

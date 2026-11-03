@@ -211,6 +211,8 @@ pub struct CameraAnimation {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Scene {
     #[serde(default)]
+    pub(crate) media_tracks: SharedVec<crate::media::Track>,
+    #[serde(default)]
     pub rig: crate::rig::Rig,
     pub id: u64,
     pub name: String,
@@ -248,6 +250,7 @@ pub struct State {
 pub fn scene_from(doc: &Document, id: u64, name: String) -> Scene {
     Scene {
         rig: doc.extras.rig.clone(),
+        media_tracks: doc.extras.media.tracks.clone(),
         id,
         name,
         layers: doc.layers.clone(),
@@ -270,6 +273,7 @@ pub fn scene_doc(doc: &Document, index: usize) -> Document {
         let s = &doc.extras.scenes[index];
         result.layers = s.layers.clone();
         result.extras.rig = s.rig.clone();
+        result.extras.media.tracks = s.media_tracks.clone();
         result.extras.folders = s.folders.clone();
         result.extras.cameras = s.cameras.clone();
         result.extras.perspective = s.perspective.clone();

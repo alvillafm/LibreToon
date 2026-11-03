@@ -62,6 +62,7 @@ impl Editor {
             let mut next = parent.clone();
             next.extras.symbols = child.extras.symbols.clone();
             next.extras.library = child.extras.library.clone();
+            next.extras.media.assets = child.extras.media.assets.clone();
             if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
                 s.layers = child.layers.clone();
                 s.rig = child.extras.rig.clone();
@@ -186,6 +187,7 @@ impl Editor {
         self.doc.extras.perspective = perspective;
         self.style_selection.clear();
         self.doc.extras.cameras = Default::default();
+        self.doc.extras.media.tracks = Default::default();
         self.frame = 0;
         self.layer = 0;
         self.playing = false;
@@ -198,6 +200,7 @@ impl Editor {
         if let Some((mut parent, frame, layer, id)) = self.feature.symbol_stack.pop() {
             parent.extras.symbols = self.doc.extras.symbols.clone();
             parent.extras.library = self.doc.extras.library.clone();
+            parent.extras.media.assets = self.doc.extras.media.assets.clone();
             if let Some(s) = parent.extras.symbols.iter_mut().find(|s| s.id == id) {
                 s.layers = self.doc.layers.clone();
                 s.rig = self.doc.extras.rig.clone();
@@ -222,25 +225,51 @@ impl Editor {
         self.asset_library_ui(ui);
     }
     pub(crate) fn insert_symbol(&mut self, id: u64) {
-        if !self.symbol_insert_allowed(id) || self.doc.layers[self.layer].options.locked {
-            return;
-        }
-        let Some(symbol) = self.doc.extras.symbols.iter().find(|s| s.id == id) else {
-            return;
-        };
+        self.insert_symbol_at(id, None);
+    }
+
+    pub(crate) fn symbol_bounds(&self, id: u64) -> Option<Rect> {
+        let symbol = self
+            .doc
+            .extras
+            .symbols
+            .iter()
+            .find(|symbol| symbol.id == id)?;
         let bounds = symbol
             .layers
             .iter()
-            .flat_map(|l| l.frames[0].iter())
+            .flat_map(|layer| {
+                layer
+                    .frames
+                    .iter()
+                    .find(|frame| !frame.is_empty())
+                    .into_iter()
+                    .flatten()
+            })
             .fold(Rect::NOTHING, |b, m| {
                 b.union(crate::vector::control_bounds(m))
             });
-        if !bounds.is_finite() {
+        bounds.is_finite().then_some(bounds)
+    }
+
+    pub(crate) fn insert_symbol_at(&mut self, id: u64, at: Option<Pos2>) {
+        if !self.symbol_insert_allowed(id)
+            || self.doc.layers[self.layer].options.locked
+            || !self.doc.layers[self.layer].visible
+        {
             return;
         }
+        let Some(bounds) = self.symbol_bounds(id) else {
+            return;
+        };
         self.checkpoint();
+        let offset = at.map_or(Vec2::ZERO, |at| at - bounds.center());
         let mut m = Mark {
-            points: vec![crate::vector::xy(bounds.min), crate::vector::xy(bounds.max)].into(),
+            points: vec![
+                crate::vector::xy(bounds.min + offset),
+                crate::vector::xy(bounds.max + offset),
+            ]
+            .into(),
             rectangle: true,
             closed: true,
             fill: Some([0, 0, 0, 0]),
@@ -250,7 +279,7 @@ impl Editor {
         m.style.instance = Some(Instance {
             clock: Default::default(),
             symbol: id,
-            matrix: [1., 0., 0., 1., 0., 0.],
+            matrix: [1., 0., 0., 1., offset.x, offset.y],
             mode: Playback::Loop,
             first: 0,
             born: self.frame,

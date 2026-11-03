@@ -29,6 +29,7 @@ impl Editor {
         self.doc.extras.folders = s.folders;
         self.doc.extras.cameras = s.cameras;
         self.doc.extras.rig = s.rig;
+        self.doc.extras.media.tracks = s.media_tracks;
         self.rigging = Default::default();
         self.doc.extras.perspective = s.perspective;
         self.doc.extras.active_scene = index;
@@ -246,6 +247,7 @@ impl Editor {
                             self.doc.extras.folders = s.folders;
                             self.doc.extras.cameras = s.cameras;
                             self.doc.extras.rig = s.rig;
+                            self.doc.extras.media.tracks = s.media_tracks;
                             self.rigging = Default::default();
                             self.doc.extras.perspective = s.perspective;
                             self.doc.extras.active_scene = next;

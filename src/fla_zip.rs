@@ -17,7 +17,15 @@ fn push16(b: &mut Vec<u8>, v: u16) {
 fn push32(b: &mut Vec<u8>, v: u32) {
     b.extend(v.to_le_bytes());
 }
+#[cfg(test)]
 pub fn pack(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(name, bytes)| (*name, bytes.as_slice()))
+        .collect();
+    pack_slices(&entries)
+}
+pub fn pack_slices(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = vec![];
     let mut central = vec![];
     for (name, data) in entries {
@@ -34,7 +42,7 @@ pub fn pack(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
         push16(&mut out, name.len() as u16);
         push16(&mut out, 0);
         out.extend(name.as_bytes());
-        out.extend(data);
+        out.extend_from_slice(data);
         push32(&mut central, 0x02014b50);
         for n in [20, 20, 0x800, 0, 0, 33] {
             push16(&mut central, n);

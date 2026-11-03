@@ -772,3 +772,58 @@ fn weight_paint_changes_only_the_selected_bone() {
     assert_eq!(c.weight(2), 0.5);
     assert_eq!(c.weight(1), 0.5);
 }
+
+#[test]
+fn library_symbol_drop_inserts_at_the_canvas_pointer() {
+    let mut e = editor();
+    e.doc.extras.symbols.push(symbol(1, vec![art(0.)]));
+    let ctx = egui::Context::default();
+    let run = |e: &mut Editor, events| {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900., 600.))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                egui::Panel::right("test-library")
+                    .exact_size(270.)
+                    .show(ui, |ui| e.asset_library_ui(ui));
+                egui::CentralPanel::default().show(ui, |ui| e.canvas_ui(ui));
+            },
+        );
+        out.textures_delta.clear();
+        out
+    };
+    let out = run(&mut e, vec![]);
+    let source = out
+        .shapes
+        .iter()
+        .find_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape {
+                (text.galley.job.text == "Symbol 1").then(|| text.pos + Vec2::new(15., 7.))
+            } else {
+                None
+            }
+        })
+        .expect("symbol row");
+    let destination = Pos2::new(240., 270.);
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        pressed,
+        button: egui::PointerButton::Primary,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(
+        &mut e,
+        vec![egui::Event::PointerMoved(source), button(source, true)],
+    );
+    run(&mut e, vec![egui::Event::PointerMoved(destination)]);
+    assert!(e.assets.drag == Some(crate::library::Asset::Symbol(1)));
+    run(&mut e, vec![button(destination, false)]);
+    let mark = e.doc.layers[0].frames[0].last().expect("inserted symbol");
+    let instance = mark.style.instance.as_ref().expect("symbol instance");
+    assert_eq!(instance.symbol, 1);
+    assert_ne!(&instance.matrix[4..], &[0., 0.]);
+    assert!(e.assets.drag.is_none());
+}

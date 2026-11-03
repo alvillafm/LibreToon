@@ -418,7 +418,9 @@ impl Editor {
             self.copy_selection(true);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)) {
-            self.paste_selection();
+            if !self.paste_media_image() {
+                self.paste_selection();
+            }
         }
     }
     pub fn copy_selection(&mut self, cut: bool) {

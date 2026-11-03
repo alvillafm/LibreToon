@@ -642,7 +642,10 @@ fn external_student_fla_import() {
                     .step_by(10)
                     .map(|f| crate::features::resolve(&d, f, false).len())
                     .sum::<usize>();
-                println!("sampled visible marks: {count}");
+                println!(
+                    "sampled visible marks: {count}; embedded media: {}",
+                    d.extras.media.assets.len()
+                );
                 assert!(count > 0, "import must preserve visible artwork");
                 let ctx = eframe::egui::Context::default();
                 let mut cache = crate::paint::RenderCache::default();

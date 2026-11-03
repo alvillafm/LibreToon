@@ -154,6 +154,7 @@ impl Default for Document {
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
         crate::features::validate(self)?;
+        self.extras.media.validate(&self.extras.scenes)?;
         if self.version != 1
             || !(1..=240).contains(&self.fps)
             || !(1..=16384).contains(&self.width)

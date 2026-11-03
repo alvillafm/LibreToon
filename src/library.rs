@@ -14,6 +14,7 @@ use std::collections::HashSet;
 #[serde(default)]
 pub struct Library {
     pub folders: SharedVec<Folder>,
+    pub order: SharedVec<Asset>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Folder {
@@ -23,16 +24,17 @@ pub struct Folder {
     pub color: [u8; 4],
     pub collapsed: bool,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Asset {
     Folder(u64),
     Symbol(u64),
+    Media(u64),
     Root,
 }
 #[derive(Default)]
 pub struct LibraryState {
     pub selected: Option<Asset>,
-    drag: Option<Asset>,
+    pub(crate) drag: Option<Asset>,
     rename: Option<(Asset, String)>,
     focus: bool,
 }
@@ -93,6 +95,7 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<(Asset, usi
             rows(e, Some(f.id), depth + 1, out);
         }
     }
+    let first = out.len();
     for s in e
         .doc
         .extras
@@ -102,6 +105,24 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<(Asset, usi
     {
         out.push((Asset::Symbol(s.id), depth));
     }
+    out.extend(
+        e.doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .filter(|asset| asset.folder == parent)
+            .map(|asset| (Asset::Media(asset.id), depth)),
+    );
+    out[first..].sort_by_key(|(asset, _)| {
+        e.doc
+            .extras
+            .library
+            .order
+            .iter()
+            .position(|item| item == asset)
+            .unwrap_or(usize::MAX)
+    });
 }
 impl Editor {
     pub fn reorder_library_folder(&mut self, id: u64, target: u64, before: bool) {
@@ -154,6 +175,14 @@ impl Editor {
         let parent = match target {
             Asset::Root => None,
             Asset::Folder(id) => Some(id),
+            Asset::Media(id) => self
+                .doc
+                .extras
+                .media
+                .assets
+                .iter()
+                .find(|asset| asset.id == id)
+                .and_then(|asset| asset.folder),
             Asset::Symbol(id) => self
                 .doc
                 .extras
@@ -169,6 +198,37 @@ impl Editor {
             }
         }
         self.checkpoint();
+        if matches!(source, Asset::Media(_) | Asset::Symbol(_)) {
+            let order = &mut self.doc.extras.library.order;
+            for item in self
+                .doc
+                .extras
+                .symbols
+                .iter()
+                .map(|symbol| Asset::Symbol(symbol.id))
+                .chain(
+                    self.doc
+                        .extras
+                        .media
+                        .assets
+                        .iter()
+                        .map(|asset| Asset::Media(asset.id)),
+                )
+            {
+                if !order.contains(&item) {
+                    order.push(item);
+                }
+            }
+            order.retain(|item| *item != source);
+            if matches!(target, Asset::Media(_) | Asset::Symbol(_)) && !order.contains(&target) {
+                order.push(target);
+            }
+            let index = order
+                .iter()
+                .position(|item| *item == target)
+                .unwrap_or(order.len());
+            order.insert(index, source);
+        }
         match source {
             Asset::Folder(id) => {
                 if let Some(i) = self
@@ -204,6 +264,18 @@ impl Editor {
                     self.doc.extras.symbols.insert(at, s);
                 }
             }
+            Asset::Media(id) => {
+                if let Some(asset) = self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter_mut()
+                    .find(|asset| asset.id == id)
+                {
+                    asset.folder = parent;
+                }
+            }
             Asset::Root => {}
         }
         self.recover();
@@ -232,6 +304,18 @@ impl Editor {
                     s.name = name.into();
                 }
             }
+            Asset::Media(id) => {
+                if let Some(asset) = self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter_mut()
+                    .find(|asset| asset.id == id)
+                {
+                    asset.name = name.into();
+                }
+            }
             Asset::Root => {}
         }
         self.recover();
@@ -239,6 +323,7 @@ impl Editor {
     pub fn asset_library_ui(&mut self, ui: &mut egui::Ui) {
         let library_rect = ui.available_rect_before_wrap();
         ui.heading(tr("Biblioteca"));
+        self.media_library_ui(ui);
         ui.add_space(6.);
         let mut new_folder = false;
         let mut edit = None;
@@ -328,6 +413,17 @@ impl Editor {
                                 });
                             (s.name.clone(), tag, false)
                         }
+                        Asset::Media(id) => {
+                            let asset = self
+                                .doc
+                                .extras
+                                .media
+                                .assets
+                                .iter()
+                                .find(|asset| asset.id == id)
+                                .unwrap();
+                            (asset.name.clone(), crate::themes::accent(), false)
+                        }
                         Asset::Root => continue,
                     };
                     let (r, response) = ui.allocate_exact_size(
@@ -377,6 +473,24 @@ impl Editor {
                                     self.symbol_thumbnail(ui, id, 0, Vec2::new(32., 30.));
                                 },
                             );
+                        }
+                        Asset::Media(id) => {
+                            if let Some(asset) = self
+                                .doc
+                                .extras
+                                .media
+                                .assets
+                                .iter()
+                                .find(|asset| asset.id == id)
+                            {
+                                ui.painter().text(
+                                    icon.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    asset.icon(),
+                                    egui::FontId::proportional(20.),
+                                    tag,
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -457,6 +571,9 @@ impl Editor {
                     }
                     if response.drag_started() {
                         self.assets.drag = Some(asset);
+                        if let Asset::Media(id) = asset {
+                            response.dnd_set_drag_payload(crate::media::MediaDrag(id));
+                        }
                     }
                     if response
                         .rect
@@ -517,6 +634,11 @@ impl Editor {
         if let Some((asset, name)) = commit_rename {
             self.assets.rename = None;
             self.rename_asset(asset, name);
+        }
+        if let Some(Asset::Media(id)) = self.assets.selected {
+            self.media_asset_preview(ui, id);
+        } else {
+            self.clear_media_asset_preview();
         }
         if let Some(Asset::Symbol(id)) = self.assets.selected {
             ui.separator();
@@ -591,6 +713,14 @@ impl Editor {
                     .iter()
                     .find(|s| s.id == id)
                     .map(|s| s.name.clone()),
+                Asset::Media(id) => self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == id)
+                    .map(|asset| asset.name.clone()),
                 _ => None,
             };
             if let Some(name) = name {
@@ -644,6 +774,11 @@ impl Editor {
                             s.library_folder = parent;
                         }
                     }
+                    for asset in &mut self.doc.extras.media.assets {
+                        if asset.folder == Some(id) {
+                            asset.folder = parent;
+                        }
+                    }
                     self.doc.extras.library.folders.retain(|f| f.id != id);
                     self.assets.selected = None;
                     self.recover();
@@ -669,6 +804,14 @@ impl Editor {
                     .iter()
                     .find(|f| f.id == id)
                     .map(|f| f.name.as_str()),
+                Asset::Media(id) => self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == id)
+                    .map(|asset| asset.name.as_str()),
                 Asset::Root => None,
             }
             .unwrap_or("");
@@ -691,6 +834,23 @@ impl Editor {
                     .and_then(|s| s.library_folder)
                     .and_then(|id| self.doc.extras.library.folders.iter().find(|f| f.id == id))
                     .map_or(tr("Biblioteca"), |f| f.name.as_str()),
+                Some(Asset::Media(id)) => self
+                    .doc
+                    .extras
+                    .media
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == id)
+                    .and_then(|asset| asset.folder)
+                    .and_then(|id| {
+                        self.doc
+                            .extras
+                            .library
+                            .folders
+                            .iter()
+                            .find(|folder| folder.id == id)
+                    })
+                    .map_or(tr("Biblioteca"), |folder| folder.name.as_str()),
                 None => "",
             };
             let text = if destination.is_empty() {
@@ -735,8 +895,10 @@ impl Editor {
             if let Some((source, target, before)) = reorder {
                 self.assets.drag = None;
                 self.reorder_library_folder(source, target, before);
-            } else if let (Some(source), Some(target)) = (self.assets.drag.take(), drop_target) {
-                self.move_library_asset(source, target);
+            } else if let Some(target) = drop_target {
+                if let Some(source) = self.assets.drag.take() {
+                    self.move_library_asset(source, target);
+                }
             }
         }
         if let Some(id) = insert {

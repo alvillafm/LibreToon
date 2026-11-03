@@ -141,11 +141,13 @@ impl Editor {
                             "Pegar",
                             "Pegar",
                             false,
-                            !self.studio.clipboard.is_empty(),
+                            !self.hub.home && !self.doc.layers[self.layer].options.locked,
                         )
                         .clicked()
                         {
-                            self.paste_selection();
+                            if !self.paste_media_image() {
+                                self.paste_selection();
+                            }
                             ui.close();
                         }
                         if button(
@@ -189,6 +191,16 @@ impl Editor {
                             self.history(true);
                             ui.close();
                         }
+                    });
+                    ui.menu_button(crate::i18n::tr("Ayuda"), |ui| {
+                        if button(ui, Icon::Rotate, "Buscar actualizaciones", "", false, true)
+                            .clicked()
+                        {
+                            self.updater.check(ui.ctx(), true);
+                            ui.close();
+                        }
+                        crate::design::category(ui, "VERSIÓN ACTUAL:");
+                        ui.label(env!("CARGO_PKG_VERSION"));
                     });
                     ui.add_space(12.);
                     ui.separator();

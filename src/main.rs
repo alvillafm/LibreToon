@@ -27,6 +27,7 @@ mod interaction_ux_tests;
 mod library;
 mod loading;
 mod mannequin;
+mod media;
 mod paint;
 mod recovery;
 mod rig;
@@ -45,6 +46,7 @@ mod tablet;
 mod themes;
 mod tools_editor;
 mod typography;
+mod updater;
 mod vector;
 mod visual_controls;
 mod width;
@@ -58,6 +60,8 @@ use std::{
 };
 
 struct Editor {
+    updater: updater::Updater,
+    media: media::MediaEditor,
     loader: loading::Loader,
     import_report_open: bool,
     rigging: rig_ui::RigEditor,
@@ -140,6 +144,8 @@ impl Editor {
         }
         .into();
         let mut editor = Self {
+            updater: Default::default(),
+            media: Default::default(),
             loader: Default::default(),
             import_report_open: false,
             rigging: Default::default(),
@@ -350,11 +356,15 @@ impl eframe::App for Editor {
                 self.hub.closing = self.hub.tabs.iter().position(|t| t.record.dirty);
             }
         }
-        if self.playing {
+        if self.media_audio_ready(&ctx) {
             let elapsed = self.tick.elapsed().as_secs_f64();
             let steps = (elapsed * self.doc.fps as f64).floor() as usize;
             if steps > 0 {
+                let before = crate::animation::movie_offset(&self.doc, self.frame);
                 self.advance_animation(steps);
+                if crate::animation::movie_offset(&self.doc, self.frame) < before {
+                    self.restart_media_audio();
+                }
                 self.tick += Duration::from_secs_f64(steps as f64 / self.doc.fps as f64);
             }
             let period = Duration::from_secs_f64(1. / self.doc.fps as f64);
@@ -368,6 +378,8 @@ impl eframe::App for Editor {
         }
         let was_home = self.hub.home;
         self.workspace(ui);
+        self.media_dialog(&ctx);
+        self.updater.show(&ctx);
         if was_home != self.hub.home {
             ctx.request_repaint();
         }
@@ -381,6 +393,11 @@ impl eframe::App for Editor {
                 .show(ui, |ui| {
                     self.canvas_ui(ui);
                 });
+        }
+        if ctx
+            .input(|input| input.pointer.primary_released() || input.key_pressed(egui::Key::Escape))
+        {
+            self.assets.drag = None;
         }
     }
 }
