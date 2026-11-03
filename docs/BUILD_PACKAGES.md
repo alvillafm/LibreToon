@@ -78,3 +78,11 @@ at 100, selects ProRes 4444 XQ with full 4:4:4 chroma. These formats do not prom
 exact RGB round trips. GIF remains palette-limited (up to 256 colors); SVG is vector.
 Maximum MP4/MKV is regression-tested by decoding two frames of one-pixel colored
 edges and comparing every RGB byte with LibreToon's renderer.
+
+On Linux, LibreToon uses XInput2 for pen pressure. In a Wayland session it
+selects XWayland automatically when an XInput2 pressure axis is detected at
+startup. Connect the tablet before opening LibreToon. To choose the window
+backend explicitly, launch with `LIBRETOON_LINUX_BACKEND=x11` or
+`LIBRETOON_LINUX_BACKEND=wayland`. The X11 choice needs a working X11 or
+XWayland display. Native Wayland currently supports ordinary pointer input;
+tablet pressure depends on the XInput2 path.

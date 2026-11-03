@@ -312,6 +312,27 @@ mod mac {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn linux_event_loop<T: 'static>(builder: &mut winit::event_loop::EventLoopBuilder<T>) {
+    use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
+
+    match std::env::var("LIBRETOON_LINUX_BACKEND").as_deref() {
+        Ok("wayland") => {
+            builder.with_wayland();
+        }
+        Ok("x11") if std::env::var_os("DISPLAY").is_some() => {
+            builder.with_x11();
+        }
+        _ if (std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_SOCKET").is_some())
+            && x11::pressure_device_available() =>
+        {
+            builder.with_x11();
+        }
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
 mod x11 {
     use std::{
         ffi::{CStr, c_char, c_int, c_ulong, c_void},
@@ -475,6 +496,10 @@ mod x11 {
         fn drop(&mut self) {
             unsafe { (self.close)(self.display) };
         }
+    }
+
+    pub(super) fn pressure_device_available() -> bool {
+        Connection::open().is_some_and(|connection| connection.sample().0)
     }
 
     #[derive(Default)]

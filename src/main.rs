@@ -405,6 +405,8 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LibreToon",
         eframe::NativeOptions {
+            #[cfg(target_os = "linux")]
+            event_loop_builder: Some(Box::new(tablet::linux_event_loop)),
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
                 .with_inner_size([1360., 860.])
