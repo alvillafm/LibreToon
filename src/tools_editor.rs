@@ -181,7 +181,7 @@ impl Editor {
         state.pivot = None;
     }
     pub fn erase_segment(&mut self, a: Pos2, b: Pos2) -> bool {
-        let areas = crate::editing::eraser_area(a, b, self.width * 0.5);
+        let areas = crate::editing::eraser_area(a, b, self.eraser_width * 0.5);
         let mut marks = self.doc.layers[self.layer].frames[self.frame].to_vec();
         let mut changed = false;
         for area in areas {

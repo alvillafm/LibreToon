@@ -96,13 +96,15 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<(Asset, usi
         }
     }
     let first = out.len();
-    for s in e
-        .doc
-        .extras
-        .symbols
-        .iter()
-        .filter(|s| s.library_folder == parent)
-    {
+    for s in e.doc.extras.symbols.iter().filter(|s| {
+        s.library_folder == parent
+            && !e
+                .doc
+                .extras
+                .animation_clips
+                .iter()
+                .any(|clip| clip.symbol == s.id)
+    }) {
         out.push((Asset::Symbol(s.id), depth));
     }
     out.extend(

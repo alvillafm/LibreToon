@@ -261,7 +261,7 @@ impl Canvas {
                 .instance
                 .as_ref()
                 .and_then(|instance| {
-                    let bounds = e.symbol_bounds(instance.symbol)?;
+                    let bounds = e.animation_instance_bounds(mark)?;
                     Some(
                         [
                             bounds.left_top(),
@@ -420,7 +420,7 @@ fn paint_mark(
 impl Editor {
     pub(crate) fn selection_hit(&self, mark: &Mark, point: Pos2, tolerance: f32) -> bool {
         if let Some(instance) = &mark.style.instance
-            && let Some(bounds) = self.symbol_bounds(instance.symbol)
+            && let Some(bounds) = self.animation_instance_bounds(mark)
             && let Some(inverse) = crate::rig::inverse(instance.matrix)
         {
             let local = crate::rig::point(inverse, point);
@@ -434,6 +434,20 @@ impl Editor {
             Tool::Eraser
         } else {
             self.tool
+        };
+        let tool = if self.doc.layers[self.layer].options.animation_track
+            && !matches!(
+                tool,
+                Tool::Select
+                    | Tool::Object
+                    | Tool::Transform
+                    | Tool::Pan
+                    | Tool::Zoom
+                    | Tool::Eyedropper
+            ) {
+            Tool::Object
+        } else {
+            tool
         };
         let mut state = std::mem::take(&mut self.canvas);
         state.stage_size = Vec2::new(self.doc.width as f32, self.doc.height as f32);
@@ -479,7 +493,8 @@ impl Editor {
             view = self.camera_view(stage_view);
         }
         let ctx = ui.ctx().clone();
-        if let Some(id) = response.dnd_release_payload::<crate::media::MediaDrag>()
+        if egui::DragAndDrop::has_payload_of_type::<crate::media::MediaDrag>(&ctx)
+            && let Some(id) = response.dnd_release_payload::<crate::media::MediaDrag>()
             && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
             && area.contains(pos)
         {
@@ -760,11 +775,18 @@ impl Editor {
                 && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                 && !state.selected.is_empty()
             {
-                self.checkpoint();
                 let mut ids = state.selected.clone();
+                if ids
+                    .iter()
+                    .any(|(l, _)| !self.doc.layers[*l].options.animation_track)
+                {
+                    self.checkpoint();
+                }
                 ids.sort_unstable();
                 for (l, m) in ids.into_iter().rev() {
-                    self.doc.layers[l].frames[self.frame].remove(m);
+                    if !self.queue_animation_clip_delete(l) {
+                        self.doc.layers[l].frames[self.frame].remove(m);
+                    }
                 }
                 state.clear_selection();
                 self.recover();
@@ -772,9 +794,18 @@ impl Editor {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D))
                 && !state.selected.is_empty()
             {
-                self.checkpoint();
+                if state
+                    .selected
+                    .iter()
+                    .any(|(l, _)| !self.doc.layers[*l].options.animation_track)
+                {
+                    self.checkpoint();
+                }
                 let mut selected = vec![];
                 for &(l, m) in &state.selected {
+                    if self.queue_animation_clip_duplicate(l) {
+                        continue;
+                    }
                     let mark = transformed(
                         &self.doc.layers[l].frames[self.frame][m],
                         Pos2::ZERO,
@@ -1901,7 +1932,12 @@ impl Editor {
             )
         {
             if let Some(pointer) = pointer {
-                let radius = (self.width * view.scale * 0.5).max(1.);
+                let width = if tool == Tool::Eraser {
+                    self.eraser_width
+                } else {
+                    self.width
+                };
+                let radius = (width * view.scale * 0.5).max(1.);
                 painter.circle_stroke(pointer, radius, Stroke::new(3., Color32::BLACK));
                 painter.circle_stroke(pointer, radius, Stroke::new(1., Color32::WHITE));
             }
@@ -1910,6 +1946,8 @@ impl Editor {
         self.paint_rulers(&ruler_painter, ruler_area, view);
         self.sync_selected_style(&state.selected);
         self.canvas = state;
+        self.animation_canvas_drop(ui, area, view);
+        self.finish_animation_clip_ui(&ctx);
     }
 }
 #[cfg(test)]
@@ -3484,11 +3522,43 @@ mod new_tool_regressions {
         });
     }
     #[test]
+    fn brush_and_eraser_sizes_remain_independent_and_drive_actual_erasure() {
+        run(|_ctx, e| {
+            e.width = 3.;
+            e.eraser_width = 40.;
+            e.activate_tool(Tool::Eraser);
+            e.doc.layers[0].frames[0].push(rect([100., 100.], [400., 400.], [10, 20, 30, 255]));
+            assert!(e.erase_segment(Pos2::new(250., 80.), Pos2::new(250., 420.)));
+            assert!(
+                !e.doc.layers[0].frames[0]
+                    .iter()
+                    .any(|m| crate::vector::contains_fill(m, Pos2::new(265., 250.)))
+            );
+            assert!(
+                e.doc.layers[0].frames[0]
+                    .iter()
+                    .any(|m| crate::vector::contains_fill(m, Pos2::new(280., 250.)))
+            );
+            e.eraser_width = 11.;
+            e.activate_tool(Tool::Brush);
+            assert_eq!(e.width, 3.);
+            e.width = 7.;
+            e.activate_tool(Tool::Eraser);
+            assert_eq!(e.eraser_width, 11.);
+            e.drawing.pen.test_eraser(true);
+            assert_eq!(e.width, 7.);
+            e.drawing.pen.test_eraser(false);
+            assert_eq!(e.eraser_width, 11.);
+        });
+    }
+
+    #[test]
     fn stylus_eraser_erases_without_replacing_the_selected_tool() {
         run(|ctx, e| {
             e.doc.layers[0].frames[0].push(rect([100., 100.], [400., 400.], [10, 20, 30, 255]));
             e.tool = Tool::Brush;
-            e.width = 40.;
+            e.width = 3.;
+            e.eraser_width = 40.;
             e.drawing.pen.test_eraser(true);
             let v = view(e);
             let a = v.screen(Pos2::new(250., 80.));
@@ -3553,7 +3623,7 @@ mod new_tool_regressions {
                 ..Default::default()
             });
             e.tool = Tool::Eraser;
-            e.width = 40.;
+            e.eraser_width = 40.;
             let v = view(e);
             let a = v.screen(Pos2::new(250., 80.));
             let b = v.screen(Pos2::new(250., 420.));

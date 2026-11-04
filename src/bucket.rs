@@ -65,8 +65,12 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
                 || mark.style.end_cap != crate::features::Cap::Round)
         {
             obstacles.push(width::outline(mark));
-        } else if mark.stroke || mark.fill.is_some() {
+        } else if mark.stroke {
             obstacles.push(line(points.iter().copied()).buffer(thickness as f64 / 2.));
+        } else if mark.fill.is_some() {
+            // Filled brush silhouettes already describe the real ink boundary.
+            // Buffering their edge creates an artificial white gutter inside it.
+            obstacles.push(MultiPolygon(vec![vector::polygon(mark)]));
         }
         if mark.stroke || mark.fill.is_some() {
             paths.push((points, thickness, mark.closed || mark.rectangle));
@@ -74,7 +78,9 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         for hole in &mark.holes {
             let points: Vec<_> = hole.iter().copied().map(vector::pos).collect();
             if points.len() > 2 {
-                obstacles.push(line(points.iter().copied()).buffer(thickness as f64 / 2.));
+                if mark.stroke {
+                    obstacles.push(line(points.iter().copied()).buffer(thickness as f64 / 2.));
+                }
                 paths.push((points, thickness, true));
             }
         }
@@ -155,7 +161,12 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
     {
         return Err("La zona está abierta. Prueba otro nivel de cierre de huecos".into());
     }
-    let mut shapes = vector::polygons_to_marks(MultiPolygon(vec![region]), color);
+    // Tuck a small overlap beneath existing ink to cover tessellation/AA seams.
+    // Intersect with ink so expansion cannot spill into any neighbouring face,
+    // even through thin outlines. Bucket marks are inserted behind the contours.
+    let face = MultiPolygon(vec![region]);
+    let underpaint = face.buffer(0.35).intersection(&ink);
+    let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
     for shape in &mut shapes {
         shape.bucket = true;
     }
@@ -188,6 +199,67 @@ mod tests {
         assert!(vector::contains_fill(&shapes[0], Pos2::new(50., 50.)));
         assert!(fill(&[m], Pos2::new(200., 200.), Gap::Large, [0, 0, 0, 255]).is_err());
     }
+    #[test]
+    fn brush_fill_meets_ink_without_a_gutter_or_spilling_outside() {
+        let outline = Mark {
+            points: vec![[8., 8.], [56., 8.], [56., 56.], [8., 56.], [8., 8.]].into(),
+            holes: vec![vec![[12., 12.], [12., 52.], [52., 52.], [52., 12.], [12., 12.]].into()]
+                .into(),
+            fill: Some([0, 0, 0, 255]),
+            stroke: false,
+            closed: true,
+            ..Default::default()
+        };
+        let original = serde_json::to_vec(&outline).unwrap();
+        let filled = fill(
+            &[outline.clone()],
+            Pos2::new(32., 32.),
+            Gap::None,
+            [89, 72, 220, 255],
+        )
+        .unwrap();
+        assert!(
+            filled
+                .iter()
+                .any(|m| vector::contains_fill(m, Pos2::new(12.05, 32.)))
+        );
+        assert!(
+            filled
+                .iter()
+                .any(|m| vector::contains_fill(m, Pos2::new(11.8, 32.)))
+        );
+        assert!(
+            !filled
+                .iter()
+                .any(|m| vector::contains_fill(m, Pos2::new(7.9, 32.)))
+        );
+        assert_eq!(original, serde_json::to_vec(&outline).unwrap());
+        let mut doc = crate::Document::default();
+        doc.width = 64;
+        doc.height = 64;
+        doc.layers[0].frames[0] = filled.into();
+        doc.layers[0].frames[0].push(outline);
+        for scale in [1, 11] {
+            let size = 64 * scale;
+            let pixels = crate::exporter::raster(
+                &doc,
+                0,
+                size,
+                size,
+                &eframe::egui::Context::default(),
+                &mut Default::default(),
+            );
+            for x in 10 * scale..15 * scale {
+                let at = ((32 * scale * size + x) * 3) as usize;
+                assert!(
+                    pixels[at] <= 90 && pixels[at + 1] <= 73 && pixels[at + 2] <= 221,
+                    "White seam at scale {scale}, x {x}: {:?}",
+                    &pixels[at..at + 3]
+                );
+            }
+        }
+    }
+
     #[test]
     fn gap_levels_close_only_gaps_within_their_threshold() {
         let m = contour(8.);

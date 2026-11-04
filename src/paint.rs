@@ -246,8 +246,8 @@ pub fn draw(
             }
         }
         let feather = p.ctx().pixels_per_point().max(0.1).recip();
-        // Bucket regions already stop at the inner ink boundary. An outward
-        // AA fringe here can poke through thin outlines, especially zoomed out.
+        // Bucket regions include underpaint clipped to the existing ink. An outward
+        // screen-space AA fringe could still poke through thin outlines.
         for (index, ring) in prepared.rings.iter().enumerate().filter(|_| !mark.bucket) {
             let mut edge = boundary_fringe(
                 ring,

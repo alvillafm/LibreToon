@@ -61,6 +61,8 @@ impl Editor {
         for (parent, _, _, id) in self.feature.symbol_stack.iter().rev() {
             let mut next = parent.clone();
             next.extras.symbols = child.extras.symbols.clone();
+            next.extras.animation_clips = child.extras.animation_clips.clone();
+            next.extras.animation_library = child.extras.animation_library.clone();
             next.extras.library = child.extras.library.clone();
             next.extras.media.assets = child.extras.media.assets.clone();
             if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
@@ -69,6 +71,7 @@ impl Editor {
                 s.folders = child.extras.folders.clone();
                 s.perspective = child.extras.perspective.clone();
             }
+            crate::animation_clips::normalize_asset_ranges(&mut next, *id);
             child = next;
         }
         crate::animation::store_scene(&mut child);
@@ -199,6 +202,8 @@ impl Editor {
         self.finish_pending_pen();
         if let Some((mut parent, frame, layer, id)) = self.feature.symbol_stack.pop() {
             parent.extras.symbols = self.doc.extras.symbols.clone();
+            parent.extras.animation_clips = self.doc.extras.animation_clips.clone();
+            parent.extras.animation_library = self.doc.extras.animation_library.clone();
             parent.extras.library = self.doc.extras.library.clone();
             parent.extras.media.assets = self.doc.extras.media.assets.clone();
             if let Some(s) = parent.extras.symbols.iter_mut().find(|s| s.id == id) {
@@ -207,6 +212,7 @@ impl Editor {
                 s.folders = self.doc.extras.folders.clone();
                 s.perspective = self.doc.extras.perspective.clone();
             }
+            crate::animation_clips::normalize_asset_ranges(&mut parent, id);
             self.doc = parent;
             self.rigging = Default::default();
             self.feature.selected_folder = None;
@@ -297,7 +303,12 @@ impl Editor {
                 .flat_map(|l| l.frames.iter().flatten())
                 .any(|m| m.style.instance.as_ref().is_some_and(|i| i.symbol == id))
         };
-        references(&self.doc.layers)
+        self.doc
+            .extras
+            .animation_clips
+            .iter()
+            .any(|clip| clip.symbol == id)
+            || references(&self.doc.layers)
             || self
                 .doc
                 .extras
@@ -570,6 +581,9 @@ impl Editor {
         });
         let count = (start + duration).min(10000);
         for l in &mut self.doc.layers {
+            if crate::animation_clips::resize_track(l, count) {
+                continue;
+            }
             l.init_keys();
             l.frames.resize(count, Default::default());
             l.options.keys.resize(count, true);
@@ -738,6 +752,9 @@ impl Editor {
         }
         if start > self.doc.layers[0].frames.len() {
             for l in &mut self.doc.layers {
+                if crate::animation_clips::resize_track(l, start.min(10000)) {
+                    continue;
+                }
                 l.init_keys();
                 l.frames.resize(start.min(10000), Default::default());
                 l.options.keys.resize(l.frames.len(), true);

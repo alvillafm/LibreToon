@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod advanced;
 mod animation;
+mod animation_clips;
 #[cfg(test)]
 mod animation_tests;
 #[cfg(test)]
@@ -21,6 +22,7 @@ mod features;
 mod ffmpeg_setup;
 mod fla;
 mod fla_zip;
+mod frame_clipboard;
 mod i18n;
 mod inspector;
 #[cfg(test)]
@@ -69,6 +71,8 @@ struct Editor {
     import_report_open: bool,
     rigging: rig_ui::RigEditor,
     assets: library::LibraryState,
+    clips: animation_clips::Manager,
+    frame_clipboard: frame_clipboard::State,
     hub: documents::Hub,
     drawing: drawing::Drawing,
     feature: features::FeatureState,
@@ -83,6 +87,7 @@ struct Editor {
     fill_enabled: bool,
     stroke_enabled: bool,
     width: f32,
+    eraser_width: f32,
     smoothing: f32,
     polygon_sides: usize,
     polygon_star: bool,
@@ -154,6 +159,8 @@ impl Editor {
             import_report_open: false,
             rigging: Default::default(),
             assets: Default::default(),
+            clips: Default::default(),
+            frame_clipboard: Default::default(),
             hub,
             drawing: Default::default(),
             feature: Default::default(),
@@ -168,6 +175,7 @@ impl Editor {
             fill_enabled: true,
             stroke_enabled: true,
             width: 4.,
+            eraser_width: 20.,
             smoothing: 0.7,
             polygon_sides: 5,
             polygon_star: false,
@@ -259,6 +267,7 @@ impl Editor {
         }
     }
     fn history(&mut self, redo: bool) {
+        self.clips.reset_document();
         self.rigging.cancel_gesture();
         let entry = if redo {
             self.redo.pop()

@@ -28,6 +28,19 @@ impl Editor {
                             self.open();
                             ui.close();
                         }
+                        if button(
+                            ui,
+                            Icon::Open,
+                            "Abrir copia guardada…",
+                            "Abrir el archivo del disco en otra pestaña sin descartar cambios",
+                            false,
+                            self.path.is_some() && !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.open_saved_document_copy();
+                            ui.close();
+                        }
                         if button(ui, Icon::Save, "Guardar", "Ctrl+S", false, true).clicked() {
                             self.save_project(false);
                             ui.close();
@@ -109,6 +122,34 @@ impl Editor {
                         }
                     });
                     ui.menu_button(crate::i18n::tr("Edición"), |ui| {
+                        if button(
+                            ui,
+                            Icon::Copy,
+                            "Copy frames",
+                            "Copy frames",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.copy_timeline_frames();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Paste,
+                            "Paste frames",
+                            "Paste frames",
+                            false,
+                            !self.hub.home && self.can_paste_timeline_frames(),
+                        )
+                        .clicked()
+                        {
+                            self.paste_timeline_frames();
+                            ui.close();
+                        }
+                        ui.separator();
+
                         if button(
                             ui,
                             Icon::Copy,
@@ -320,45 +361,63 @@ impl Editor {
                 });
             });
         egui::Panel::right("properties")
-            .default_size(305.)
+            .default_size(370.)
             .min_size(245.)
             .max_size(650.)
             .resizable(true)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if button(
                         ui,
                         Icon::Settings,
                         "Propiedades",
                         "Propiedades",
-                        !self.feature.library,
+                        !self.feature.library && !self.clips.open,
                         true,
                     )
                     .clicked()
                     {
                         self.feature.library = false;
+                        self.clips.open = false;
                     }
                     if button(
                         ui,
                         Icon::Library,
                         "Biblioteca",
                         "Biblioteca",
-                        self.feature.library,
+                        self.feature.library && !self.clips.open,
                         true,
                     )
                     .clicked()
                     {
                         self.feature.library = true;
+                        self.clips.open = false;
+                    }
+                    if button(
+                        ui,
+                        Icon::Film,
+                        "Animation",
+                        "Animation Manager",
+                        self.clips.open,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.clips.open = true;
                     }
                 });
                 ui.separator();
-                if self.feature.library {
+                if self.clips.open {
+                    self.animation_manager_ui(ui);
+                } else if self.feature.library {
                     self.library_ui(ui);
                 } else {
                     self.properties_ui(ui);
                 }
             });
         self.sequencer(ui);
+        self.finish_animation_clip_ui(&ctx);
+        self.animation_clip_dialog(&ctx);
         egui::Panel::top("document_tab")
             .exact_size(34.)
             .show(ui, |ui| {

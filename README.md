@@ -20,6 +20,22 @@ LibreToon is a **vibe-coded project**, created by an animator. The idea is simpl
 
 ## Features
 
+### Copy frames between projects
+Open both projects in tabs. Select a timeline range with Shift-click, choose **Copy frames**, then select the destination layer/frame and choose **Paste frames**. Ctrl+C/Ctrl+V (Cmd on macOS) use the frame clipboard while the timeline is active. Pasting adds the copied artwork to the existing drawing layer; it does not create a layer or erase its previous contents. Frame counts are preserved even when project FPS differ.
+
+Symbols, images and animation dependencies are copied with new IDs. Project-level rigs are kept in a self-contained editable symbol; clipped artwork is sampled as editable geometry. Intersecting motion tweens in the destination are sampled to preserve their appearance, including outside the pasted range. Undo restores the entire paste and its imported resources. The frame clipboard is shared by tabs within the same LibreToon instance.
+
+### Reusable animation clips
+The **Animation** tab beside Library opens Animation Manager. Select a timeline range (Shift-click to extend it), then use **Create Animation Clip…** to choose layers, include their rig, and group the clip under a named resource. Characters, props, effects and frame-by-frame drawings use the same workflow; the original animation stays in place.
+
+Animation Manager has its own colored folder tree. Use the folder button to create nested folders; rename and color them from their context menu or selected-folder properties. Drag animations or folders onto a folder to move them inside, or near a row edge to reorder them. Drop onto **Animations** or the empty area below the tree to move an item to the root. Deleting a folder moves its contents up one level without deleting its animations.
+
+Drag a clip onto the stage to place an instance, or onto an animation track to sequence it. Move the block to change its start; drag an edge to trim, or hold Shift while dragging an edge to change playback speed. Right-click for looping, reverse, duplication, editing and deletion. Clips on one track cannot overlap. Deleting the final clip removes its track; Undo restores it. Layer order, visibility and locking also apply to animation tracks.
+
+Animation tracks have a trash button in their header and a **Delete animation track** context action; deleting a track keeps its reusable resources. The rigging header also has a trash button and **Delete rigging track**. This removes bones, weights, pins and rig keys in the current scene/symbol, keeping the underlying artwork in its unrigged form. Undo restores the rig.
+
+Double-click opens the shared source with the captured frame range selected. Source drawings, bones, puppet data and keyframes stay editable, and edits update its instances. **Duplicate animation** makes an independent source for variations. Native save/recovery and LibreToon FLA metadata retain clips; the visible XFL preview is baked for interoperability. This does not provide automatic motion retargeting between different skeletons.
+
 LibreToon combines traditional animation tools with features that go beyond what Adobe Animate currently offers.
 
 ### Drawing & Painting

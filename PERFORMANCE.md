@@ -237,3 +237,11 @@ La previsualización usa una única tarea de composición en segundo plano, sin 
 Gaussian utiliza filtrado separable; Lens utiliza un núcleo circular muestreado con 8/20/48 muestras según calidad. La composición trabaja con alfa premultiplicado y un margen fuera del encuadre antes de recortar el resultado, para evitar halos negros y permitir que el desenfoque de dibujos exteriores entre en cámara. La geometría del fotograma se resuelve una vez por composición.
 
 Medición local Windows x64, perfil release optimizado predeterminado, escenario de 640 × 360, dos capas rectangulares (una enfocada), fuerza 60, tres composiciones por configuración: Gaussian baja/media/alta: 15,72 / 20,26 / 31,97 ms por fotograma; Lens baja/media/alta: 15,13 / 19,95 / 34,42 ms. Mide composición de software del escenario sintético, no FPS globales ni latencia de entrada. Reproducible con `cargo test --release --locked benchmark_camera_depth_and_blur -- --ignored --nocapture --test-threads=1`.
+
+## Clips de animación
+Los recursos reutilizan capas, geometría y rigs mediante los contenedores compartidos existentes. Los bloques son exposiciones de instancias: no se hornea una copia del dibujo por fotograma. La vista previa de arrastre conserva solo el bloque afectado y confirma un único cambio de historial al soltar. Las exposiciones se reconstruyen en esa confirmación, con el límite habitual de 10.000 fotogramas.
+
+La pista conserva una caché por identidad de fotogramas y claves, reteniendo sus propietarios para impedir reutilización accidental de direcciones. Solo se dibujan los bloques que intersectan la vista. La comprobación de colisiones durante el arrastre usa los intervalos ordenados. La edición interna conserva el aislamiento entre el recurso y las capas originales; las variaciones independientes comienzan compartiendo datos y se separan al editar.
+
+## Portapapeles de fotogramas
+La copia conserva geometría compartida del intervalo y únicamente sus recursos alcanzables. No retiene los demás proyectos, pistas de medios o capas de la escena. La importación remapea identificadores y reutiliza fotogramas compartidos durante una acción explícita de pegado; primero valida un candidato y después añade una única entrada de historial. Las interacciones de ratón no recorren el paquete del portapapeles.

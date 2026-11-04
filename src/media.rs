@@ -996,6 +996,9 @@ impl Editor {
             return;
         }
         for layer in &mut self.doc.layers {
+            if crate::animation_clips::resize_track(layer, end) {
+                continue;
+            }
             layer.init_keys();
             let held = layer.frames.last().cloned().unwrap_or_default();
             layer.frames.resize(end, held);
@@ -1180,7 +1183,9 @@ impl Editor {
             self.recover();
             return;
         }
-        if let Some(source) = title.dnd_release_payload::<MediaTrackDrag>() {
+        if egui::DragAndDrop::has_payload_of_type::<MediaTrackDrag>(ui.ctx())
+            && let Some(source) = title.dnd_release_payload::<MediaTrackDrag>()
+        {
             self.move_media_track(source.0, track.slot, Some(t));
             return;
         }
@@ -1297,6 +1302,7 @@ impl Editor {
             );
         }
         if !track.locked
+            && egui::DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx())
             && let Some(asset) = row_response.dnd_release_payload::<MediaDrag>()
         {
             let frame = ui

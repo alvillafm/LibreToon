@@ -129,6 +129,8 @@ pub struct Instance {
 #[serde(default)]
 pub struct MarkStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_clip: Option<crate::animation_clips::Timing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_image: Option<u64>,
     pub instance_color: Option<[f32; 8]>,
     pub guide: bool,
@@ -144,6 +146,7 @@ pub struct MarkStyle {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
+    pub animation_track: bool,
     pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
@@ -156,6 +159,7 @@ pub struct LayerOptions {
 impl Default for LayerOptions {
     fn default() -> Self {
         Self {
+            animation_track: false,
             depth: Default::default(),
             mannequin: None,
             locked: false,
@@ -174,7 +178,9 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    !extras.imported
+    extras.animation_library.is_empty()
+        && extras.animation_clips.is_empty()
+        && !extras.imported
         && extras.import_warnings.is_empty()
         && extras.rig.is_empty()
         && extras.library.is_empty()
@@ -242,6 +248,8 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    pub animation_library: crate::animation_clips::Collection,
+    pub animation_clips: SharedVec<crate::animation_clips::Asset>,
     pub imported: bool,
     pub import_warnings: SharedVec<String>,
     pub rig: crate::rig::Rig,
@@ -416,7 +424,14 @@ fn expand(
         };
         let count = symbol.layers.first().map_or(1, |l| l.frames.len()).max(1);
         let parent_frame = frame;
-        let frame = symbol_frame(instance, count, frame, clock);
+        let frame = mark
+            .style
+            .animation_clip
+            .as_ref()
+            .and_then(|timing| {
+                crate::animation_clips::source_frame(doc, timing, instance.born, frame)
+            })
+            .unwrap_or_else(|| symbol_frame(instance, count, frame, clock));
         let mut sub = doc.clone();
         sub.layers = symbol.layers.clone();
         sub.extras.cameras = Default::default();
@@ -433,9 +448,13 @@ fn expand(
             frame,
             depth + 1,
             guides,
-            clock
-                .saturating_sub(instance.born)
-                .saturating_add(instance.first),
+            if mark.style.animation_clip.is_some() {
+                frame
+            } else {
+                clock
+                    .saturating_sub(instance.born)
+                    .saturating_add(instance.first)
+            },
         ) {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
@@ -665,6 +684,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     validate_resources(doc)?;
     validate_expansion(doc)?;
     crate::animation::validate(doc)?;
+    crate::animation_clips::validate(doc)?;
     let mut checked = std::collections::HashSet::new();
     for layer in &doc.layers {
         if !layer.options.depth.valid()

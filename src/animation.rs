@@ -611,6 +611,9 @@ impl Editor {
     }
     pub fn create_motion(&mut self) {
         let l = self.layer;
+        if self.doc.layers[l].options.animation_track {
+            return;
+        }
         if self.doc.layers[l].options.locked
             || self.doc.layers[l].options.mannequin.is_some()
             || self.doc.layers[l].frames[self.frame].is_empty()

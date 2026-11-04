@@ -18,9 +18,15 @@ struct State {
 pub struct Loader {
     shared: Arc<(Mutex<State>, Condvar)>,
     worker: Option<JoinHandle<()>>,
+    saved_copy: bool,
 }
 impl Loader {
+    pub fn request_saved_copy(&mut self, path: PathBuf) {
+        self.request(path);
+        self.saved_copy = true;
+    }
     pub fn request(&mut self, path: PathBuf) {
+        self.saved_copy = false;
         if self.worker.is_none() {
             let shared = self.shared.clone();
             self.worker = Some(std::thread::spawn(move || {
@@ -76,7 +82,21 @@ impl Editor {
             match result {
                 Ok(doc) => {
                     let imported = doc.extras.imported;
-                    self.add_document(doc, Some(path));
+                    if self.loader.saved_copy {
+                        let name = format!(
+                            "{} ({})",
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            crate::i18n::tr("Copia guardada")
+                        );
+                        self.add_document(doc, None);
+                        if let Some(index) = self.hub.active {
+                            self.hub.tabs[index].record.name = name;
+                            self.hub.tabs[index].record.dirty = true;
+                        }
+                        self.persist_documents();
+                    } else {
+                        self.add_document(doc, Some(path));
+                    }
                     if imported {
                         self.import_report_open = true;
                         self.status =

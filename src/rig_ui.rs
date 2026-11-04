@@ -1338,3 +1338,19 @@ mod audit_gesture_tests {
         assert!(e.rigging.drag.is_none());
     }
 }
+
+impl Editor {
+    pub(crate) fn delete_rigging_track(&mut self) -> bool {
+        if self.doc.extras.rig.is_empty() {
+            return false;
+        }
+        self.finish_rig_gesture();
+        self.checkpoint();
+        self.doc.extras.rig = Default::default();
+        self.rigging = Default::default();
+        self.feature.frame_selection = None;
+        self.canvas.clear_selection();
+        self.recover();
+        true
+    }
+}

@@ -1396,3 +1396,74 @@ mod audit_log_tests {
         assert_eq!(result.len(), 65536);
     }
 }
+
+// Headless visual QA shares the export rasterizer; it never changes application rendering.
+#[cfg(test)]
+pub(crate) fn raster_ui_test(
+    ctx: &egui::Context,
+    output: &mut egui::FullOutput,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let mut textures = std::collections::HashMap::<egui::TextureId, ([usize; 2], Vec<u8>)>::new();
+    for (id, deltas) in &output.textures_delta.set {
+        for delta in deltas {
+            let egui::ImageData::Color(image) = &delta.image;
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+            if let Some([x, y]) = delta.pos {
+                if let Some((size, data)) = textures.get_mut(id) {
+                    for row in 0..image.size[1] {
+                        let start = ((y + row) * size[0] + x) * 4;
+                        let source = row * image.size[0] * 4;
+                        data[start..start + image.size[0] * 4]
+                            .copy_from_slice(&rgba[source..source + image.size[0] * 4]);
+                    }
+                }
+            } else {
+                textures.insert(*id, (image.size, rgba));
+            }
+        }
+    }
+    let mut pixels = [39, 40, 44].repeat((w * h) as usize);
+    let mut tinted = std::collections::HashMap::<(egui::TextureId, [u8; 4]), Vec<u8>>::new();
+    for primitive in ctx.tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point) {
+        if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+            let texture = textures
+                .get(&mesh.texture_id)
+                .map(|(size, data)| (*size, data.as_slice()));
+            for indices in mesh.indices.chunks_exact(3) {
+                let vertices = [
+                    mesh.vertices[indices[0] as usize],
+                    mesh.vertices[indices[1] as usize],
+                    mesh.vertices[indices[2] as usize],
+                ];
+                if vertices.iter().all(|v| v.uv == egui::epaint::WHITE_UV) {
+                    triangle(&mut pixels, w, h, vertices, primitive.clip_rect, None);
+                } else if let Some((size, data)) = texture {
+                    let color = vertices[0].color.to_srgba_unmultiplied();
+                    let rgba = tinted.entry((mesh.texture_id, color)).or_insert_with(|| {
+                        data.chunks_exact(4)
+                            .flat_map(|p| {
+                                [
+                                    color[0],
+                                    color[1],
+                                    color[2],
+                                    ((p[3] as u16 * color[3] as u16) / 255) as u8,
+                                ]
+                            })
+                            .collect()
+                    });
+                    triangle(
+                        &mut pixels,
+                        w,
+                        h,
+                        vertices,
+                        primitive.clip_rect,
+                        Some((size, rgba)),
+                    );
+                }
+            }
+        }
+    }
+    pixels
+}

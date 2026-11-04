@@ -426,13 +426,19 @@ impl Editor {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)) {
-            self.copy_selection(false);
+            if self.frame_clipboard.focus {
+                self.copy_timeline_frames();
+            } else {
+                self.copy_selection(false);
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X)) {
             self.copy_selection(true);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)) {
-            if !self.paste_media_image() {
+            if self.frame_clipboard.focus && self.frame_clipboard.has_frames() {
+                self.paste_timeline_frames();
+            } else if !self.paste_media_image() {
                 self.paste_selection();
             }
         }
@@ -444,6 +450,7 @@ impl Editor {
         if ids.is_empty() {
             return;
         }
+        self.frame_clipboard.clear();
         self.studio.clipboard_symbols = self.doc.extras.symbols.clone();
         self.studio.clipboard = ids
             .iter()

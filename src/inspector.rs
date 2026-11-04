@@ -370,9 +370,13 @@ impl Editor {
             ) {
                 design::category(ui, "TRAZO");
                 ui.label(crate::i18n::tr("Grosor"));
-                let response = ui.add(
-                    egui::Slider::new(&mut self.width, 1.0..=80.).suffix(crate::i18n::tr(" px")),
-                );
+                let size = if self.tool == Tool::Eraser {
+                    &mut self.eraser_width
+                } else {
+                    &mut self.width
+                };
+                let response =
+                    ui.add(egui::Slider::new(size, 1.0..=80.).suffix(crate::i18n::tr(" px")));
                 if response.changed() && self.tool == Tool::Width {
                     let ids = self.canvas.selected.clone();
                     self.checkpoint();

@@ -829,8 +829,10 @@ mod legacy_fixture_tests {
     #[test]
     #[ignore = "manual external legacy FLA fixture"]
     fn external_legacy_native_fla_preserves_layers_and_exposures() {
-        let path = std::env::var("LIBRETOON_LEGACY_FLA").expect("Set LIBRETOON_LEGACY_FLA");
-        let bytes = std::fs::read(path).unwrap();
+        let path = std::path::PathBuf::from(
+            std::env::var("LIBRETOON_LEGACY_FLA").expect("Set LIBRETOON_LEGACY_FLA"),
+        );
+        let bytes = std::fs::read(&path).unwrap();
         let native = crate::fla_zip::entry(&bytes, b"LIBRETOON/document.json")
             .unwrap()
             .unwrap();
@@ -838,6 +840,27 @@ mod legacy_fixture_tests {
         assert!(source.validate().is_ok());
         let imported = decode(&bytes).unwrap();
         assert_eq!(imported.layers.len(), source.layers.len());
+        let ctx = eframe::egui::Context::default();
+        let mut editor = crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        let mut flattened = crate::Document::default();
+        flattened.fps = 17;
+        editor.add_document(flattened, Some(path));
+        let old = editor.hub.active.unwrap();
+        editor.hub.tabs[old].record.dirty = true;
+        editor.open_saved_document_copy();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while editor.hub.active == Some(old) {
+            editor.poll_open(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(editor.doc.layers.len(), 3);
+        assert!(editor.path.is_none()); // Save As protects the original.
+        editor.activate_document(old);
+        assert_eq!(editor.doc.layers.len(), 1);
+        assert_eq!(editor.doc.fps, 17);
+        assert!(editor.hub.tabs[old].record.dirty);
+
         for (a, b) in source.layers.iter().zip(imported.layers.iter()) {
             assert_eq!(a.name, b.name);
             assert_eq!(a.options.keys, b.options.keys);

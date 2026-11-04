@@ -40,6 +40,8 @@ impl Session {
         }
     }
     fn exchange(&mut self, e: &mut Editor) {
+        e.clips.reset_document();
+        e.frame_clipboard.focus = false;
         std::mem::swap(&mut self.rigging, &mut e.rigging);
         std::mem::swap(&mut self.assets, &mut e.assets);
         std::mem::swap(&mut self.doc, &mut e.doc);
@@ -370,6 +372,13 @@ impl Editor {
         self.recover();
         self.persist_documents();
     }
+    pub fn open_saved_document_copy(&mut self) {
+        if let Some(path) = self.path.clone() {
+            self.status = crate::i18n::tr("Abriendo copia guardada…").into();
+            self.loader.request_saved_copy(path);
+        }
+    }
+
     pub fn open_document_path(&mut self, path: PathBuf) {
         let path = path.canonicalize().unwrap_or(path);
         if let Some(i) = self

@@ -141,6 +141,9 @@ impl Editor {
         }
         for other in &mut self.doc.layers {
             if other.frames.len() < count {
+                if crate::animation_clips::resize_track(other, count) {
+                    continue;
+                }
                 other.init_keys();
                 let held = other.frames.last().cloned().unwrap_or_default();
                 other.frames.resize(count, held);
@@ -176,15 +179,28 @@ impl Editor {
                 Some((layer, 0, self.doc.layers[layer].frames.len() - 1));
             return;
         }
-        if action == 1 && (self.doc.layers.len() == 1 || self.doc.layers[layer].options.locked) {
+        if action == 1
+            && ((self.doc.layers.len() == 1 && !self.doc.layers[layer].options.animation_track)
+                || self.doc.layers[layer].options.locked)
+        {
             return;
         }
         self.finish_pending_pen();
         self.checkpoint();
         match action {
             1 => {
+                let count = self.doc.layers[layer].frames.len();
                 self.doc.layers.remove(layer);
+                if self.doc.layers.is_empty() {
+                    let mut blank = crate::fresh_document().layers[0].clone();
+                    blank.frames = vec![Default::default(); count].into();
+                    blank.options.keys = vec![false; count].into();
+                    blank.options.keys[0] = true;
+                    self.doc.layers.push(blank);
+                }
                 self.layer = layer.min(self.doc.layers.len() - 1);
+                self.clips.clear_track_selection();
+                self.feature.row_drag = None;
                 self.renaming_layer = None;
                 self.feature.frame_selection = None;
                 self.feature.frame_drag = None;
@@ -207,6 +223,9 @@ impl Editor {
         self.timeline_layer_edit(action);
     }
     fn timeline_layer_edit(&mut self, action: usize) {
+        if self.doc.layers[self.layer].options.animation_track {
+            return;
+        }
         if self.doc.layers[self.layer].options.locked
             || self.doc.layers[self.layer].options.mannequin.is_some()
         {
@@ -292,6 +311,9 @@ impl Editor {
             .max(1);
         for l in &mut self.doc.layers {
             if l.frames.len() < count {
+                if crate::animation_clips::resize_track(l, count) {
+                    continue;
+                }
                 l.init_keys();
                 let content = if action == 2 {
                     l.frames.last().cloned().unwrap_or_default()
@@ -647,7 +669,8 @@ impl Editor {
                         );
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if button(ui, Icon::Tween, "", "Motion tween", false, true).clicked() {
+                            if button(ui,Icon::Film,"","Create Animation Clip…",false,true).clicked(){self.begin_animation_clip();}
+                            if button(ui, Icon::Tween, "", "Motion tween", false, !self.doc.layers[self.layer].options.animation_track).clicked() {
                                 self.create_motion();
                             }
                             for (action, icon, tip) in [
@@ -663,7 +686,7 @@ impl Editor {
                                     "",
                                     tip,
                                     false,
-                                    !self.doc.layers[self.layer].options.locked,
+                                    !self.doc.layers[self.layer].options.locked && !self.doc.layers[self.layer].options.animation_track,
                                 )
                                 .clicked()
                                 {
@@ -688,6 +711,7 @@ impl Editor {
                     all.insert(at, Row::Media(index));
                 }
                 let mut layer_menu_action = None;
+                let mut delete_rigging=false;
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.feature.frame_drag = None; }
                 if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
                 let mut target = None;
@@ -741,7 +765,7 @@ impl Editor {
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
                                 label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).min(10000) as f32 * cell,
-                                24. + all.len() as f32 * row_h,
+                                24. + (all.len()+1) as f32 * row_h,
                             ),
                             Sense::hover(),
                         );
@@ -962,9 +986,15 @@ impl Editor {
                                             !self.doc.layers[l].options.locked;
                                         self.recover();
                                     }
+                                    if self.doc.layers[l].options.animation_track {
+                                        let trash=Rect::from_min_size(Pos2::new(label.right()-83.,y+3.),Vec2::splat(22.));
+                                        let response=ui.interact(trash,ui.scope_id().with(("delete-animation-track",l)),Sense::click()).on_hover_text(tr("Delete animation track"));
+                                        draw(&painter,trash,Icon::Trash,if response.hovered(){Color32::LIGHT_RED}else{crate::themes::muted()});
+                                        if response.clicked()&&!self.doc.layers[l].options.locked{layer_menu_action=Some((l,1));}
+                                    }
                                     let name_rect = Rect::from_min_max(
                                         label.min + Vec2::new(57. + depth as f32 * 10., 2.),
-                                        Pos2::new(label.right() - 60., label.bottom() - 2.),
+                                        Pos2::new(label.right() - if self.doc.layers[l].options.animation_track {86.}else{60.}, label.bottom() - 2.),
                                     );
                                     if self.renaming_layer == Some(l) {
                                         let mut name = self.doc.layers[l].name.clone();
@@ -986,7 +1016,7 @@ impl Editor {
                                         painter.text(
                                             name_rect.left_center(),
                                             egui::Align2::LEFT_CENTER,
-                                            &self.doc.layers[l].name,
+                                            if self.doc.layers[l].options.animation_track {format!("▶ {}",self.doc.layers[l].name)} else {self.doc.layers[l].name.clone()},
                                             egui::FontId::proportional(11.),
                                             if self.doc.layers[l].options.mannequin.is_some()
                                                 && crate::themes::current()
@@ -1023,7 +1053,7 @@ impl Editor {
                                                 (2, Icon::Eye, if self.doc.layers[l].visible { "Hide layer" } else { "Show layer" }, true),
                                                 (3, Icon::Lock, if self.doc.layers[l].options.locked { "Unlock layer" } else { "Lock layer" }, true),
                                                 (4, Icon::Film, "Select all frames", true),
-                                                (1, Icon::Trash, "Delete layer", self.doc.layers.len() > 1 && !self.doc.layers[l].options.locked),
+                                                (1, Icon::Trash, if self.doc.layers[l].options.animation_track {"Delete animation track"}else{"Delete layer"}, (self.doc.layers.len() > 1 || self.doc.layers[l].options.animation_track) && !self.doc.layers[l].options.locked),
                                             ] {
                                                 if button(ui, icon, label, label, false, enabled).clicked() {
                                                     layer_menu_action = Some((l, action));
@@ -1060,6 +1090,12 @@ impl Editor {
                                     }
                                     ui.set_clip_rect(grid_clip);
                                     let painter = ui.painter().with_clip_rect(grid_clip);
+                                    let animation_row = Rect::from_min_max(Pos2::new(r.left()+label_w,y),Pos2::new(r.right(),y+row_h));
+                                    self.animation_drop_target(ui,animation_row,r.left()+label_w,cell,Some(l));
+                                    if self.doc.layers[l].options.animation_track {
+                                        self.animation_track_ui(ui,l,animation_row,r.left()+label_w,cell);
+                                        continue;
+                                    }
                                     for f in frames.clone() {
                                         let rect = Rect::from_min_size(
                                             Pos2::new(r.left() + label_w + f as f32 * cell, y),
@@ -1134,7 +1170,7 @@ impl Editor {
                                         );
                                         let editable = !self.doc.layers[l].options.locked
                                             && self.doc.layers[l].options.mannequin.is_none();
-                                        if let Some(asset) = response.dnd_release_payload::<crate::media::MediaDrag>() {
+                                        if egui::DragAndDrop::has_payload_of_type::<crate::media::MediaDrag>(ui.ctx()) && let Some(asset) = response.dnd_release_payload::<crate::media::MediaDrag>() {
                                             if editable {
                                                 self.layer = l;
                                                 self.place_media(asset.0, f, None);
@@ -1189,6 +1225,17 @@ impl Editor {
                                                     f + 1
                                                 ));
                                                 ui.separator();
+                                                if button(ui,Icon::Copy,"Copy frames","Copy frames",false,true).clicked(){
+                                                    self.frame_clipboard_context(l,f);self.copy_timeline_frames();ui.close();
+                                                }
+                                                if button(ui,Icon::Paste,"Paste frames","Paste frames",false,self.frame_clipboard.has_frames()&&!self.doc.layers[l].options.locked).clicked(){
+                                                    self.frame_clipboard_context(l,f);self.paste_timeline_frames();ui.close();
+                                                }
+                                                ui.separator();
+                                                if button(ui,Icon::Film,"Create Animation Clip…","Create Animation Clip…",false,true).clicked(){
+                                                    if !self.feature.frame_selection.is_some_and(|s|s.0==l && (s.1..=s.2).contains(&f)) {self.feature.frame_selection=Some((l,f,f));}
+                                                    self.layer=l;self.begin_animation_clip();ui.close();
+                                                }
                                                 let editable = !self.doc.layers[l].options.locked
                                                     && self.doc.layers[l]
                                                         .options
@@ -1269,6 +1316,14 @@ impl Editor {
                                     }
                                 }
                                 Row::Rigging => {
+                                    let trash=Rect::from_min_size(Pos2::new(label.right()-27.,y+3.),Vec2::splat(22.));
+                                    let header=ui.interact(Rect::from_min_max(label.min,Pos2::new(trash.left()-3.,label.bottom())),ui.scope_id().with("rigging-track-header"),Sense::click());
+                                    header.context_menu(|ui|{
+                                        ui.label(tr("Deleting this track removes its bones, weights and keys. Artwork is kept; Undo restores the rig."));
+                                        if button(ui,Icon::Trash,"Delete rigging track","Delete rigging track",false,true).clicked(){delete_rigging=true;ui.close();}
+                                    });
+                                    let delete=ui.interact(trash,ui.scope_id().with("delete-rigging-track"),Sense::click()).on_hover_text(tr("Delete rigging track"));
+                                    if delete.clicked(){delete_rigging=true;}
                                     let color =
                                         crate::themes::color(Color32::from_rgb(86, 211, 214));
                                     painter.rect_filled(
@@ -1297,6 +1352,7 @@ impl Editor {
                                         egui::FontId::proportional(11.),
                                         color,
                                     );
+                                    draw(&painter,trash,Icon::Trash,if delete.hovered(){Color32::LIGHT_RED}else{crate::themes::muted()});
                                     ui.set_clip_rect(grid_clip);
                                     let painter = ui.painter().with_clip_rect(grid_clip);
                                     for f in frames.clone() {
@@ -1332,12 +1388,19 @@ impl Editor {
                                                 color.gamma_multiply(0.5),
                                             );
                                         }
+                                        if self.feature.frame_selection.is_some_and(|(_,a,b)|(a..=b).contains(&f)) {
+                                            painter.rect_filled(Rect::from_center_size(q,Vec2::new(cell,row_h)).shrink(1.),1.,color.gamma_multiply(0.2));
+                                        }
                                         let response = ui.interact(
                                             Rect::from_center_size(q, Vec2::new(cell, row_h)),
                                             ui.scope_id().with(("rig-frame", f)),
                                             if keyed { Sense::click_and_drag() } else { Sense::click() },
                                         );
                                         if response.clicked() || response.secondary_clicked() {
+                                            if ui.input(|i|i.modifiers.shift) {
+                                                let anchor=self.feature.frame_selection.map_or(self.frame,|s|s.1);
+                                                self.feature.frame_selection=Some((self.layer,anchor.min(f),anchor.max(f)));
+                                            } else if response.clicked() {self.feature.frame_selection=Some((self.layer,f,f));}
                                             self.frame = f;
                                             self.playing = false;
                                         }
@@ -1363,6 +1426,7 @@ impl Editor {
                                             self.move_rig_keys(f, to);
                                         }
                                         response.context_menu(|ui| {
+                                            if button(ui,Icon::Film,"Create Animation Clip…","Create Animation Clip…",false,true).clicked(){self.begin_animation_clip();ui.close();}
                                             for (action, icon, label) in [
                                                 (0, Icon::Keyframe, "Clave"),
                                                 (4, Icon::Trash, "Eliminar clave actual"),
@@ -1656,6 +1720,8 @@ impl Editor {
                                 }
                             }
                         }
+                        let empty_top=r.top()+24.+all.len() as f32*row_h;
+                        self.animation_drop_target(ui,Rect::from_min_max(Pos2::new(r.left()+label_w,empty_top),r.max),r.left()+label_w,cell,None);
                         let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell;
                         painter.with_clip_rect(grid_clip).line_segment(
                             [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
@@ -1663,9 +1729,13 @@ impl Editor {
                         );
                     })
                 }).inner;
+                if let Some(pos)=ui.input(|i|if i.pointer.any_pressed(){i.pointer.interact_pos()}else{None}) {
+                    self.frame_clipboard.focus=output.inner_rect.contains(pos)&&!ui.ctx().egui_wants_keyboard_input();
+                }
                 viewport.area = output.inner_rect;
                 viewport.offset = output.state.clamped_offset().x;
                 ui.data_mut(|data| data.insert_temp(viewport_id, viewport));
+                if delete_rigging {self.delete_rigging_track();}
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
                     if let Some(drag) = self.feature.frame_drag.take() {
