@@ -754,6 +754,7 @@ impl Editor {
                         self.assets.selected = None;
                     }
                 }
+                Asset::Media(id) => self.delete_library_media(id),
                 Asset::Folder(id) => {
                     let parent = self
                         .doc

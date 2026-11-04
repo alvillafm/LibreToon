@@ -11,6 +11,18 @@
 AppId={{46065CA8-830A-499A-9D8E-BC47DFDFDF16}
 AppName=LibreToon
 AppVersion={#Version}
+AppPublisher=alvillafm
+AppPublisherURL=https://github.com/alvillafm/LibreToon
+VersionInfoCompany=alvillafm
+VersionInfoDescription=LibreToon installer
+VersionInfoProductName=LibreToon
+VersionInfoProductVersion={#Version}
+VersionInfoVersion={#Version}
+#ifdef SignBuild
+SignTool=LibreToon
+SignedUninstaller=yes
+SignedUninstallerDir={#SignCache}
+#endif
 DefaultDirName={localappdata}\Programs\LibreToon
 DefaultGroupName=LibreToon
 PrivilegesRequired=lowest

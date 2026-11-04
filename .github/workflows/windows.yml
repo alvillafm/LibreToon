@@ -12,6 +12,13 @@ on:
           - windows
           - macos
           - linux
+      windows_signing:
+        description: Windows signing (Azure requires configured verified identity)
+        type: choice
+        default: none
+        options:
+          - none
+          - azure
 
 permissions:
   contents: read
@@ -39,12 +46,32 @@ jobs:
     needs: format
     if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write # Used only by the explicitly selected Azure signing step.
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      LIBRETOON_SIGNING_MODE: ${{ inputs.windows_signing || 'none' }}
+      WINDOWS_SIGNING_ENDPOINT: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+      WINDOWS_SIGNING_ACCOUNT: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+      WINDOWS_SIGNING_PROFILE: ${{ vars.WINDOWS_SIGNING_PROFILE }}
       LIBRETOON_TEST_FONT: ${{ github.workspace }}/assets/fonts/NotoSansCJK-Regular.ttc
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate optional signing configuration
+        if: inputs.windows_signing == 'azure'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {throw 'Signed builds require main and its configured OIDC federation'}
+          foreach ($name in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID','WINDOWS_SIGNING_ENDPOINT','WINDOWS_SIGNING_ACCOUNT','WINDOWS_SIGNING_PROFILE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {throw "Missing repository variable: $name"}
+          }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -73,6 +100,9 @@ jobs:
       - name: Check lightweight package staging
         run: python scripts/packaging/test_native.py
 
+      - name: Test package security gates without external services
+        run: python scripts/packaging/test_security.py
+
       - name: Run application regression tests
         run: cargo test --locked
 
@@ -88,21 +118,69 @@ jobs:
             if ($LASTEXITCODE -ne 0) {throw "Inno Setup installation failed"}
           }
 
-      - name: Create lightweight portable ZIP and EXE installer
-        shell: pwsh
-        run: ./scripts/packaging/windows.ps1
+      - name: Authenticate optional Azure signing with OIDC
+        if: inputs.windows_signing == 'azure'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3, verified upstream commit
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Upload Windows download packages
+      - name: Install optional signing integration
+        if: inputs.windows_signing == 'azure'
+        shell: pwsh
+        run: Install-Module ArtifactSigning -RequiredVersion 0.1.8 -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
+
+      - name: Create portable ZIP and installer (including optional component signatures)
+        shell: pwsh
+        run: ./scripts/packaging/windows.ps1 -SigningMode $env:LIBRETOON_SIGNING_MODE
+
+      - name: Verify metadata, signatures, hashes and Microsoft Defender scan
+        timeout-minutes: 20
+        shell: pwsh
+        run: ./scripts/packaging/windows-security.ps1 -SigningMode $env:LIBRETOON_SIGNING_MODE
+
+      - name: Upload Windows portable package after security checks
+        id: windows-portable
         uses: actions/upload-artifact@v4
         with:
-          name: LibreToon-Windows-x64
+          name: LibreToon-Windows-x64-Portable-${{ inputs.windows_signing == 'azure' && 'signed' || 'unsigned' }}
           path: |
-            dist/*.zip
-            dist/*.exe
+            dist/*-Portable.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Upload Windows installer after security checks
+        id: windows-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreToon-Windows-x64-Installer-${{ inputs.windows_signing == 'azure' && 'signed' || 'unsigned' }}
+          path: |
+            dist/*-Setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload Windows security diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreToon-Windows-security-report
+          path: work/package-security/windows/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Windows download summary
+        shell: pwsh
+        env:
+          PORTABLE_URL: ${{ steps.windows-portable.outputs.artifact-url }}
+          INSTALLER_URL: ${{ steps.windows-installer.outputs.artifact-url }}
+        run: |
+          "[Portable ZIP]($env:PORTABLE_URL) | [EXE installer]($env:INSTALLER_URL)" >> $env:GITHUB_STEP_SUMMARY
+          "Signing mode: **$env:LIBRETOON_SIGNING_MODE**. GitHub wraps each artifact in a ZIP. Passing antivirus checks does not guarantee that Chrome/SmartScreen will accept a download." >> $env:GITHUB_STEP_SUMMARY
 
 
   native:
@@ -145,12 +223,13 @@ jobs:
         if: matrix.platform == 'linux' && (inputs.platform == 'all' || inputs.platform == 'linux')
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config curl libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libssl-dev libasound2-dev xvfb squashfs-tools desktop-file-utils
+          sudo apt-get install -y build-essential pkg-config curl libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libssl-dev libasound2-dev xvfb squashfs-tools desktop-file-utils clamav clamav-freshclam
 
       - name: Install macOS build prerequisites
         if: matrix.platform == 'macos' && (inputs.platform == 'all' || inputs.platform == 'macos')
         run: |
           command -v pkg-config >/dev/null || brew install pkgconf
+          brew install clamav
 
       - name: Isolate application and test data
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
@@ -170,6 +249,10 @@ jobs:
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         run: python3 scripts/packaging/test_native.py
 
+      - name: Test package security gates without external services
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        run: python3 scripts/packaging/test_security.py
+
       - name: Run application regression tests
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         run: cargo test --locked
@@ -183,6 +266,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/packaging/native.py ${{ matrix.platform }}
+
+      - name: Scan native payload and packages with updated ClamAV
+        if: inputs.platform == 'all' || inputs.platform == matrix.platform
+        timeout-minutes: 20
+        run: python3 scripts/packaging/security_native.py
 
       - name: Upload native download packages
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
@@ -199,3 +287,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Upload native security diagnostics
+        if: always() && (inputs.platform == 'all' || inputs.platform == matrix.platform)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreToon-${{ matrix.label }}-security-report
+          path: work/package-security/native/
+          if-no-files-found: warn
+          retention-days: 30

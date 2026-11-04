@@ -200,6 +200,170 @@ fn media_entry(id: u64) -> String {
     format!("LIBRETOON/media/{id}")
 }
 
+// Older exports can differ by a few floating-point ULPs after geometry fixes.
+// Compare the full XML structure exactly, allowing only sub-pixel rounding in
+// edge coordinates (0.04 twips = 0.002 stage pixels). Never ignore extra content.
+fn same_native_preview(expected: &str, actual: &str) -> bool {
+    use xml::reader::{EventReader, XmlEvent};
+    fn edges_equal(a: &str, b: &str) -> bool {
+        fn tokens(s: &str) -> Vec<&str> {
+            s.split_inclusive(|c: char| {
+                !c.is_ascii_digit() && !matches!(c, '.' | '-' | '+' | 'e' | 'E')
+            })
+            .collect()
+        }
+        let a = tokens(a);
+        let b = tokens(b);
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(a, b)| {
+                if *a == b {
+                    return true;
+                }
+                let split = |s: &str| {
+                    s.trim_end_matches(|c: char| {
+                        !c.is_ascii_digit() && !matches!(c, '.' | '-' | '+' | 'e' | 'E')
+                    })
+                    .len()
+                };
+                let (an, ad) = a.split_at(split(a));
+                let (bn, bd) = b.split_at(split(b));
+                ad == bd
+                    && an
+                        .parse::<f64>()
+                        .ok()
+                        .zip(bn.parse::<f64>().ok())
+                        .is_some_and(|(a, b)| {
+                            a.is_finite() && b.is_finite() && (a - b).abs() <= 0.04
+                        })
+            })
+    }
+    if expected == actual {
+        return true;
+    }
+    fn events(xml: &str) -> Option<Vec<XmlEvent>> {
+        let input = EventReader::from_str(xml)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let mut out = Vec::with_capacity(input.len());
+        let mut edge_count = 0;
+        let mut i = 0;
+        while i < input.len() {
+            if let XmlEvent::StartElement {
+                name, attributes, ..
+            } = &input[i]
+            {
+                if name.local_name == "edges" {
+                    edge_count = 0;
+                }
+                if name.local_name == "Edge" {
+                    edge_count += 1;
+                    // Polygon boolean operations may discard almost zero-area
+                    // interior slivers. Never discard a contour, stroke or curve.
+                    if edge_count > 1
+                        && attributes.len() == 3
+                        && attr(attributes, "strokeStyle") == Some("0")
+                        && attr(attributes, "fillStyle1") == Some("1")
+                        && attr(attributes, "edges").is_some_and(tiny_linear_ring)
+                        && matches!(input.get(i+1), Some(XmlEvent::EndElement { name }) if name.local_name == "Edge")
+                    {
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            out.push(input[i].clone());
+            i += 1;
+        }
+        Some(out)
+    }
+    fn tiny_linear_ring(s: &str) -> bool {
+        if !s.starts_with('!')
+            || s[1..].contains(|c: char| {
+                !c.is_ascii_digit() && !matches!(c, '|' | ' ' | '.' | '-' | '+' | 'e' | 'E')
+            })
+        {
+            return false;
+        }
+        let Some(points) = s[1..]
+            .split('|')
+            .map(|point| {
+                let nums = point
+                    .split_whitespace()
+                    .map(str::parse::<f64>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                (nums.len() == 2 && nums.iter().all(|n| n.is_finite())).then(|| [nums[0], nums[1]])
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        if points.len() < 4 || points.first() != points.last() {
+            return false;
+        }
+        let origin = points[0];
+        if points
+            .iter()
+            .any(|p| (p[0] - origin[0]).abs() > 1. || (p[1] - origin[1]).abs() > 1.)
+        {
+            return false;
+        }
+        let area = points
+            .windows(2)
+            .map(|p| {
+                (p[0][0] - origin[0]) * (p[1][1] - origin[1])
+                    - (p[1][0] - origin[0]) * (p[0][1] - origin[1])
+            })
+            .sum::<f64>()
+            .abs()
+            * 0.5;
+        area <= 0.001
+    }
+    let (Some(a), Some(b)) = (events(expected), events(actual)) else {
+        return false;
+    };
+    let mut a = a.into_iter().map(Ok::<_, ()>);
+    let mut b = b.into_iter().map(Ok::<_, ()>);
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (
+                Some(Ok(XmlEvent::StartElement {
+                    name: an,
+                    attributes: mut aa,
+                    namespace: ans,
+                })),
+                Some(Ok(XmlEvent::StartElement {
+                    name: bn,
+                    attributes: mut ba,
+                    namespace: bns,
+                })),
+            ) => {
+                if an != bn || ans != bns || aa.len() != ba.len() {
+                    return false;
+                }
+                if an.local_name == "Edge" {
+                    for (a, b) in aa.iter_mut().zip(ba.iter_mut()) {
+                        if a.name.local_name == "edges"
+                            && a.name == b.name
+                            && edges_equal(&a.value, &b.value)
+                        {
+                            a.value.clear();
+                            b.value.clear();
+                        }
+                    }
+                }
+                if aa != ba {
+                    return false;
+                }
+            }
+            (Some(Ok(a)), Some(Ok(b))) if a == b => {}
+            _ => return false,
+        }
+    }
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Document, String> {
     let xml = crate::fla_zip::document(bytes)?;
     let native = crate::fla_zip::entry(bytes, b"LIBRETOON/document.json");
@@ -217,7 +381,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                     }
                 }
             }
-            if doc.validate().is_ok() && document_xml(&doc) == xml {
+            if doc.validate().is_ok() && same_native_preview(&document_xml(&doc), &xml) {
                 return Ok(doc);
             }
         }
@@ -237,6 +401,47 @@ mod tests {
     use super::*;
     use crate::canvas::transformed;
     use eframe::egui::{Pos2, Vec2};
+    #[test]
+    fn native_preview_accepts_only_tiny_edge_rounding() {
+        let xml = r#"<DOMDocument><Edge edges="!21410.85 11554.219|20 30"/></DOMDocument>"#;
+        assert!(same_native_preview(
+            xml,
+            &xml.replace("11554.219", "11554.22")
+        ));
+        assert!(!same_native_preview(
+            xml,
+            &xml.replace("11554.219", "11555")
+        ));
+        assert!(!same_native_preview(
+            xml,
+            &xml.replace("</DOMDocument>", "<script/></DOMDocument>")
+        ));
+        assert!(!same_native_preview(xml, &xml.replace("Edge", "Other")));
+        let ring = r#"<Edge strokeStyle="0" fillStyle1="1" edges="!0 0|0.1 0.5|0.1 0.501|0 0"/>"#;
+        let base = r#"<DOMDocument><edges><Edge strokeStyle="0" fillStyle1="1" edges="!0 0|20 0|20 20|0 0"/></edges></DOMDocument>"#;
+        assert!(same_native_preview(
+            base,
+            &base.replace("</edges>", &format!("{ring}</edges>"))
+        ));
+        assert!(!same_native_preview(
+            base,
+            &base.replace(
+                "</edges>",
+                &format!("{}</edges>", ring.replace("0.501", "1"))
+            )
+        ));
+        assert!(!same_native_preview(
+            base,
+            &base.replace(
+                "</edges>",
+                &format!(
+                    "{}</edges>",
+                    ring.replace("strokeStyle=\"0\"", "strokeStyle=\"1\"")
+                )
+            )
+        ));
+    }
+
     #[test]
     fn native_fla_roundtrip_geometry_layers_and_frames() {
         let mut d = Document::default();
@@ -615,5 +820,28 @@ mod styled_format_tests {
         .into();
         doc.layers[0].frames[0].push(mark);
         assert!(doc.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod legacy_fixture_tests {
+    use super::*;
+    #[test]
+    #[ignore = "manual external legacy FLA fixture"]
+    fn external_legacy_native_fla_preserves_layers_and_exposures() {
+        let path = std::env::var("LIBRETOON_LEGACY_FLA").expect("Set LIBRETOON_LEGACY_FLA");
+        let bytes = std::fs::read(path).unwrap();
+        let native = crate::fla_zip::entry(&bytes, b"LIBRETOON/document.json")
+            .unwrap()
+            .unwrap();
+        let source: Document = serde_json::from_slice(&native).unwrap();
+        assert!(source.validate().is_ok());
+        let imported = decode(&bytes).unwrap();
+        assert_eq!(imported.layers.len(), source.layers.len());
+        for (a, b) in source.layers.iter().zip(imported.layers.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.options.keys, b.options.keys);
+            assert_eq!(a.frames.len(), b.frames.len());
+        }
     }
 }

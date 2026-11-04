@@ -3,6 +3,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=assets/libretoon.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
@@ -39,11 +40,50 @@ fn main() {
     let icon =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("assets/libretoon.ico");
     let script = out.join("icon.rc");
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let numeric = ["MAJOR", "MINOR", "PATCH"].map(|part| {
+        env::var(format!("CARGO_PKG_VERSION_{part}"))
+            .unwrap()
+            .parse::<u16>()
+            .unwrap()
+    });
     std::fs::write(
         &script,
         format!(
-            "1 ICON \"{}\"\n",
-            icon.display().to_string().replace('\\', "/")
+            r#"1 ICON "{icon}"
+1 VERSIONINFO
+FILEVERSION {major},{minor},{patch},0
+PRODUCTVERSION {major},{minor},{patch},0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "alvillafm\0"
+   VALUE "FileDescription", "LibreToon 2D animation editor\0"
+   VALUE "FileVersion", "{version}\0"
+   VALUE "InternalName", "libretoon\0"
+   VALUE "OriginalFilename", "libretoon.exe\0"
+   VALUE "ProductName", "LibreToon\0"
+   VALUE "ProductVersion", "{version}\0"
+   VALUE "LegalCopyright", "Copyright (c) 2026 alvillafm\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
+"#,
+            icon = icon.display().to_string().replace('\\', "/"),
+            major = numeric[0],
+            minor = numeric[1],
+            patch = numeric[2],
         ),
     )
     .unwrap();
@@ -54,7 +94,7 @@ fn main() {
         .arg(&resource)
         .arg(&script)
         .status()
-        .expect("Windows SDK resource compiler is required to embed the app icon");
+        .expect("Windows SDK resource compiler is required for the app icon and version metadata");
     assert!(
         status.success(),
         "failed to compile the LibreToon icon resource"

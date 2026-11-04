@@ -281,6 +281,60 @@ impl Editor {
         }
     }
 
+    pub(crate) fn delete_library_media(&mut self, id: u64) {
+        fn references(doc: &crate::Document, id: u64) -> bool {
+            let layers = |layers: &[crate::document::Layer]| {
+                layers
+                    .iter()
+                    .flat_map(|layer| layer.frames.iter().flatten())
+                    .any(|mark| mark.style.media_image == Some(id))
+            };
+            let tracks = |tracks: &[Track]| {
+                tracks
+                    .iter()
+                    .any(|track| track.clips.iter().any(|clip| clip.asset == id))
+            };
+            layers(&doc.layers)
+                || tracks(&doc.extras.media.tracks)
+                || doc.extras.scenes.iter().enumerate().any(|(index, scene)| {
+                    index != doc.extras.active_scene
+                        && (layers(&scene.layers) || tracks(&scene.media_tracks))
+                })
+                || doc
+                    .extras
+                    .symbols
+                    .iter()
+                    .any(|symbol| layers(&symbol.layers))
+        }
+        if !self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .any(|asset| asset.id == id)
+        {
+            return;
+        }
+        if references(&self.doc, id)
+            || self
+                .feature
+                .symbol_stack
+                .iter()
+                .any(|(doc, _, _, _)| references(doc, id))
+        {
+            self.status = tr("Media is in use. Remove its instances and clips before deleting it from the library.").into();
+            return;
+        }
+        self.checkpoint();
+        self.doc.extras.media.assets.retain(|asset| asset.id != id);
+        self.media.textures.remove(&id);
+        self.media.waveform_cache.remove(&id);
+        self.clear_media_asset_preview();
+        self.assets.selected = None;
+        self.recover();
+    }
+
     pub fn clear_media_asset_preview(&mut self) {
         self.media.library_video = None;
         self.media.library_preview = None;
@@ -2419,6 +2473,50 @@ mod tests {
             opened || render(&mut editor, vec![]),
             "right-click must expose track deletion"
         );
+    }
+
+    #[test]
+    fn library_media_delete_is_undoable_and_protects_instances() {
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        editor.recovery =
+            std::env::temp_dir().join(format!("delete-library-media-{}.json", std::process::id()));
+        let asset = bitmap(vec![255; 16], 2, 2, "image".into());
+        let id = asset.id;
+        editor.doc.extras.media.assets.push(asset);
+        let mut mark = crate::Mark::default();
+        mark.style.media_image = Some(id);
+        editor.doc.layers[0].frames[0].push(mark);
+        editor.delete_library_media(id);
+        assert_eq!(editor.doc.extras.media.assets.len(), 1);
+        editor.doc.layers[0].frames[0].clear();
+        editor.delete_library_media(id);
+        assert!(editor.doc.extras.media.assets.is_empty());
+        editor.history(false);
+        assert_eq!(editor.doc.extras.media.assets[0].id, id);
+        for kind in [Kind::Audio, Kind::Video] {
+            editor.doc.extras.media.tracks.push(Track {
+                id: crate::features::id(),
+                depth: Default::default(),
+                slot: 0,
+                name: "used media".into(),
+                kind,
+                hidden: false,
+                locked: false,
+                clips: vec![Clip {
+                    asset: id,
+                    start: 0,
+                    offset: 0,
+                    length: 3,
+                    transform: Default::default(),
+                }]
+                .into(),
+            });
+            editor.delete_library_media(id);
+            assert_eq!(editor.doc.extras.media.assets.len(), 1);
+            editor.doc.extras.media.tracks.clear();
+        }
     }
 
     #[test]
