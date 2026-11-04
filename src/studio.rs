@@ -56,7 +56,7 @@ pub struct Binding {
     pub alt: bool,
 }
 impl Binding {
-    fn new(key: &str) -> Self {
+    pub(crate) fn new(key: &str) -> Self {
         Self {
             key: key.into(),
             ctrl: false,
@@ -64,10 +64,21 @@ impl Binding {
             alt: false,
         }
     }
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
+        if self.key.is_empty() {
+            return String::new();
+        }
         format!(
             "{}{}{}{}",
-            if self.ctrl { "Ctrl+" } else { "" },
+            if self.ctrl {
+                if cfg!(target_os = "macos") {
+                    "Cmd+"
+                } else {
+                    "Ctrl+"
+                }
+            } else {
+                ""
+            },
             if self.shift { "Shift+" } else { "" },
             if self.alt { "Alt+" } else { "" },
             self.key
@@ -83,6 +94,7 @@ pub struct Preferences {
     pub language: Option<crate::i18n::Language>,
     pub theme: crate::themes::Theme,
     pub bindings: Vec<Binding>,
+    pub actions: Vec<Binding>,
     pub dpi: f32,
     pub ffmpeg: String,
 }
@@ -106,6 +118,7 @@ impl Default for Preferences {
             language: None,
             theme: Default::default(),
             bindings: defaults.into_iter().map(Binding::new).collect(),
+            actions: crate::shortcuts::defaults(),
             dpi: 96.,
             ffmpeg: String::new(),
         }
@@ -129,6 +142,7 @@ pub struct Studio {
     pub strength: f32,
     pub tone_mode: usize,
     capture: Option<usize>,
+    shortcut_filter: String,
     held: Option<Instant>,
     brush_menu: bool,
     pub brush: Tool,
@@ -162,6 +176,14 @@ impl Studio {
             }
             prefs.bindings = bindings;
         }
+        let defaults = crate::shortcuts::defaults();
+        for (index, binding) in defaults.into_iter().enumerate() {
+            if index >= prefs.actions.len() {
+                prefs.actions.push(binding);
+            }
+        }
+        prefs.actions.truncate(crate::shortcuts::ACTIONS.len());
+        // Missing fields use Preferences::default; append future actions without touching tools.
         if !prefs.dpi.is_finite() {
             prefs.dpi = 96.;
         }
@@ -184,6 +206,7 @@ impl Studio {
             strength: 0.2,
             tone_mode: 0,
             capture: None,
+            shortcut_filter: String::new(),
             held: None,
             brush_menu: false,
             brush: Tool::Brush,
@@ -376,16 +399,7 @@ impl Editor {
                 if tool == Tool::Airbrush {
                     return None;
                 }
-                let key = egui::Key::from_name(&b.key)?;
-                let modifiers = egui::Modifiers {
-                    ctrl: b.ctrl,
-                    command: b.ctrl,
-                    shift: b.shift,
-                    alt: b.alt,
-                    ..Default::default()
-                };
-                ctx.input_mut(|i| i.consume_key(modifiers, key))
-                    .then_some(tool)
+                b.take_pressed(ctx).then_some(tool)
             });
         if let Some(tool) = found {
             self.activate_tool(tool);
@@ -1023,19 +1037,30 @@ impl Editor {
                         } else {
                             ui.heading(tr("Atajos de teclado"));ui.add_space(8.);
                             ui.label(tr("Pulsa un atajo y después la combinación nueva. Escape cancela; Supr lo elimina."));ui.add_space(12.);
+                            ui.add(egui::TextEdit::singleline(&mut self.studio.shortcut_filter).hint_text(tr("Buscar herramienta o acción…")));
+                            let filter=self.studio.shortcut_filter.to_lowercase();
                             egui::ScrollArea::vertical().max_height(340.).show(ui,|ui|{
                                 egui::Grid::new("shortcut-options").spacing([24.,7.]).striped(true).show(ui,|ui|{
                                     for (index,tool) in TOOLS.iter().enumerate(){
-                                        if *tool == Tool::Airbrush { continue; }
+                                        if *tool == Tool::Airbrush || !tool.name().to_lowercase().contains(&filter) { continue; }
                                         ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,tool.icon(),crate::themes::muted());ui.label(tr(tool.name()));});
                                         let binding=&self.studio.prefs.bindings[index];
                                         let label=if self.studio.capture==Some(index){"…".into()}else{let s=binding.label();if s.is_empty(){"—".into()}else{s}};
                                         if ui.add_sized([110.,24.],egui::Button::new(label)).clicked(){self.studio.capture=Some(index);}ui.end_row();
                                     }
+                                    for (offset,action) in crate::shortcuts::ACTIONS.iter().enumerate() {
+                                        if !tr(action.name()).to_lowercase().contains(&filter) {continue;}
+                                        let index=TOOLS.len()+offset;
+                                        ui.horizontal(|ui|{let (r,_)=ui.allocate_exact_size(Vec2::splat(20.),Sense::hover());crate::design::draw(ui.painter(),r,action.icon(),crate::themes::muted());ui.label(tr(action.name()));});
+                                        let binding=&self.studio.prefs.actions[offset];
+                                        let label=if self.studio.capture==Some(index){"…".into()}else{let s=binding.label();if s.is_empty(){"—".into()}else{s}};
+                                        if ui.add_sized([110.,24.],egui::Button::new(label)).clicked(){self.studio.capture=Some(index);}ui.end_row();
+                                    }
+
                                 });
                             });
                             ui.add_space(12.);
-                            if ui.button(tr("Restablecer atajos")).clicked(){self.studio.prefs.bindings=Preferences::default().bindings;save=true;}
+                            if ui.button(tr("Restablecer atajos")).clicked(){self.studio.prefs.bindings=Preferences::default().bindings;self.studio.prefs.actions=crate::shortcuts::defaults();self.studio.capture=None;save=true;}
                         }
                     });
                 });
@@ -1073,12 +1098,23 @@ impl Editor {
                         if !binding.key.is_empty() && reserved(&binding) {
                             self.status = tr("Atajo reservado para una acción del programa").into();
                         } else {
-                            for (j, b) in self.studio.prefs.bindings.iter_mut().enumerate() {
+                            for (j, b) in self
+                                .studio
+                                .prefs
+                                .bindings
+                                .iter_mut()
+                                .chain(self.studio.prefs.actions.iter_mut())
+                                .enumerate()
+                            {
                                 if j != index && *b == binding {
                                     b.key.clear();
                                 }
                             }
-                            self.studio.prefs.bindings[index] = binding;
+                            if index < TOOLS.len() {
+                                self.studio.prefs.bindings[index] = binding;
+                            } else {
+                                self.studio.prefs.actions[index - TOOLS.len()] = binding;
+                            }
                             save = true;
                         }
                     }
@@ -1129,7 +1165,7 @@ fn reserved(b: &Binding) -> bool {
         || b.key == "Escape"
         || b.key == "Delete"
         || (!b.ctrl && !b.shift && !b.alt && ["F8", "Comma", "Period"].contains(&b.key.as_str()))
-        || (b.ctrl && ["A", "C", "X", "V", "S", "Z", "Y", "D"].contains(&b.key.as_str()))
+        || (b.ctrl && ["A", "C", "X", "V", "S", "D"].contains(&b.key.as_str()))
         || (!b.ctrl && !b.alt && !b.shift && ["X", "D"].contains(&b.key.as_str()))
 }
 pub fn tone(mut c: [u8; 4], strength: f32, light: bool, mode: usize) -> [u8; 4] {

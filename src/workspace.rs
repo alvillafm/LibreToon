@@ -169,26 +169,26 @@ impl Editor {
                             ui,
                             Icon::Undo,
                             "Deshacer",
-                            "Ctrl+Z",
+                            &self.action_hint(crate::shortcuts::Action::Undo),
                             false,
-                            !self.undo.is_empty(),
+                            self.can_undo(),
                         )
                         .clicked()
                         {
-                            self.history(false);
+                            self.perform_action(crate::shortcuts::Action::Undo, ui.ctx());
                             ui.close();
                         }
                         if button(
                             ui,
                             Icon::Redo,
                             "Rehacer",
-                            "Ctrl+Y",
+                            &self.action_hint(crate::shortcuts::Action::Redo),
                             false,
-                            !self.redo.is_empty(),
+                            self.can_redo(),
                         )
                         .clicked()
                         {
-                            self.history(true);
+                            self.perform_action(crate::shortcuts::Action::Redo, ui.ctx());
                             ui.close();
                         }
                     });
@@ -215,25 +215,25 @@ impl Editor {
                         ui,
                         Icon::Undo,
                         "",
-                        "Deshacer · Ctrl+Z",
+                        &self.action_tip(crate::shortcuts::Action::Undo),
                         false,
-                        !self.undo.is_empty(),
+                        self.can_undo(),
                     )
                     .clicked()
                     {
-                        self.history(false);
+                        self.perform_action(crate::shortcuts::Action::Undo, ui.ctx());
                     }
                     if button(
                         ui,
                         Icon::Redo,
                         "",
-                        "Rehacer · Ctrl+Y",
+                        &self.action_tip(crate::shortcuts::Action::Redo),
                         false,
-                        !self.redo.is_empty(),
+                        self.can_redo(),
                     )
                     .clicked()
                     {
-                        self.history(true);
+                        self.perform_action(crate::shortcuts::Action::Redo, ui.ctx());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.window_controls(ui);

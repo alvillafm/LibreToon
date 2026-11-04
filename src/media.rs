@@ -236,41 +236,48 @@ impl Editor {
             )
             .clicked()
         {
-            let files = rfd::FileDialog::new()
-                .add_filter(
-                    tr("Medios"),
-                    &[
-                        "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "mp4", "avi", "mov",
-                        "mkv", "webm", "wav", "ogg", "mp3", "flac", "m4a", "aac",
-                    ],
-                )
-                .pick_files();
-            if let Some(files) = files {
-                let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
-                let ctx = ui.ctx().clone();
-                let (send, receive) = std::sync::mpsc::channel();
-                self.media.importing = Some((self.recovery.clone(), receive));
-                std::thread::spawn(move || {
-                    let mut bytes = 0usize;
-                    let results = files
-                        .into_iter()
-                        .map(|path| {
-                            let asset = Self::read_media(&path, &ffmpeg)
-                                .map_err(|error| format!("{}: {error}", path.display()))?;
-                            if bytes.saturating_add(asset.data.len()) > LIBRARY_LIMIT {
-                                return Err("Media library exceeds 256 MiB".into());
-                            }
-                            bytes += asset.data.len();
-                            Ok(asset)
-                        })
-                        .collect();
-                    let _ = send.send(results);
-                    ctx.request_repaint();
-                });
-            }
+            self.import_media(ui.ctx());
         }
         if self.media.importing.is_some() {
             ui.spinner();
+        }
+    }
+
+    pub(crate) fn import_media(&mut self, ctx: &egui::Context) {
+        if self.media.importing.is_some() {
+            return;
+        }
+        let files = rfd::FileDialog::new()
+            .add_filter(
+                tr("Medios"),
+                &[
+                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "mp4", "avi", "mov", "mkv",
+                    "webm", "wav", "ogg", "mp3", "flac", "m4a", "aac",
+                ],
+            )
+            .pick_files();
+        if let Some(files) = files {
+            let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+            let ctx = ctx.clone();
+            let (send, receive) = std::sync::mpsc::channel();
+            self.media.importing = Some((self.recovery.clone(), receive));
+            std::thread::spawn(move || {
+                let mut bytes = 0usize;
+                let results = files
+                    .into_iter()
+                    .map(|path| {
+                        let asset = Self::read_media(&path, &ffmpeg)
+                            .map_err(|error| format!("{}: {error}", path.display()))?;
+                        if bytes.saturating_add(asset.data.len()) > LIBRARY_LIMIT {
+                            return Err("Media library exceeds 256 MiB".into());
+                        }
+                        bytes += asset.data.len();
+                        Ok(asset)
+                    })
+                    .collect();
+                let _ = send.send(results);
+                ctx.request_repaint();
+            });
         }
     }
 

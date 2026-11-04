@@ -171,6 +171,8 @@ pub fn ensure_fonts(ctx: &eframe::egui::Context, language: Language) {
 
 pub fn english(text: &str) -> &str {
     match text {
+        "Buscar herramienta o acción…" => "Search tools or actions…",
+        "Insertar clave de cámara" => "Insert camera keyframe",
         "Oculta" => "Hidden",
         "Profundidad de capas" => "Layer depth",
         "Profundidad de campo" => "Depth of field",

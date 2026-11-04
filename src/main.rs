@@ -39,6 +39,7 @@ mod rig_ui;
 mod scenes;
 mod sequencer;
 mod shared;
+mod shortcuts;
 mod studio;
 #[cfg(test)]
 mod studio_tests;
@@ -274,6 +275,16 @@ impl Editor {
             self.canvas.clear_selection();
             self.canvas.cancel_drafts();
             self.draft = None;
+            self.style_transaction = false;
+            self.style_selection.clear();
+            self.profile_transaction = false;
+            self.animation.timing_transaction = false;
+            self.animation.ease_handle = None;
+            self.animation.path_handle = None;
+            self.animation.path_bend = None;
+            self.drawing.text.editing = None;
+            self.drawing.text.canvas_edit = false;
+            self.drawing.text.transaction = false;
             self.doc = d;
             self.frame = self.frame.min(self.doc.layers[0].frames.len() - 1);
             self.layer = self.layer.min(self.doc.layers.len() - 1);
@@ -324,26 +335,7 @@ impl eframe::App for Editor {
         {
             self.save_project(false);
         }
-        if !self.hub.home
-            && !self.studio.preferences_open
-            && self.document_settings.is_none()
-            && self.studio.export.is_none()
-            && !ctx.egui_wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
-        {
-            if !self.canvas.undo_pen() {
-                self.history(false);
-            }
-        }
-        if !self.hub.home
-            && !self.studio.preferences_open
-            && self.document_settings.is_none()
-            && self.studio.export.is_none()
-            && !ctx.egui_wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y))
-        {
-            self.history(true);
-        }
+        self.action_shortcuts(&ctx);
         if self.profile_transaction && !ctx.input(|i| i.pointer.primary_down()) {
             self.profile_transaction = false;
             self.recover();

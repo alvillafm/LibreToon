@@ -197,6 +197,7 @@ pub struct Canvas {
     frame: usize,
     drag: Option<Drag>,
     pen: Option<PenDraft>,
+    pen_redo: Vec<PenDraft>,
     pub(crate) node_selection: Option<(usize, usize, usize)>,
     cache: crate::paint::RenderCache,
     stage_size: Vec2,
@@ -216,6 +217,7 @@ impl Default for Canvas {
             frame: 0,
             drag: None,
             pen: None,
+            pen_redo: vec![],
             node_selection: None,
             cache: Default::default(),
             stage_size: Vec2::new(960., 540.),
@@ -440,7 +442,11 @@ impl Editor {
         }) {
             let pen = state.pen.take().unwrap();
             state.drag = None;
+            state.pen_redo.clear();
             self.commit_pen(pen);
+        }
+        if tool != Tool::Pen || state.frame != self.frame || self.playing {
+            state.pen_redo.clear();
         }
         if tool != Tool::PolygonSelect {
             state.polygon_selection.clear();
@@ -681,6 +687,7 @@ impl Editor {
         if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Some(pen) = state.pen.take() {
                 state.drag = None;
+                state.pen_redo.clear();
                 self.commit_pen(pen);
             }
         }
@@ -729,6 +736,7 @@ impl Editor {
             }
             self.draft = None;
             state.pen = None;
+            state.pen_redo.clear();
         }
         if !ctx.egui_wants_keyboard_input() && state.drag.is_none() {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
@@ -1218,6 +1226,7 @@ impl Editor {
                         state.drag = None;
                         if state.pen.as_ref().is_some_and(|p| p.closing) {
                             let pen = state.pen.take().unwrap();
+                            state.pen_redo.clear();
                             self.commit_pen(pen);
                         }
                     }
@@ -1555,6 +1564,7 @@ impl Editor {
                     pen.mark.nodes.pop();
                 }
                 state.drag = None;
+                state.pen_redo.clear();
                 self.commit_pen(pen);
             }
         }
@@ -2242,6 +2252,7 @@ mod rotation_regressions {
     }
 }
 
+#[derive(Clone)]
 struct PenDraft {
     mark: Mark,
     layer: usize,
@@ -2259,16 +2270,36 @@ struct NodeDrag {
 
 impl Canvas {
     pub fn cancel_drafts(&mut self) {
+        self.pen_redo.clear();
         self.pen = None;
         self.drag = None;
         self.node_selection = None;
     }
+    pub(crate) fn can_undo_pen(&self) -> bool {
+        self.pen.as_ref().is_some_and(|p| !p.mark.nodes.is_empty())
+    }
+    pub(crate) fn can_redo_pen(&self) -> bool {
+        !self.pen_redo.is_empty()
+    }
     pub fn undo_pen(&mut self) -> bool {
-        if let Some(pen) = &mut self.pen {
-            pen.mark.nodes.pop();
-            if pen.mark.nodes.is_empty() {
-                self.pen = None;
+        if let Some(mut pen) = self.pen.take() {
+            self.pen_redo.push(pen.clone());
+            if self.pen_redo.len() > 60 {
+                self.pen_redo.remove(0);
             }
+            pen.mark.nodes.pop();
+            if !pen.mark.nodes.is_empty() {
+                self.pen = Some(pen);
+            }
+            self.drag = None;
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn redo_pen(&mut self) -> bool {
+        if let Some(pen) = self.pen_redo.pop() {
+            self.pen = Some(pen);
             self.drag = None;
             true
         } else {
@@ -2278,6 +2309,7 @@ impl Canvas {
 }
 impl Editor {
     pub fn finish_pending_pen(&mut self) {
+        self.canvas.pen_redo.clear();
         if let Some(pen) = self.canvas.pen.take() {
             self.commit_pen(pen);
         }
@@ -2306,6 +2338,7 @@ impl Editor {
         self.status = "Trazado Bézier creado".into();
     }
     fn begin_pen(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+        state.pen_redo.clear();
         if state.pen.is_none() {
             if !self.stroke_enabled && !self.fill_enabled {
                 self.status = "Activa relleno o contorno para dibujar".into();
@@ -3414,6 +3447,40 @@ mod new_tool_regressions {
             assert_eq!(e.doc.layers[0].frames[0][0].nodes[1].position, [400., 200.]);
             e.history(false);
             assert_eq!(e.doc.layers[0].frames[0][0].nodes[0].position, [100., 100.]);
+        });
+    }
+    #[test]
+    fn pen_nodes_support_the_same_undo_redo_actions_as_committed_art() {
+        run(|ctx, e| {
+            e.tool = Tool::Pen;
+            let v = view(e);
+            for p in [
+                Pos2::new(100., 100.),
+                Pos2::new(250., 150.),
+                Pos2::new(400., 200.),
+            ] {
+                click(ctx, e, v.screen(p));
+            }
+            assert_eq!(e.canvas.pen.as_ref().unwrap().mark.nodes.len(), 3);
+            let original = e.canvas.pen.as_ref().unwrap().mark.nodes.clone();
+            for _ in 0..3 {
+                e.perform_action(crate::shortcuts::Action::Undo, ctx);
+            }
+            assert!(e.canvas.pen.is_none());
+            assert!(e.can_redo());
+            for _ in 0..3 {
+                e.perform_action(crate::shortcuts::Action::Redo, ctx);
+            }
+            assert_eq!(e.canvas.pen.as_ref().unwrap().mark.nodes, original);
+            e.perform_action(crate::shortcuts::Action::Undo, ctx);
+            click(ctx, e, v.screen(Pos2::new(500., 250.)));
+            assert!(!e.can_redo());
+            e.finish_pending_pen();
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            e.perform_action(crate::shortcuts::Action::Undo, ctx);
+            assert!(e.doc.layers[0].frames[0].is_empty());
+            e.perform_action(crate::shortcuts::Action::Redo, ctx);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
         });
     }
     #[test]
