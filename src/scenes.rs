@@ -19,6 +19,7 @@ impl Editor {
         }
     }
     pub fn switch_scene(&mut self, index: usize) {
+        self.feature.exposure_drag = None;
         self.clips.reset_document();
         if index >= self.doc.extras.scenes.len() {
             return;

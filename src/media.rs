@@ -653,6 +653,7 @@ impl Editor {
     }
 
     pub(crate) fn video_transform_input(&mut self, ui: &egui::Ui, area: Rect, view: View) -> bool {
+        let snap_view = self.camera_depth_view(view, self.layer);
         if !matches!(
             self.tool,
             crate::canvas::Tool::Select
@@ -765,6 +766,13 @@ impl Editor {
                 self.media.video_drag = Some((track.id, c, world, clip.transform));
                 self.media.video_drag_started = false;
                 self.media.video_drag_modifiers = modifiers;
+                self.view_options.video_bounds = Some(Rect::from_points(
+                    &crate::canvas::vertices(&mark)
+                        .iter()
+                        .map(|p| snap_view.world(view.screen(*p)))
+                        .collect::<Vec<_>>(),
+                ));
+                self.prepare_snapping(&[]);
             } else {
                 self.media.selected_video = None;
             }
@@ -784,7 +792,24 @@ impl Editor {
                 view
             };
             let world = view.world(position);
-            let delta = world - origin;
+            let mut delta = world - origin;
+            if self.studio.prefs.view.snaps.any()
+                && self.media.video_resize_center.is_none()
+                && !self.media.video_drag_modifiers.shift
+                && !self.media.video_drag_modifiers.alt
+            {
+                if let Some(bounds) = self.view_options.video_bounds {
+                    let anchor = snap_view.world(view.screen(origin));
+                    let destination = snap_view.world(view.screen(world));
+                    let snapped = self.snap_translation(
+                        bounds,
+                        destination - anchor,
+                        snap_view,
+                        modifiers.alt,
+                    );
+                    delta = view.world(snap_view.screen(anchor + snapped)) - origin;
+                }
+            }
             if !self.media.video_drag_started && delta.length() * view.scale > 2. {
                 self.checkpoint();
                 self.media.video_drag_started = true;
@@ -1633,6 +1658,14 @@ impl Editor {
 }
 
 impl MediaLibrary {
+    pub(crate) fn timeline_end(&self) -> usize {
+        self.tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .map(|clip| clip.start + clip.length)
+            .max()
+            .unwrap_or(1)
+    }
     pub(crate) fn remove_empty_tracks(&mut self) {
         self.tracks.retain(|track| !track.clips.is_empty());
     }
@@ -2825,5 +2858,133 @@ impl Editor {
         self.checkpoint();
         self.doc.extras.media.tracks[index].depth = value;
         self.recover();
+    }
+}
+
+impl Editor {
+    pub(crate) fn video_snap_rects(&self) -> Vec<Rect> {
+        let base = View {
+            center: Pos2::ZERO,
+            stage_center: Pos2::ZERO,
+            scale: 1.,
+            angle: 0.,
+        };
+        let target = self.camera_depth_view(base, self.layer);
+        let depth = crate::depth::active(self);
+        self.doc
+            .extras
+            .media
+            .active_videos(self.frame, self.doc.layers.len())
+            .filter(|(track, _)| {
+                self.media
+                    .video_drag
+                    .is_none_or(|(id, _, _, _)| track.id != id)
+            })
+            .map(|(track, clip)| {
+                let view = if depth {
+                    crate::depth::view_for_plane(&self.doc, self.frame, &track.depth, base)
+                } else {
+                    base
+                };
+                let mark = self.video_selection_mark(track, clip);
+                Rect::from_points(
+                    &crate::canvas::vertices(&mark)
+                        .iter()
+                        .map(|p| target.world(view.screen(*p)))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod view_snap_regressions {
+    use super::*;
+    #[test]
+    fn dragging_video_snaps_its_edge_without_needing_a_decoder() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = crate::fresh_document();
+        e.doc.width = 400;
+        e.doc.height = 300;
+        e.tool = crate::canvas::Tool::Object;
+        e.studio.prefs.view = Default::default();
+        e.studio.prefs.view.snaps.objects = true;
+        e.recovery = std::env::temp_dir().join(format!("video-snap-{}.json", std::process::id()));
+        e.doc.layers[0].frames[0] = vec![crate::Mark {
+            points: vec![[320., 75.], [360., 225.]].into(),
+            rectangle: true,
+            fill: Some([20, 40, 200, 255]),
+            stroke: false,
+            ..Default::default()
+        }]
+        .into();
+        e.doc.extras.media.assets.push(Asset {
+            id: 42,
+            name: "Video".into(),
+            folder: None,
+            kind: Kind::Video,
+            data: vec![1, 2].into(),
+            size: [400, 300],
+            seconds: 1.,
+            peaks: Default::default(),
+        });
+        e.doc.extras.media.tracks.push(Track {
+            id: 43,
+            name: "Video".into(),
+            depth: Default::default(),
+            slot: 1,
+            kind: Kind::Video,
+            hidden: false,
+            locked: false,
+            clips: vec![Clip {
+                asset: 42,
+                start: 0,
+                offset: 0,
+                length: 24,
+                transform: VideoTransform {
+                    scale_log2: -1.,
+                    ..Default::default()
+                },
+            }]
+            .into(),
+        });
+        let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    e.video_transform_input(
+                        ui,
+                        ui.available_rect_before_wrap(),
+                        View {
+                            center: Pos2::ZERO,
+                            stage_center: Pos2::ZERO,
+                            scale: 1.,
+                            angle: 0.,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let a = Pos2::new(150., 150.);
+        let b = Pos2::new(171., 150.);
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        tick(&mut e, vec![]);
+        tick(&mut e, vec![egui::Event::PointerMoved(a)]);
+        tick(&mut e, vec![press(a, true)]);
+        tick(&mut e, vec![egui::Event::PointerMoved(b)]);
+        tick(&mut e, vec![press(b, false)]);
+        assert!((e.doc.extras.media.tracks[0].clips[0].transform.offset[0] - 20.).abs() < 0.01);
     }
 }

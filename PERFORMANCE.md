@@ -245,3 +245,6 @@ La pista conserva una caché por identidad de fotogramas y claves, reteniendo su
 
 ## Portapapeles de fotogramas
 La copia conserva geometría compartida del intervalo y únicamente sus recursos alcanzables. No retiene los demás proyectos, pistas de medios o capas de la escena. La importación remapea identificadores y reutiliza fotogramas compartidos durante una acción explícita de pegado; primero valida un candidato y después añade una única entrada de historial. Las interacciones de ratón no recorren el paquete del portapapeles.
+
+## Ajustes de vista y duración de exposiciones
+Los destinos escalares de ajuste se preparan una vez al iniciar el gesto con la geometría visible del fotograma activo. Las búsquedas durante el movimiento usan listas ordenadas. La cuadrícula limita su dibujo al área visible y adapta el paso al zoom; no altera geometría ni exportaciones. El tirador de duración conserva únicamente índices durante la previsualización y confirma una sola entrada de historial al soltar.

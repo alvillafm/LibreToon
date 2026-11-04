@@ -98,3 +98,9 @@ Whether you're a developer, animator, or just someone interested in better 2D an
 Feel free to open an **Issue** or submit a **Pull Request** on GitHub.
 
 **LibreToon is just getting started. Let's see how far we can take it!**
+
+### Exposure resizing and alignment
+
+Drag the right edge of an exposure to extend or shorten it; no double-click is required. Dragging its body still moves the keyframe. The final edge changes scene duration and protects existing animation in other tracks.
+
+**View** contains rulers, clear guides, a configurable grid and independent snapping switches for guides, stage axes, object edges and grid intersections. Hold **Alt** to bypass snapping. Grid size, subdivisions, origin, color, opacity and line/dot style are configurable. The grid and alignment indicators are editor overlays and are not exported. Shape tools show a crosshair and a drawing hint.

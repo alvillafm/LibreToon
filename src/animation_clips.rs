@@ -138,6 +138,9 @@ fn clear_of_other_clips(list: &[Span], original: usize, preview: &Span) -> bool 
         .take_while(|span| span.start < preview.end)
         .all(|span| span.start == original)
 }
+pub(crate) fn track_end(layer: &Layer) -> usize {
+    spans(layer).iter().map(|span| span.end).max().unwrap_or(1)
+}
 pub(crate) fn resize_track(layer: &mut Layer, count: usize) -> bool {
     if !layer.options.animation_track {
         return false;

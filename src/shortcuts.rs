@@ -168,6 +168,7 @@ impl Editor {
             || self.studio.preferences_open
             || self.studio.export.is_some()
             || self.document_settings.is_some()
+            || self.view_options.draft.is_some()
             || self.animation.picker.is_some()
             || ctx.egui_wants_keyboard_input()
         {

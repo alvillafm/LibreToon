@@ -5,6 +5,16 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    LayerAdd,
+    LayerRemove,
+    FolderRemove,
+    KeyAdd,
+    BlankKeyAdd,
+    KeyRemove,
+    FrameExtend,
+    FrameShorten,
+    Grid,
+    Snap,
     Depth,
     Focus,
     Blur,
@@ -166,6 +176,71 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::LayerAdd | Icon::LayerRemove => {
+            path(&[(1., 6.), (7., 3.), (13., 6.), (7., 9.), (1., 6.)]);
+            path(&[(1., 10.), (7., 13.), (12., 10.)]);
+            path(&[(1., 14.), (7., 17.), (10., 15.5)]);
+            line((12., 15.), (19., 15.));
+            if matches!(icon, Icon::LayerAdd) {
+                line((15.5, 11.5), (15.5, 18.5));
+            }
+        }
+        Icon::FolderRemove => {
+            path(&[
+                (2., 17.),
+                (2., 4.),
+                (8., 4.),
+                (10., 7.),
+                (18., 7.),
+                (18., 17.),
+                (2., 17.),
+            ]);
+            line((7., 12.), (13., 12.));
+        }
+        Icon::KeyAdd | Icon::BlankKeyAdd | Icon::KeyRemove => {
+            if matches!(icon, Icon::BlankKeyAdd) {
+                p.circle_stroke(pt(7., 9.), 4.5 * scale, s);
+            } else {
+                p.circle_filled(pt(7., 9.), 4.5 * scale, c);
+            }
+            line((12., 15.), (19., 15.));
+            if !matches!(icon, Icon::KeyRemove) {
+                line((15.5, 11.5), (15.5, 18.5));
+            }
+        }
+        Icon::FrameExtend | Icon::FrameShorten => {
+            rect(1., 4., 10., 12.);
+            p.circle_filled(pt(4., 10.), 1.5 * scale, c);
+            line((7., 5.), (7., 15.));
+            if matches!(icon, Icon::FrameExtend) {
+                path(&[(14., 6.), (18., 10.), (14., 14.)]);
+            } else {
+                path(&[(18., 6.), (14., 10.), (18., 14.)]);
+            }
+        }
+        Icon::Grid => {
+            for i in [4., 10., 16.] {
+                line((i, 2.), (i, 18.));
+                line((2., i), (18., i));
+            }
+        }
+        Icon::Snap => {
+            p.add(egui::Shape::line(
+                vec![
+                    pt(4., 3.),
+                    pt(4., 12.),
+                    pt(6., 16.),
+                    pt(10., 18.),
+                    pt(14., 16.),
+                    pt(16., 12.),
+                    pt(16., 3.),
+                ],
+                s,
+            ));
+            line((3., 7.), (7., 7.));
+            line((13., 7.), (17., 7.));
+        }
+
         Icon::Bones | Icon::IK => {
             path(&[(3., 16.), (6., 8.), (16., 3.), (13., 11.), (3., 16.)]);
             circle(3., 16., 2.);
@@ -809,9 +884,10 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             }
         }
         Icon::Depth => {
-            path(&[(2., 5.), (7., 2.), (7., 15.), (2., 18.), (2., 5.)]);
-            path(&[(10., 5.), (15., 2.), (15., 15.), (10., 18.), (10., 5.)]);
-            line((2., 19.), (18., 19.));
+            rect(1., 7., 6., 7.);
+            path(&[(7., 9.), (10., 7.), (10., 14.), (7., 12.)]);
+            path(&[(12., 4.), (15., 2.), (15., 15.), (12., 17.), (12., 4.)]);
+            path(&[(17., 5.), (19., 4.), (19., 17.), (17., 18.)]);
         }
         Icon::Focus => {
             circle(10., 10., 4.);

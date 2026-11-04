@@ -21,9 +21,17 @@ The header-logo helper calls the application artwork "supplied app artwork". The
 
 The maintainer has now declared that project visuals were created with Codex assistance and the blue-mouse/LT logo was generated through ChatGPT. See [ASSET_PROVENANCE.md](ASSET_PROVENANCE.md) for the declaration, resource classification and its limits. The earlier historical observations above are retained as repository evidence; they are not the only provenance information now available. The grey SVG is not assumed to be the source of the blue raster logo. Exact conversion/generation records and an independent rights determination are still unavailable. No artwork bytes were changed.
 
-## Current file identification
+## Historical file identification — 2 November 2026
 
 - libretoon.svg: SHA-256 cb40f010d6d6dcd4caaaa6a05e4dd15adee697c49c8899f151f34fa2d77f21b0
 - libretoon.png: SHA-256 8807318035c649351d1c94e61702017f1a4a6b33c71f20f921da22adcd4f1664
 - libretoon-icon.png: SHA-256 12aa5e96bf96e11664c53eb80c134dabfcc884854efd4e5fc06bcf73c6b06c88
 - libretoon.ico: SHA-256 ee9855c5874da303482fd41f5e1aae7f8a7e82340900f77b96d7b9076226c667
+
+## Replacement supplied on 4 November 2026
+
+The maintainer supplied `da356aaf-ff75-4694-9802-71bd48c8d17d.png` (1254×1254 RGBA), showing a purple LT/pencil/timeline icon, and requested its use as the application icon. The full-resolution image was saved as `libretoon.png`; `libretoon-icon.png` was resized to 256×256 with Pillow Lanczos; `libretoon.ico` contains 16, 24, 32, 48, 64, 128 and 256-pixel variants. No changes to the artwork design were made. Its author and generation history have not been independently verified. The earlier logo statements above remain historical observations.
+
+- libretoon.png: SHA-256 7c0d2a283f2e8f8c5c239b04c35af0f8d88515393e282e01a5d7aae122eb8cec
+- libretoon-icon.png: SHA-256 41094f356052ab23df7e54ae3974fc7a8a383697b21aa68d07f75f9098fde952
+- libretoon.ico: SHA-256 dd60528b09243421fab19dfc9974447782287027d492855122d919c0cabd24fa

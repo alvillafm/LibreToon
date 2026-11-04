@@ -18,6 +18,7 @@ mod documents;
 mod drawing;
 mod editing;
 mod exporter;
+mod exposure_resize;
 mod features;
 mod ffmpeg_setup;
 mod fla;
@@ -53,6 +54,7 @@ mod tools_editor;
 mod typography;
 mod updater;
 mod vector;
+mod view_options;
 mod visual_controls;
 mod width;
 mod workspace;
@@ -73,6 +75,7 @@ struct Editor {
     assets: library::LibraryState,
     clips: animation_clips::Manager,
     frame_clipboard: frame_clipboard::State,
+    view_options: view_options::State,
     hub: documents::Hub,
     drawing: drawing::Drawing,
     feature: features::FeatureState,
@@ -161,6 +164,7 @@ impl Editor {
             assets: Default::default(),
             clips: Default::default(),
             frame_clipboard: Default::default(),
+            view_options: Default::default(),
             hub,
             drawing: Default::default(),
             feature: Default::default(),
@@ -267,6 +271,7 @@ impl Editor {
         }
     }
     fn history(&mut self, redo: bool) {
+        self.feature.exposure_drag = None;
         self.clips.reset_document();
         self.rigging.cancel_gesture();
         let entry = if redo {

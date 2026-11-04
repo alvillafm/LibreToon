@@ -552,15 +552,14 @@ impl Editor {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_width(160.);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
-                        });
+                        ui.spacing_mut().item_spacing.x = 3.;
+                        ui.set_width(137.);
+                        ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
                         ui.separator();
                         ui.horizontal(|ui| {
                             if button(
                                 ui,
-                                Icon::Layers,
+                                Icon::LayerAdd,
                                 "",
                                 "Añadir capa",
                                 false,
@@ -572,7 +571,7 @@ impl Editor {
                             }
                             if button(
                                 ui,
-                                Icon::Trash,
+                                Icon::LayerRemove,
                                 "",
                                 "Eliminar capa",
                                 false,
@@ -605,13 +604,14 @@ impl Editor {
                             if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
                         });
                     });
-                    let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 58.), Sense::hover());
+                    let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 49.), Sense::hover());
                     ui.painter().line_segment(
                         [divider.left_top(), divider.left_bottom()],
                         Stroke::new(1., crate::themes::line()),
                     );
                     ui.vertical(|ui| {
-                        ui.set_width(76.);
+                        ui.spacing_mut().item_spacing.x = 3.;
+                        ui.set_width(67.);
                         ui.label(
                             egui::RichText::new(tr("CARPETAS"))
                                 .small()
@@ -621,7 +621,7 @@ impl Editor {
                         ui.horizontal(|ui| {
                             if button(
                                 ui,
-                                Icon::Folder,
+                                Icon::FolderPlus,
                                 "",
                                 "Crear carpeta",
                                 false,
@@ -643,7 +643,7 @@ impl Editor {
                             }
                             if button(
                                 ui,
-                                Icon::Trash,
+                                Icon::FolderRemove,
                                 "",
                                 "Eliminar carpeta",
                                 false,
@@ -655,13 +655,14 @@ impl Editor {
                             }
                         });
                     });
-                    let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 58.), Sense::hover());
+                    let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 49.), Sense::hover());
                     ui.painter().line_segment(
                         [divider.left_top(), divider.left_bottom()],
                         Stroke::new(1., crate::themes::line()),
                     );
                     ui.vertical(|ui| {
-                        ui.set_width(240.);
+                        ui.spacing_mut().item_spacing.x = 3.;
+                        ui.set_width(242.);
                         ui.label(
                             egui::RichText::new(tr("FOTOGRAMAS"))
                                 .small()
@@ -669,16 +670,12 @@ impl Editor {
                         );
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if button(ui,Icon::Film,"","Create Animation Clip…",false,true).clicked(){self.begin_animation_clip();}
-                            if button(ui, Icon::Tween, "", "Motion tween", false, !self.doc.layers[self.layer].options.animation_track).clicked() {
-                                self.create_motion();
-                            }
                             for (action, icon, tip) in [
-                                (0, Icon::Copy, "Fotograma clave"),
-                                (1, Icon::New, "Fotograma clave en blanco"),
-                                (2, Icon::Plus, "Ampliar duración de fotograma"),
-                                (3, Icon::Previous, "Reducir duración de fotograma"),
-                                (4, Icon::Trash, "Eliminar fotograma clave"),
+                                (0, Icon::KeyAdd, "Fotograma clave"),
+                                (1, Icon::BlankKeyAdd, "Fotograma clave en blanco"),
+                                (2, Icon::FrameExtend, "Ampliar duración de fotograma"),
+                                (3, Icon::FrameShorten, "Reducir duración de fotograma"),
+                                (4, Icon::KeyRemove, "Eliminar fotograma clave"),
                             ] {
                                 if button(
                                     ui,
@@ -693,6 +690,10 @@ impl Editor {
                                     self.timeline_edit(action);
                                 }
                             }
+                            if button(ui, Icon::Tween, "", "Motion tween", false, !self.doc.layers[self.layer].options.animation_track).clicked() {
+                                self.create_motion();
+                            }
+                            if button(ui,Icon::Film,"","Create Animation Clip…",false,true).clicked(){self.begin_animation_clip();}
                         });
                     });
                 });
@@ -764,7 +765,7 @@ impl Editor {
                         let row_h = 28.;
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
-                                label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).min(10000) as f32 * cell,
+                                label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).max(self.feature.exposure_drag.map_or(count,|d|d.target)).min(10000) as f32 * cell,
                                 24. + (all.len()+1) as f32 * row_h,
                             ),
                             Sense::hover(),
@@ -1186,7 +1187,7 @@ impl Editor {
                                             self.feature.frame_selection = Some((l,
                                                 if ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
                                         }
-                                        if response.drag_started_by(egui::PointerButton::Primary) && editable {
+                                        if response.drag_started_by(egui::PointerButton::Primary) && editable && self.feature.exposure_drag.is_none() {
                                             let (mut a, mut b) = self.feature.frame_selection
                                                 .filter(|s| s.0 == l && (s.1.min(s.2)..=s.1.max(s.2)).contains(&f))
                                                 .map_or((f, f), |s| (s.1.min(s.2), s.1.max(s.2)));
@@ -1274,11 +1275,11 @@ impl Editor {
                                                     if button(
                                                         ui,
                                                         match action {
-                                                            0 => Icon::Keyframe,
-                                                            1 => Icon::New,
-                                                            2 => Icon::Plus,
-                                                            3 => Icon::Previous,
-                                                            4 => Icon::Trash,
+                                                            0 => Icon::KeyAdd,
+                                                            1 => Icon::BlankKeyAdd,
+                                                            2 => Icon::FrameExtend,
+                                                            3 => Icon::FrameShorten,
+                                                            4 => Icon::KeyRemove,
                                                             _ => Icon::Tween,
                                                         },
                                                         label,
@@ -1294,6 +1295,7 @@ impl Editor {
                                                 }
                                             });
                                     }
+                                    self.exposure_handles_ui(ui,l,animation_row,r.left()+label_w,cell,frames.clone());
                                     if let Some(drag) = &mut self.feature.frame_drag {
                                         if drag.layer == l {
                                             if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
@@ -1736,6 +1738,7 @@ impl Editor {
                 viewport.offset = output.state.clamped_offset().x;
                 ui.data_mut(|data| data.insert_temp(viewport_id, viewport));
                 if delete_rigging {self.delete_rigging_track();}
+                self.finish_exposure_resize(ui.ctx());
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
                     if let Some(drag) = self.feature.frame_drag.take() {

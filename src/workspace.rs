@@ -233,6 +233,7 @@ impl Editor {
                             ui.close();
                         }
                     });
+                    ui.menu_button(crate::i18n::tr("Vista"), |ui| self.view_menu(ui));
                     ui.menu_button(crate::i18n::tr("Ayuda"), |ui| {
                         if button(ui, Icon::Rotate, "Buscar actualizaciones", "", false, true)
                             .clicked()
@@ -418,6 +419,7 @@ impl Editor {
         self.sequencer(ui);
         self.finish_animation_clip_ui(&ctx);
         self.animation_clip_dialog(&ctx);
+        self.grid_settings_ui(&ctx);
         egui::Panel::top("document_tab")
             .exact_size(34.)
             .show(ui, |ui| {

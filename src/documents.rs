@@ -40,6 +40,7 @@ impl Session {
         }
     }
     fn exchange(&mut self, e: &mut Editor) {
+        e.feature.exposure_drag = None;
         e.clips.reset_document();
         e.frame_clipboard.focus = false;
         std::mem::swap(&mut self.rigging, &mut e.rigging);

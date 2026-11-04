@@ -522,6 +522,7 @@ impl Editor {
             || self.animation.picker.is_some()
             || self.studio.preferences_open
             || self.document_settings.is_some()
+            || self.view_options.draft.is_some()
             || self.studio.export.is_some();
         let (
             pointer,
@@ -593,7 +594,8 @@ impl Editor {
             })
         });
         let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
-        let guide_handled = if self.document_settings.is_some() {
+        let guide_handled = if self.document_settings.is_some() || self.view_options.draft.is_some()
+        {
             true
         } else if self.drawing.pen.eraser() {
             false
@@ -953,6 +955,15 @@ impl Editor {
                     _ => self.fill_enabled || self.stroke_enabled,
                 }
             {
+                let world = if matches!(
+                    tool,
+                    Tool::Rectangle | Tool::Ellipse | Tool::Polygon | Tool::Line
+                ) {
+                    self.prepare_snapping(&[]);
+                    self.snap_point(world, view, alt)
+                } else {
+                    world
+                };
                 self.drawing.start(world);
                 self.draft = Some(Mark {
                     points: vec![[world.x, world.y]].into(),
@@ -1114,6 +1125,7 @@ impl Editor {
                     }
                 }
                 if let (Some(operation), Some(bounds)) = (op, state.bounds(self)) {
+                    self.prepare_snapping(&state.selected);
                     let pivot = state.pivot.unwrap_or(bounds.center());
                     let originals = state
                         .selected
@@ -1309,10 +1321,18 @@ impl Editor {
                     }
                 }
                 Some(Drag::Draw { smoother, tool }) => {
+                    let shape_world = if matches!(
+                        *tool,
+                        Tool::Rectangle | Tool::Line | Tool::Ellipse | Tool::Polygon
+                    ) {
+                        self.snap_point(world, view, alt)
+                    } else {
+                        world
+                    };
                     if let Some(m) = &mut self.draft {
                         if matches!(*tool, Tool::Line | Tool::Ellipse | Tool::Polygon) {
                             let a = smoother.last();
-                            let mut b = world;
+                            let mut b = shape_world;
                             if shift {
                                 let delta = b - a;
                                 if *tool == Tool::Line {
@@ -1507,7 +1527,12 @@ impl Editor {
                                 let mut translation = Vec2::ZERO;
                                 match operation {
                                     Operation::Move => {
-                                        translation = world - d.start;
+                                        translation = self.snap_translation(
+                                            Rect::from_points(&d.bounds.handles()),
+                                            world - d.start,
+                                            view,
+                                            alt,
+                                        );
                                         state.pivot = Some(d.pivot + translation);
                                     }
                                     Operation::Rotate => {
@@ -1604,6 +1629,11 @@ impl Editor {
                 CursorIcon::Grabbing
             } else if space || tool == Tool::Pan {
                 CursorIcon::Grab
+            } else if matches!(
+                tool,
+                Tool::Rectangle | Tool::Ellipse | Tool::Polygon | Tool::Line | Tool::Pen
+            ) {
+                CursorIcon::Crosshair
             } else if matches!(tool, Tool::Select | Tool::Transform | Tool::Object) {
                 CursorIcon::Default
             } else if matches!(
@@ -1634,6 +1664,7 @@ impl Editor {
             Color32::WHITE,
             Stroke::new(1., Color32::from_gray(90)),
         ));
+        self.paint_grid(&painter, area, view);
         if self.onion && !self.playing {
             let count = self.doc.layers[0].frames.len();
             for f in self.frame.saturating_sub(self.studio.onion_before)
@@ -1941,6 +1972,34 @@ impl Editor {
                 painter.circle_stroke(pointer, radius, Stroke::new(3., Color32::BLACK));
                 painter.circle_stroke(pointer, radius, Stroke::new(1., Color32::WHITE));
             }
+        }
+        if video_input
+            || matches!(
+                state.drag,
+                Some(Drag::Transform(_))
+                    | Some(Drag::Draw {
+                        tool: Tool::Rectangle | Tool::Ellipse | Tool::Polygon | Tool::Line,
+                        ..
+                    })
+            )
+        {
+            self.paint_snap_feedback(&painter, area, view);
+        }
+        if over
+            && matches!(
+                tool,
+                Tool::Rectangle | Tool::Ellipse | Tool::Polygon | Tool::Line
+            )
+        {
+            if let Some(pos) = pointer {
+                crate::design::draw(
+                    &painter,
+                    Rect::from_min_size(pos + Vec2::new(13., 13.), Vec2::splat(15.)),
+                    tool.icon(),
+                    crate::themes::accent(),
+                );
+            }
+            response.clone().on_hover_text(crate::i18n::tr("Arrastra para crear la forma. Mayús mantiene la proporción o el ángulo; Alt omite los ajustes."));
         }
         self.stage_mask(&painter, area, stage_view);
         self.paint_rulers(&ruler_painter, ruler_area, view);
@@ -3853,5 +3912,61 @@ mod node_drag_regressions {
             node_contact_position(&[egui::Event::PointerMoved(at)], false),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod shape_feedback_regressions {
+    use super::*;
+    #[test]
+    fn shape_cursor_and_grid_snapping_work_through_real_canvas_input() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = crate::fresh_document();
+        e.doc.width = 1000;
+        e.doc.height = 800;
+        e.tool = Tool::Ellipse;
+        e.studio.prefs.view = crate::view_options::Config::default();
+        e.studio.prefs.view.grid.size = [50., 50.];
+        e.studio.prefs.view.grid.subdivisions = 1;
+        e.studio.prefs.view.snaps.grid = true;
+        e.recovery = std::env::temp_dir().join(format!("shape-snap-{}.json", std::process::id()));
+        let tick = |e: &mut Editor, events: Vec<egui::Event>| {
+            let mut area = Rect::NOTHING;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 800.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    area = ui.available_rect_before_wrap();
+                    e.canvas_ui(ui);
+                },
+            );
+            let cursor = out.platform_output.cursor_icon;
+            out.textures_delta.clear();
+            (area, cursor)
+        };
+        let (area, _) = tick(&mut e, vec![]);
+        let view = e.canvas.view(area);
+        let a = view.screen(Pos2::new(103., 98.));
+        let b = view.screen(Pos2::new(197., 202.));
+        let (_, cursor) = tick(&mut e, vec![egui::Event::PointerMoved(a)]);
+        assert_eq!(cursor, CursorIcon::Crosshair);
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        tick(&mut e, vec![press(a, true)]);
+        tick(&mut e, vec![egui::Event::PointerMoved(b)]);
+        tick(&mut e, vec![press(b, false)]);
+        let bounds = crate::vector::control_bounds(&e.doc.layers[0].frames[0][0]);
+        assert!((bounds.left() - 100.).abs() < 0.01);
+        assert!((bounds.right() - 200.).abs() < 0.01);
+        assert!((bounds.top() - 100.).abs() < 0.01);
+        assert!((bounds.bottom() - 200.).abs() < 0.01);
     }
 }

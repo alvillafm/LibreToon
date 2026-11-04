@@ -88,6 +88,7 @@ impl Binding {
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub view: crate::view_options::Config,
     #[serde(skip_serializing)]
     pub spanish: bool,
     #[serde(deserialize_with = "crate::i18n::deserialize_language")]
@@ -114,6 +115,7 @@ impl Default for Preferences {
             "N", "R", "O", "", "H", "Z", "", "", "S", "", "", "T", "", "", "", "", "",
         ];
         Self {
+            view: Default::default(),
             spanish: false,
             language: None,
             theme: Default::default(),
@@ -137,7 +139,7 @@ pub struct Studio {
     pub vertical: bool,
     pub rulers: bool,
     unit: usize,
-    guides: Vec<(bool, f32)>,
+    pub(crate) guides: Vec<(bool, f32)>,
     guide_drag: Option<usize>,
     pub strength: f32,
     pub tone_mode: usize,
@@ -188,6 +190,7 @@ impl Studio {
             prefs.dpi = 96.;
         }
         prefs.dpi = prefs.dpi.clamp(1., 2400.);
+        prefs.view.normalize();
         Self {
             prefs,
             preferences_open: false,
@@ -422,6 +425,7 @@ impl Editor {
             || self.animation.picker.is_some()
             || self.studio.preferences_open
             || self.studio.export.is_some()
+            || self.view_options.draft.is_some()
         {
             return;
         }
@@ -741,7 +745,7 @@ impl Editor {
                 }
                 ui.label(tr("Arrastra desde las reglas para crear guías. Arrastra una guía fuera para eliminarla."));
                 if ui.button(tr("Borrar guías")).clicked() {
-                    self.studio.guides.clear();
+                    self.clear_guides();
                 }
             }
             Tool::Symmetry => {
