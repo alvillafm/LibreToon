@@ -171,6 +171,33 @@ pub fn ensure_fonts(ctx: &eframe::egui::Context, language: Language) {
 
 pub fn english(text: &str) -> &str {
     match text {
+        "Oculta" => "Hidden",
+        "Profundidad de capas" => "Layer depth",
+        "Profundidad de campo" => "Depth of field",
+        "Ajustes de enfoque" => "Focus settings",
+        "Ayuda de cámara" => "Camera help",
+        "Método de desenfoque" => "Blur method",
+        "Gaussiano" => "Gaussian",
+        "Lente" => "Lens",
+        "Fuerza de desenfoque" => "Blur strength",
+        "Calidad del desenfoque" => "Blur quality",
+        "Punto de foco" => "Focus distance",
+        "Amplitud de enfoque" => "Focus range",
+        "Zona nítida" => "Sharp range",
+        "Posición de cámara" => "Camera depth position",
+        "Mantener tamaño" => "Maintain size",
+        "Vista lateral · distancias desde la cámara" => "Side view · distances from camera",
+        "Distancia a la cámara" => "Distance from camera",
+        "Previsualización de cámara" => "Camera preview",
+        "Activa la cámara para previsualizar el resultado" => {
+            "Activate a camera to preview the result"
+        }
+        "Baja" => "Low",
+        "Media" => "Medium",
+        "Alta" => "High",
+        "Las distancias se miden desde la cámara. Foco 200 y amplitud 100 mantienen nítido de 100 a 300; fuera de ese intervalo el desenfoque aumenta suavemente. Mantener tamaño conserva el tamaño inicial de las capas al cambiar su profundidad. Las capas cercanas se desplazan más al mover la cámara. Ocultar el desenfoque solo afecta al editor, nunca a la exportación." => {
+            "Distances are measured from the camera. Focus 200 and range 100 keep 100 through 300 sharp; blur increases smoothly outside that interval. Maintain size preserves the initial layer size when changing depth. Nearby layers move more when the camera moves. Hiding blur affects only the editor, never the export."
+        }
         "Orden en la capa" => "Order in layer",
         "Enviar al fondo" => "Send to back",
         "Enviar atrás" => "Send backward",

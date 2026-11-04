@@ -53,6 +53,8 @@ struct VideoTransform {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Track {
+    #[serde(default)]
+    pub(crate) depth: crate::depth::LayerDepth,
     id: u64,
     #[serde(default)]
     pub(crate) slot: usize,
@@ -101,6 +103,7 @@ struct SceneVideoPreview {
     job: Option<std::sync::mpsc::Receiver<Option<VideoFrame>>>,
     file: Option<(u64, StagedVideo)>,
     texture: Option<(u64, egui::TextureHandle)>,
+    pixels: Option<std::sync::Arc<image::RgbaImage>>,
 }
 
 #[derive(Clone)]
@@ -433,6 +436,7 @@ impl Editor {
         frame: usize,
         slot: usize,
     ) {
+        let depth_active = crate::depth::active(self);
         let library = &self.doc.extras.media;
         let layers = self.doc.layers.len();
         for track in library.tracks.iter().filter(|track| {
@@ -445,6 +449,12 @@ impl Editor {
             else {
                 continue;
             };
+            if depth_active
+                && crate::depth::camera(&self.doc, frame)
+                    .is_some_and(|c| !crate::depth::visible(&track.depth, &c.optics))
+            {
+                continue;
+            }
             let preview = self.media.videos.entry(track.id).or_default();
             let current = Some((clip.asset, clip.offset + frame - clip.start));
             if let Some(job) = &preview.job {
@@ -455,6 +465,7 @@ impl Editor {
                             preview.file = Some((id, file));
                             let size = [image.width() as usize, image.height() as usize];
                             let color = egui::ColorImage::from_rgba_unmultiplied(size, &image);
+                            preview.pixels = Some(std::sync::Arc::new(image));
                             preview.texture = Some((
                                 id,
                                 painter.ctx().load_texture(
@@ -506,6 +517,11 @@ impl Editor {
                 && *preview_id == id
             {
                 let mark = transformed_video_mark(&self.doc, texture.size_vec2(), clip.transform);
+                let view = if depth_active {
+                    crate::depth::view_for_plane(&self.doc, frame, &track.depth, view)
+                } else {
+                    view
+                };
                 if let Some(mesh) = image_mesh(&mark, view, texture.id()) {
                     painter.add(mesh);
                 }
@@ -548,6 +564,11 @@ impl Editor {
         if track.hidden || track.locked {
             return;
         }
+        let view = if crate::depth::active(self) {
+            crate::depth::view_for_plane(&self.doc, self.frame, &track.depth, view)
+        } else {
+            view
+        };
         let mark = self.video_selection_mark(track, &track.clips[c]);
         let points: Vec<_> = crate::canvas::vertices(&mark)
             .into_iter()
@@ -603,7 +624,7 @@ impl Editor {
         let Some(position) = position else {
             return false;
         };
-        let world = view.world(position);
+        let depth_active = crate::depth::active(self);
         if pressed
             && area.contains(position)
             && ui.ctx().layer_id_at(position) == Some(ui.layer_id())
@@ -616,6 +637,12 @@ impl Editor {
                 .rev()
                 .filter(|(_, layer)| layer.visible && !layer.options.locked)
                 .find_map(|(index, layer)| {
+                    let view = if depth_active {
+                        crate::depth::layer_view(&self.doc, self.frame, index, view)
+                    } else {
+                        view
+                    };
+                    let world = view.world(position);
                     crate::animation::marks(layer, self.frame)
                         .iter()
                         .rev()
@@ -627,6 +654,12 @@ impl Editor {
                 if track.locked || track.hidden {
                     return false;
                 }
+                let view = if depth_active {
+                    crate::depth::view_for_plane(&self.doc, self.frame, &track.depth, view)
+                } else {
+                    view
+                };
+                let world = view.world(position);
                 let mark = self.video_selection_mark(track, clip);
                 crate::vector::contains_fill(&mark, world)
                     || (handles
@@ -653,6 +686,12 @@ impl Editor {
             if let Some((t, c)) = picked {
                 let track = &tracks.tracks[t];
                 let clip = &track.clips[c];
+                let view = if depth_active {
+                    crate::depth::view_for_plane(&self.doc, self.frame, &track.depth, view)
+                } else {
+                    view
+                };
+                let world = view.world(position);
                 let mark = self.video_selection_mark(track, clip);
                 self.media.video_resize_center = (self.tool == crate::canvas::Tool::Transform
                     && crate::canvas::vertices(&mark)
@@ -669,6 +708,20 @@ impl Editor {
             }
         }
         if let Some((id, c, origin, initial)) = self.media.video_drag {
+            let view = if depth_active {
+                self.doc
+                    .extras
+                    .media
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map_or(view, |t| {
+                        crate::depth::view_for_plane(&self.doc, self.frame, &t.depth, view)
+                    })
+            } else {
+                view
+            };
+            let world = view.world(position);
             let delta = world - origin;
             if !self.media.video_drag_started && delta.length() * view.scale > 2. {
                 self.checkpoint();
@@ -855,6 +908,7 @@ impl Editor {
         let tracks = &mut self.doc.extras.media.tracks;
         let index = index.unwrap_or_else(|| {
             tracks.push(Track {
+                depth: Default::default(),
                 id: id(),
                 name: name.into(),
                 kind: asset.kind,
@@ -1546,7 +1600,8 @@ impl MediaLibrary {
             std::iter::once(&self.tracks).chain(scenes.iter().map(|scene| &scene.media_tracks))
         {
             for track in tracks {
-                if track.kind == Kind::Image
+                if !track.depth.valid()
+                    || track.kind == Kind::Image
                     || track.clips.iter().any(|clip| {
                         assets.get(&clip.asset) != Some(&track.kind)
                             || clip.length == 0
@@ -1803,7 +1858,9 @@ fn transformed_video_mark(
     })
 }
 
+#[derive(Clone)]
 pub(crate) struct ExportVideoFrame {
+    pub depth: crate::depth::LayerDepth,
     pub slot: usize,
     pub mark: crate::Mark,
     pub pixels: std::sync::Arc<image::RgbaImage>,
@@ -1869,7 +1926,13 @@ impl VideoExport {
                 .iter()
                 .find(|camera| local >= camera.start && local - camera.start < camera.duration)
             {
-                let camera = crate::animation::camera_at(camera, local);
+                if !crate::depth::visible(&track.depth, &camera.optics) {
+                    continue;
+                }
+                let pose = crate::animation::camera_at(camera, local);
+                mark =
+                    crate::depth::project_mark(&scene, &pose, &camera.optics, &track.depth, &mark);
+                let camera = pose;
                 mark = crate::vector::transform(&mark, |p| {
                     Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.)
                         + crate::canvas::rotate(
@@ -1879,6 +1942,7 @@ impl VideoExport {
                 });
             }
             result.push(ExportVideoFrame {
+                depth: track.depth.clone(),
                 slot: track.slot.min(scene.layers.len()),
                 mark,
                 pixels,
@@ -2290,6 +2354,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         editor.doc.extras.media.tracks.push(Track {
+            depth: Default::default(),
             id: 7,
             slot: 0,
             name: "Test audio".into(),
@@ -2358,6 +2423,7 @@ mod tests {
         for kind in [Kind::Audio, Kind::Video] {
             let track_id = id();
             editor.doc.extras.media.tracks.push(Track {
+                depth: Default::default(),
                 id: track_id,
                 slot: 0,
                 name: "fixture".into(),
@@ -2503,6 +2569,7 @@ mod tests {
         });
         for (asset, kind) in [(1, Kind::Audio), (2, Kind::Video)] {
             doc.extras.media.tracks.push(Track {
+                depth: Default::default(),
                 id: asset + 2,
                 name: "fixture".into(),
                 slot: 0,
@@ -2581,4 +2648,70 @@ fn show_preview(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
     let size = texture.size_vec2();
     let scale = (ui.available_width() / size.x).min(100. / size.y).min(1.);
     ui.image((texture.id(), size * scale));
+}
+
+impl Editor {
+    pub(crate) fn depth_video_frames(&self) -> Vec<ExportVideoFrame> {
+        let mut result = vec![];
+        for (track, clip) in self
+            .doc
+            .extras
+            .media
+            .active_videos(self.frame, self.doc.layers.len())
+        {
+            if let Some(pixels) = self
+                .media
+                .videos
+                .get(&track.id)
+                .and_then(|v| v.pixels.clone())
+            {
+                let mut mark = transformed_video_mark(
+                    &self.doc,
+                    Vec2::new(pixels.width() as f32, pixels.height() as f32),
+                    clip.transform,
+                );
+                if let Some(camera) = crate::depth::camera(&self.doc, self.frame) {
+                    let pose = crate::animation::camera_at(camera, self.frame);
+                    mark = crate::depth::project_mark(
+                        &self.doc,
+                        &pose,
+                        &camera.optics,
+                        &track.depth,
+                        &mark,
+                    );
+                    mark = crate::vector::transform(&mark, |p| {
+                        Pos2::new(self.doc.width as f32 / 2., self.doc.height as f32 / 2.)
+                            + crate::canvas::rotate(
+                                p - crate::vector::pos(pose.center),
+                                -pose.angle,
+                            ) * pose.zoom
+                    });
+                }
+                result.push(ExportVideoFrame {
+                    depth: track.depth.clone(),
+                    slot: track.slot,
+                    mark,
+                    pixels,
+                });
+            }
+        }
+        result.sort_by_key(|c| c.slot);
+        result
+    }
+    pub(crate) fn video_depth_rows(&self) -> Vec<(usize, String, crate::depth::LayerDepth)> {
+        self.doc
+            .extras
+            .media
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.kind == Kind::Video)
+            .map(|(i, t)| (i, t.name.clone(), t.depth.clone()))
+            .collect()
+    }
+    pub(crate) fn set_video_depth(&mut self, index: usize, value: crate::depth::LayerDepth) {
+        self.checkpoint();
+        self.doc.extras.media.tracks[index].depth = value;
+        self.recover();
+    }
 }

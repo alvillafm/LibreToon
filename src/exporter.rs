@@ -717,7 +717,7 @@ pub(crate) fn raster(
     raster_with_video(doc, frame, w, h, ctx, cache, &[])
 }
 
-fn raster_with_video(
+pub(crate) fn raster_with_video(
     doc: &Document,
     frame: usize,
     w: u32,
@@ -726,8 +726,100 @@ fn raster_with_video(
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
 ) -> Vec<u8> {
-    let size = Vec2::new(w as f32, h as f32);
+    let resolved = crate::animation::resolve_movie(doc, frame, true);
+    raster_composited(doc, frame, w, h, ctx, cache, video, resolved)
+}
+pub(crate) fn raster_preview(
+    doc: &Document,
+    frame: usize,
+    clock: usize,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+) -> Vec<u8> {
+    let resolved = crate::features::resolve_at(doc, frame, true, clock);
+    raster_composited(doc, frame, w, h, ctx, cache, video, resolved)
+}
+fn raster_composited(
+    doc: &Document,
+    frame: usize,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+    resolved: Vec<(usize, usize, crate::Mark)>,
+) -> Vec<u8> {
+    let (scene, local) = crate::animation::locate(doc, frame);
+    let scene = crate::animation::scene_doc(doc, scene);
+    if let Some(camera) = crate::depth::camera(&scene, local).filter(|c| c.optics.strength > 0.) {
+        let mut result = vec![255u8; (w * h * 3) as usize];
+        let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
+        let mut clips = video.iter().enumerate().peekable();
+        let mut render = |subset, plane: &crate::depth::LayerDepth| {
+            let radius = camera
+                .optics
+                .radius(plane.distance - camera.optics.position)
+                * scale;
+            let pad = if radius >= 0.1 {
+                (radius * 2. + 3.).ceil() as u32
+            } else {
+                0
+            };
+            let (pw, ph) = (w + pad * 2, h + pad * 2);
+            let raw = raster_flat(doc, w, h, ctx, cache, video, Some(subset), &resolved, pad);
+            let blurred = crate::depth::blur(raw, pw, ph, radius, &camera.optics);
+            if pad == 0 {
+                composite(&mut result, &blurred);
+            } else {
+                for y in 0..h as usize {
+                    let start = ((y + pad as usize) * pw as usize + pad as usize) * 4;
+                    composite(
+                        &mut result[y * w as usize * 3..(y + 1) * w as usize * 3],
+                        &blurred[start..start + w as usize * 4],
+                    );
+                }
+            }
+        };
+        for layer in 0..=scene.layers.len() {
+            while clips.peek().is_some_and(|(_, c)| c.slot <= layer) {
+                let (i, clip) = clips.next().unwrap();
+                render((true, i), &clip.depth);
+            }
+            if let Some(l) = scene.layers.get(layer).filter(|l| l.visible) {
+                render((false, layer), &l.options.depth);
+            }
+        }
+        return result;
+    }
+    raster_flat(doc, w, h, ctx, cache, video, None, &resolved, 0)
+}
+fn composite(rgb: &mut [u8], rgba: &[u8]) {
+    for (out, c) in rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+        let alpha = c[3] as f32 / 255.;
+        for k in 0..3 {
+            out[k] = (c[k] as f32 + out[k] as f32 * (1. - alpha))
+                .min(255.)
+                .round() as u8;
+        }
+    }
+}
+fn raster_flat(
+    doc: &Document,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+    subset: Option<(bool, usize)>,
+    resolved: &[(usize, usize, crate::Mark)],
+    padding: u32,
+) -> Vec<u8> {
     let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
+    let (w, h) = (w + padding * 2, h + padding * 2);
+    let size = Vec2::new(w as f32, h as f32);
     let view = View {
         center: Pos2::ZERO + size / 2.,
         scale,
@@ -746,6 +838,9 @@ fn raster_with_video(
                 .with_clip_rect(Rect::from_min_size(Pos2::ZERO, size));
             let mut clips = video.iter().enumerate().peekable();
             let paint_video = |index, clip: &crate::media::ExportVideoFrame| {
+                if subset.is_some_and(|s| s != (true, index)) {
+                    return;
+                }
                 if let Some(mesh) = crate::media::image_mesh(
                     &clip.mark,
                     view,
@@ -754,10 +849,14 @@ fn raster_with_video(
                     painter.add(mesh);
                 }
             };
-            for (layer, _, m) in crate::animation::resolve_movie(doc, frame, true) {
+            for (layer, _, m) in resolved {
+                let layer = *layer;
                 while clips.peek().is_some_and(|(_, clip)| clip.slot <= layer) {
                     let (index, clip) = clips.next().unwrap();
                     paint_video(index, clip);
+                }
+                if subset.is_some_and(|s| s != (false, layer)) {
+                    continue;
                 }
                 if let Some(id) = m.style.media_image
                     && let Some(mesh) =
@@ -775,7 +874,11 @@ fn raster_with_video(
     );
     output.textures_delta.clear();
     let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
-    let mut pixels = vec![255u8; (w * h * 3) as usize];
+    let mut pixels = if subset.is_some() {
+        vec![0u8; (w * h * 4) as usize]
+    } else {
+        vec![255u8; (w * h * 3) as usize]
+    };
     for primitive in meshes {
         if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
             let clip = primitive
@@ -814,6 +917,11 @@ fn triangle(
     clip: Rect,
     texture: Option<([usize; 2], &[u8])>,
 ) {
+    let channels = if pixels.len() == (w * h * 4) as usize {
+        4
+    } else {
+        3
+    };
     let [a, b, c] = v.map(|v| v.pos);
     let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
     let det = cross(b - a, c - a);
@@ -852,7 +960,7 @@ fn triangle(
             if !covered {
                 continue;
             }
-            let offset = ((y * w + x) * 3) as usize;
+            let offset = (y * w + x) as usize * channels;
             if let Some(([width, height], data)) = texture {
                 let u = (0..3).map(|i| weights[i] * v[i].uv.x).sum::<f32>();
                 let v = (0..3).map(|i| weights[i] * v[i].uv.y).sum::<f32>();
@@ -865,12 +973,23 @@ fn triangle(
                         + pixels[offset + channel] as f32 * (1. - alpha))
                         .round() as u8;
                 }
+                if channels == 4 {
+                    pixels[offset + 3] = (sample[3] as f32
+                        + pixels[offset + 3] as f32 * (1. - alpha))
+                        .min(255.)
+                        .round() as u8;
+                }
                 continue;
             }
             let alpha = (0..3)
                 .map(|i| weights[i] * colors[i][3] as f32)
                 .sum::<f32>()
                 / 255.;
+            if channels == 4 {
+                pixels[offset + 3] = (alpha * 255. + pixels[offset + 3] as f32 * (1. - alpha))
+                    .min(255.)
+                    .round() as u8;
+            }
             for channel in 0..3 {
                 let source = (0..3)
                     .map(|i| weights[i] * colors[i][channel] as f32)
@@ -904,6 +1023,7 @@ mod tests {
             image::Rgba([255, 0, 0, 255]),
         ));
         let mut clip = crate::media::ExportVideoFrame {
+            depth: Default::default(),
             slot: 0,
             mark: crate::media::video_mark(&doc, Vec2::splat(4.)),
             pixels,
@@ -959,6 +1079,7 @@ mod tests {
         let p = raster(&d, 24, 64, 64, &ctx, &mut cache);
         assert_eq!(pixel(&p, 10), vec![20, 40, 220]);
         d.extras.cameras.push(crate::features::Camera {
+            optics: Default::default(),
             id: 1,
             name: "Camera".into(),
             start: 0,

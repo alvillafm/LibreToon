@@ -387,6 +387,7 @@ impl Editor {
         }
     }
     pub fn sequencer(&mut self, ui: &mut egui::Ui) {
+        self.depth_window(ui.ctx());
         let previous_frame = self.frame;
         egui::Panel::bottom("timeline")
             .default_size(245.)
@@ -530,11 +531,10 @@ impl Editor {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(112.);
-                        ui.label(
-                            egui::RichText::new(tr("CAPAS"))
-                                .small()
-                                .color(crate::themes::muted()),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
+                            if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
+                        });
                         ui.separator();
                         ui.horizontal(|ui| {
                             if button(
@@ -2033,6 +2033,7 @@ mod special_track_tests {
         assert_eq!(editor.doc.extras.rig.bones[0].keys.len(), 2);
 
         editor.doc.extras.cameras.push(Camera {
+            optics: Default::default(),
             id: 9,
             name: "Camera".into(),
             start: 0,

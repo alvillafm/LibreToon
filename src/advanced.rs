@@ -557,6 +557,7 @@ impl Editor {
         let id = id();
         let number = self.doc.extras.cameras.len() + 1;
         self.doc.extras.cameras.push(Camera {
+            optics: Default::default(),
             animation: Default::default(),
 
             id,
@@ -652,6 +653,7 @@ impl Editor {
                 }
             });
             let mut changed = ui.text_edit_singleline(&mut c.name).changed();
+            changed |= crate::depth::optics_ui(ui, &mut c.optics);
             ui.label(tr("Posición"));
             ui.horizontal(|ui| {
                 for v in &mut c.center {
@@ -696,6 +698,8 @@ impl Editor {
                 }
                 self.animation.timing_transaction =
                     timing_changed && self.animation.ease_handle.is_some();
+                let pose_changed =
+                    c.center != pose.center || c.zoom != pose.zoom || c.angle != pose.angle;
                 let key = crate::animation::CameraKey {
                     frame: self.frame.saturating_sub(c.start).min(c.duration - 1),
                     center: c.center,
@@ -705,7 +709,9 @@ impl Editor {
                 c.center = base.0;
                 c.zoom = base.1;
                 c.angle = base.2;
-                crate::animation::camera_record(&mut c, key);
+                if pose_changed {
+                    crate::animation::camera_record(&mut c, key);
+                }
                 self.doc.extras.cameras[index] = c;
                 self.normalize_cameras();
                 self.recover();

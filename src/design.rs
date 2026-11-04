@@ -5,6 +5,10 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Depth,
+    Focus,
+    Blur,
+    Info,
     SendBack,
     StepBack,
     StepFront,
@@ -803,6 +807,47 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
                 let edge = if front { 2. } else { 18. };
                 line((4., edge), (16., edge));
             }
+        }
+        Icon::Depth => {
+            path(&[(2., 5.), (7., 2.), (7., 15.), (2., 18.), (2., 5.)]);
+            path(&[(10., 5.), (15., 2.), (15., 15.), (10., 18.), (10., 5.)]);
+            line((2., 19.), (18., 19.));
+        }
+        Icon::Focus => {
+            circle(10., 10., 4.);
+            line((2., 6.), (2., 2.));
+            line((2., 2.), (6., 2.));
+            line((14., 2.), (18., 2.));
+            line((18., 2.), (18., 6.));
+            line((2., 14.), (2., 18.));
+            line((2., 18.), (6., 18.));
+            line((14., 18.), (18., 18.));
+            line((18., 18.), (18., 14.));
+        }
+        Icon::Blur => {
+            for (x, y) in [
+                (5., 6.),
+                (11., 4.),
+                (16., 8.),
+                (6., 14.),
+                (13., 15.),
+                (11., 10.),
+            ] {
+                circle(x, y, 1.5);
+            }
+        }
+        Icon::Info => {
+            circle(10., 10., 8.);
+            path(&[
+                (7., 7.),
+                (8., 5.),
+                (12., 5.),
+                (13., 7.),
+                (12., 9.),
+                (10., 10.),
+                (10., 12.),
+            ]);
+            circle(10., 15., 0.4);
         }
         Icon::Layers => {
             path(&[(2., 7.), (10., 3.), (18., 7.), (10., 11.), (2., 7.)]);

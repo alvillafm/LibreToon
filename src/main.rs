@@ -10,6 +10,7 @@ mod bucket;
 mod canvas;
 #[cfg(test)]
 mod compat_tests;
+mod depth;
 mod design;
 mod document;
 mod documents;
@@ -70,6 +71,7 @@ struct Editor {
     hub: documents::Hub,
     drawing: drawing::Drawing,
     feature: features::FeatureState,
+    depth: depth::DepthEditor,
     animation: animation::State,
     studio: studio::Studio,
     doc: Document,
@@ -154,6 +156,7 @@ impl Editor {
             hub,
             drawing: Default::default(),
             feature: Default::default(),
+            depth: Default::default(),
             animation: Default::default(),
             studio: studio::Studio::load(),
             doc: recovered.unwrap_or_else(fresh_document),

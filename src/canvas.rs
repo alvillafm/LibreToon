@@ -273,6 +273,7 @@ impl Canvas {
                 })
                 .unwrap_or_else(|| vertices(mark));
             for p in points {
+                let p = e.depth_point(p, l, e.layer);
                 r.extend_with(Pos2::ZERO + rotate(p.to_vec2(), -self.orientation));
             }
         }
@@ -467,7 +468,10 @@ impl Editor {
         let painter = painter.with_clip_rect(area);
         let fit = fit_scale(area, state.stage_size);
         let stage_view = state.view(area);
-        let mut view = self.camera_view(stage_view);
+        let mut view = self.camera_depth_view(self.camera_view(stage_view), self.layer);
+        if self.tool == Tool::Camera {
+            view = self.camera_view(stage_view);
+        }
         let ctx = ui.ctx().clone();
         if let Some(id) = response.dnd_release_payload::<crate::media::MediaDrag>()
             && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
@@ -488,7 +492,7 @@ impl Editor {
                 state = std::mem::take(&mut self.canvas);
             }
         }
-        let video_input = self.video_transform_input(ui, area, view);
+        let video_input = self.video_transform_input(ui, area, self.camera_view(stage_view));
         if video_input {
             state.clear_selection();
         }
@@ -524,6 +528,38 @@ impl Editor {
             )
         });
         let over = response.contains_pointer();
+        if pressed
+            && over
+            && state.drag.is_none()
+            && crate::depth::active(self)
+            && state.selected.len() <= 1
+            && matches!(
+                tool,
+                Tool::Select | Tool::Object | Tool::Transform | Tool::Node
+            )
+        {
+            if let Some(screen) = pointer {
+                let base = self.camera_view(stage_view);
+                let target = self
+                    .doc
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, l)| l.visible && !l.options.locked)
+                    .find_map(|(l, layer)| {
+                        let local = self.camera_depth_view(base, l).world(screen);
+                        crate::animation::marks(layer, self.frame)
+                            .iter()
+                            .any(|m| self.selection_hit(m, local, 4. / view.scale))
+                            .then_some(l)
+                    });
+                if let Some(l) = target {
+                    self.layer = l;
+                    view = self.camera_depth_view(base, l);
+                }
+            }
+        }
         let press_position = ctx.input(|i| {
             i.events.iter().rev().find_map(|event| match event {
                 egui::Event::PointerButton {
@@ -568,7 +604,7 @@ impl Editor {
                             .iter()
                             .enumerate()
                             .rev()
-                            .find(|(_, mark)| self.selection_hit(mark, world, 4. / view.scale))
+                            .find(|(_, mark)| self.depth_hit(l, mark, world, 4. / view.scale))
                             .map(|(m, _)| (l, m))
                     });
                 if let Some(id) = hit.filter(|id| !state.selected.contains(id)) {
@@ -618,14 +654,15 @@ impl Editor {
                     .doc
                     .layers
                     .iter()
+                    .enumerate()
                     .rev()
-                    .filter(|l| l.visible && !l.options.locked)
-                    .find_map(|layer| {
+                    .filter(|(_, l)| l.visible && !l.options.locked)
+                    .find_map(|(l, layer)| {
                         let marks = crate::animation::marks(layer, self.frame);
                         marks
                             .iter()
                             .rev()
-                            .find(|mark| self.selection_hit(mark, world, 0.))
+                            .find(|mark| self.depth_hit(l, mark, world, 0.))
                             .map(|mark| {
                                 mark.style.instance.as_ref().map(|instance| instance.symbol)
                             })
@@ -773,9 +810,9 @@ impl Editor {
                 let old = view.world(screen);
                 state.zoom =
                     (state.zoom * if self.zoom_out ^ alt { 0.8 } else { 1.25 }).clamp(0.05, 32.);
-                view = self.camera_view(state.view(area));
+                view = self.camera_depth_view(self.camera_view(state.view(area)), self.layer);
                 state.pan += screen - view.screen(old);
-                view = self.camera_view(state.view(area));
+                view = self.camera_depth_view(self.camera_view(state.view(area)), self.layer);
             } else if !self.playing
                 && tool == Tool::Text
                 && !self.doc.layers[self.layer].options.locked
@@ -953,7 +990,8 @@ impl Editor {
                         && bounds.contains(world)
                         && (tool == Tool::Transform
                             || state.selected.iter().any(|&(l, m)| {
-                                self.selection_hit(
+                                self.depth_hit(
+                                    l,
                                     &crate::animation::marks(&self.doc.layers[l], self.frame)[m],
                                     world,
                                     4. / view.scale,
@@ -978,7 +1016,7 @@ impl Editor {
                             .enumerate()
                             .rev()
                         {
-                            if !force_marquee && self.selection_hit(mark, world, 6. / view.scale) {
+                            if !force_marquee && self.depth_hit(l, mark, world, 6. / view.scale) {
                                 found = Some((l, m));
                                 break 'layers;
                             }
@@ -1211,7 +1249,7 @@ impl Editor {
                 Some(Drag::Node(d)) => {
                     let world = ctx
                         .input(|i| node_contact_position(&i.events, primary_down))
-                        .map(|p| view.world(p));
+                        .map(|p| self.depth_point(view.world(p), self.layer, d.id.0));
                     if let Some(world) = world.filter(|p| p.is_finite()) {
                         if world.distance(d.start) > 0.001 || d.changed {
                             if !d.changed {
@@ -1468,14 +1506,16 @@ impl Editor {
                                 for ((l, m), original) in &d.originals {
                                     let track =
                                         self.doc.layers[*l].frames[self.frame][*m].style.track;
+                                    let projected = self.depth_mark(original, *l, self.layer);
                                     let mut moved = transformed_in_basis(
-                                        original,
+                                        &projected,
                                         d.pivot,
                                         scale,
                                         angle,
                                         translation,
                                         d.bounds.angle,
                                     );
+                                    moved = self.depth_mark(&moved, self.layer, *l);
                                     moved.style.track = track;
                                     self.doc.layers[*l].frames[self.frame][*m] = moved;
                                 }
@@ -1566,38 +1606,64 @@ impl Editor {
                 }
             }
         }
-        let mut marks = crate::features::resolve_at(
-            &self.doc,
-            self.frame,
-            false,
-            if self.playing {
-                self.animation.clock
-            } else {
-                self.frame
-            },
-        )
+        let blur_rendered = self.camera_blur_preview(&painter, stage_view);
+        let media_painter = if blur_rendered {
+            painter.with_clip_rect(Rect::NOTHING)
+        } else {
+            painter.clone()
+        };
+        let mut marks = if blur_rendered {
+            vec![]
+        } else {
+            crate::features::resolve_at(
+                &self.doc,
+                self.frame,
+                false,
+                if self.playing {
+                    self.animation.clock
+                } else {
+                    self.frame
+                },
+            )
+        }
         .into_iter()
         .peekable();
         for l in 0..self.doc.layers.len() {
-            self.paint_media_video(&painter, view, self.frame, l);
-            self.paint_mannequin_layer(&painter, view, l);
+            self.paint_media_video(&media_painter, self.camera_view(stage_view), self.frame, l);
+            let layer_view = self.camera_depth_view(self.camera_view(stage_view), l);
+            if crate::depth::active(self)
+                && crate::depth::camera(&self.doc, self.frame).is_some_and(|c| {
+                    !crate::depth::visible(&self.doc.layers[l].options.depth, &c.optics)
+                })
+            {
+                while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
+                    marks.next();
+                }
+                continue;
+            }
+            self.paint_mannequin_layer(&painter, layer_view, l);
             while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
                 let (layer, m, mark) = marks.next().unwrap();
-                if self.paint_media_image(&painter, view, &mark) {
+                if self.paint_media_image(&painter, layer_view, &mark) {
                     continue;
                 }
                 paint_mark(
                     &painter,
                     &mark,
-                    view,
+                    layer_view,
                     false,
                     state.selected.contains(&(layer, m)),
                     Some(&mut state.cache),
                 );
             }
         }
-        self.paint_media_video(&painter, view, self.frame, self.doc.layers.len());
-        self.paint_video_selection(&painter, view);
+        self.paint_media_video(
+            &media_painter,
+            self.camera_view(stage_view),
+            self.frame,
+            self.doc.layers.len(),
+        );
+        self.paint_video_selection(&painter, self.camera_view(stage_view));
         self.paint_mannequin_gizmo(&painter, view);
         self.text_canvas_ui(ui, &painter, view);
         if tool == Tool::Text {
@@ -2297,7 +2363,7 @@ impl Editor {
                         continue;
                     }
                     let distance = view
-                        .screen(crate::vector::pos(p))
+                        .screen(self.depth_point(crate::vector::pos(p), l, self.layer))
                         .distance(view.screen(world));
                     if distance < best || (distance == best && handle == 0) {
                         best = distance;
@@ -2312,7 +2378,7 @@ impl Editor {
                 id,
                 index,
                 handle,
-                start: world,
+                start: self.depth_point(world, self.layer, id.0),
                 original: self.doc.layers[id.0].frames[self.frame][id.1].clone(),
                 changed: false,
             }));
@@ -2331,14 +2397,18 @@ impl Editor {
                 .enumerate()
                 .rev()
             {
-                if hit(mark, world, 6. / view.scale) {
+                if self.depth_hit(l, mark, world, 6. / view.scale) {
                     state.clear_selection();
                     state.selected.push((l, m));
                     self.layer = l;
                     let editable = editable_nodes(mark);
                     if let Some(index) = editable.nodes.iter().position(|node| {
-                        view.screen(crate::vector::pos(node.position))
-                            .distance(view.screen(world))
+                        view.screen(self.depth_point(
+                            crate::vector::pos(node.position),
+                            l,
+                            self.layer,
+                        ))
+                        .distance(view.screen(world))
                             < 8.
                     }) {
                         state.node_selection = Some((l, m, index));
@@ -2346,7 +2416,7 @@ impl Editor {
                             id: (l, m),
                             index,
                             handle: 0,
-                            start: world,
+                            start: self.depth_point(world, self.layer, l),
                             original: mark.clone(),
                             changed: false,
                         }));

@@ -144,6 +144,7 @@ pub struct MarkStyle {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
+    pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
     pub locked: bool,
@@ -155,6 +156,7 @@ pub struct LayerOptions {
 impl Default for LayerOptions {
     fn default() -> Self {
         Self {
+            depth: Default::default(),
             mannequin: None,
             locked: false,
             tweens: Default::default(),
@@ -208,6 +210,8 @@ pub struct Symbol {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Camera {
+    #[serde(default)]
+    pub optics: crate::depth::Optics,
     #[serde(default)]
     pub animation: crate::animation::CameraAnimation,
     pub id: u64,
@@ -552,8 +556,11 @@ fn resolve_mode(
             .iter()
             .find(|c| frame >= c.start && frame < c.start + c.duration)
         {
+            let optics = c.optics.clone();
             let c = crate::animation::camera_at(c, frame);
-            for (_, _, m) in &mut marks {
+            marks.retain(|(l, _, _)| crate::depth::visible(&doc.layers[*l].options.depth, &optics));
+            for (l, _, m) in &mut marks {
+                *m = crate::depth::project_mark(doc, &c, &optics, &doc.layers[*l].options.depth, m);
                 *m = crate::vector::transform(m, |p| {
                     Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.)
                         + crate::canvas::rotate(p - crate::vector::pos(c.center), -c.angle) * c.zoom
@@ -660,7 +667,10 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     crate::animation::validate(doc)?;
     let mut checked = std::collections::HashSet::new();
     for layer in &doc.layers {
-        if !layer.options.opacity.is_finite() || !(0. ..=1.).contains(&layer.options.opacity) {
+        if !layer.options.depth.valid()
+            || !layer.options.opacity.is_finite()
+            || !(0. ..=1.).contains(&layer.options.opacity)
+        {
             return Err("Invalid layer opacity".into());
         }
         for m in layer
@@ -683,7 +693,8 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     }
     let mut end = 0;
     for c in &doc.extras.cameras {
-        if c.start != end
+        if !c.optics.valid()
+            || c.start != end
             || c.duration == 0
             || !c.zoom.is_finite()
             || !(0.01..=100.).contains(&c.zoom)
@@ -778,6 +789,7 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
             }
             if layer.frames.is_empty()
                 || layer.frames.len() > 10000
+                || !layer.options.depth.valid()
                 || !layer.options.opacity.is_finite()
                 || !(0. ..=1.).contains(&layer.options.opacity)
                 || (!layer.options.keys.is_empty()
@@ -892,7 +904,51 @@ pub fn svg(doc: &Document, frame: usize) -> String {
         doc.width, doc.height, doc.width, doc.height, doc.width, doc.height
     );
     let mut index = 0;
-    for (_, _, original) in resolve_export(doc, frame, true) {
+    let mut group = None;
+    for (layer, _, original) in resolve_export(doc, frame, true) {
+        if group != Some(layer) {
+            if group.is_some() {
+                out += "</g>";
+            }
+            group = Some(layer);
+            if let Some(camera) = crate::depth::camera(doc, frame) {
+                let radius = camera
+                    .optics
+                    .radius(doc.layers[layer].options.depth.distance - camera.optics.position);
+                if radius > 0.1 {
+                    let pad = radius * 2. + 3.;
+                    let filter = match camera.optics.method {
+                        crate::depth::BlurMethod::Gaussian => {
+                            format!("<feGaussianBlur stdDeviation=\"{}\"/>", radius * 0.5)
+                        }
+                        crate::depth::BlurMethod::Lens => {
+                            let kernel = (-5i32..=5)
+                                .flat_map(|y| {
+                                    (-5i32..=5)
+                                        .map(move |x| if x * x + y * y <= 25 { "1" } else { "0" })
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            format!(
+                                "<feConvolveMatrix order=\"11\" kernelMatrix=\"{kernel}\" divisor=\"81\" kernelUnitLength=\"{}\" edgeMode=\"none\"/>",
+                                radius / 5.
+                            )
+                        }
+                    };
+                    out += &format!(
+                        "<defs><filter id=\"dof-{layer}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\">{filter}</filter></defs><g filter=\"url(#dof-{layer})\">",
+                        -pad,
+                        -pad,
+                        doc.width as f32 + pad * 2.,
+                        doc.height as f32 + pad * 2.
+                    );
+                } else {
+                    out += "<g>";
+                }
+            } else {
+                out += "<g>";
+            }
+        }
         for mark in crate::width::export_marks(&original) {
             let mut fill = mark
                 .fill
@@ -958,6 +1014,9 @@ pub fn svg(doc: &Document, frame: usize) -> String {
                 );
             }
         }
+    }
+    if group.is_some() {
+        out += "</g>";
     }
     out + "</svg>"
 }
