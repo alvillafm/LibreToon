@@ -28,6 +28,7 @@ mod library;
 mod loading;
 mod mannequin;
 mod media;
+mod ordering;
 mod paint;
 mod recovery;
 mod rig;
@@ -411,6 +412,8 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LibreToon",
         eframe::NativeOptions {
+            #[cfg(windows)]
+            event_loop_builder: Some(Box::new(tablet::windows_event_loop)),
             #[cfg(target_os = "linux")]
             event_loop_builder: Some(Box::new(tablet::linux_event_loop)),
             viewport: egui::ViewportBuilder::default()

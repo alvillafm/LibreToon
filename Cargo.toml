@@ -20,5 +20,5 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 arboard = "=3.7.0"
 rodio = { version = "=0.21.1", default-features = false, features = ["playback"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", windows))'.dependencies]
 winit = { version = "=0.30.13", default-features = false, features = ["x11", "wayland"] }

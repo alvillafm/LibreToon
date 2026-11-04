@@ -5,6 +5,10 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    SendBack,
+    StepBack,
+    StepFront,
+    BringFront,
     Bones,
     Puppet,
     IK,
@@ -786,6 +790,18 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             p.circle_stroke(pt(10., 10.), 2.5, s);
             if matches!(icon, Icon::EyeOff) {
                 line((3., 2.), (17., 18.));
+            }
+        }
+        Icon::SendBack | Icon::StepBack | Icon::StepFront | Icon::BringFront => {
+            let front = matches!(icon, Icon::StepFront | Icon::BringFront);
+            let y = if front { 5. } else { 15. };
+            let base = if front { 8. } else { 12. };
+            line((4., 10.), (16., 10.));
+            line((10., 10.), (10., y));
+            path(&[(7., base), (10., y), (13., base)]);
+            if matches!(icon, Icon::SendBack | Icon::BringFront) {
+                let edge = if front { 2. } else { 18. };
+                line((4., edge), (16., edge));
             }
         }
         Icon::Layers => {

@@ -246,7 +246,9 @@ pub fn draw(
             }
         }
         let feather = p.ctx().pixels_per_point().max(0.1).recip();
-        for (index, ring) in prepared.rings.iter().enumerate() {
+        // Bucket regions already stop at the inner ink boundary. An outward
+        // AA fringe here can poke through thin outlines, especially zoomed out.
+        for (index, ring) in prepared.rings.iter().enumerate().filter(|_| !mark.bucket) {
             let mut edge = boundary_fringe(
                 ring,
                 index > 0,
@@ -862,4 +864,53 @@ pub fn weight_overlay(
         }
     }
     p.add(mesh);
+}
+
+#[cfg(test)]
+mod bucket_edge_regressions {
+    use super::*;
+    #[test]
+    fn bucket_render_vertices_do_not_expand_outside_the_fill_face() {
+        let ctx = egui::Context::default();
+        let contour = Mark {
+            points: vec![[0., 0.], [200., 200.]].into(),
+            rectangle: true,
+            closed: true,
+            width: 0.5,
+            ..Default::default()
+        };
+        let mark = crate::bucket::fill(
+            &[contour],
+            Pos2::new(100., 100.),
+            crate::bucket::Gap::None,
+            [200, 20, 20, 255],
+        )
+        .unwrap()
+        .remove(0);
+        let world_bounds = vector::control_bounds(&mark).expand(0.001);
+        for scale in [0.2, 1., 8.] {
+            let view = View {
+                center: Pos2::new(100., 100.),
+                stage_center: Pos2::ZERO,
+                scale,
+                angle: 0.4,
+            };
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                assert!(draw(ui.painter(), &mark, view, false, false, None));
+            });
+            let shapes = std::mem::take(&mut output.shapes);
+            output.textures_delta.clear();
+            let primitives = ctx.tessellate(shapes, output.pixels_per_point);
+            let mut count = 0;
+            for primitive in primitives {
+                if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+                    for vertex in mesh.vertices {
+                        count += 1;
+                        assert!(world_bounds.contains(view.world(vertex.pos)));
+                    }
+                }
+            }
+            assert!(count > 0);
+        }
+    }
 }

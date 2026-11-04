@@ -59,7 +59,11 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         } else {
             0.5
         };
-        if mark.stroke && !mark.width_profile.is_empty() {
+        if mark.stroke
+            && (!mark.width_profile.is_empty()
+                || mark.style.start_cap != crate::features::Cap::Round
+                || mark.style.end_cap != crate::features::Cap::Round)
+        {
             obstacles.push(width::outline(mark));
         } else if mark.stroke || mark.fill.is_some() {
             obstacles.push(line(points.iter().copied()).buffer(thickness as f64 / 2.));

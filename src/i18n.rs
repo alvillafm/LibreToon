@@ -171,6 +171,12 @@ pub fn ensure_fonts(ctx: &eframe::egui::Context, language: Language) {
 
 pub fn english(text: &str) -> &str {
     match text {
+        "Orden en la capa" => "Order in layer",
+        "Enviar al fondo" => "Send to back",
+        "Enviar atrás" => "Send backward",
+        "Traer adelante" => "Bring forward",
+        "Traer al frente" => "Bring to front",
+        "0 = fondo · números mayores = delante" => "0 = back · higher numbers = front",
         "Archivo" => "File",
         "Edición" => "Edit",
         "Guardar" => "Save",
