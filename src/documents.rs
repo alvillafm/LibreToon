@@ -152,7 +152,7 @@ pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
         .iter()
         .find(|b| !b.is_ascii_whitespace())
         .is_some_and(|b| *b == b'{');
-    let d: Document = if bytes.starts_with(b"PK")
+    let mut d: Document = if bytes.starts_with(b"PK")
         || path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
@@ -163,6 +163,10 @@ pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?
     };
     d.validate()?;
+    d.extras.media.remove_empty_tracks();
+    for scene in &mut d.extras.scenes {
+        scene.media_tracks.retain(|track| !track.is_empty());
+    }
     Ok(d)
 }
 impl Default for Hub {

@@ -10,6 +10,7 @@ pub struct Drawing {
     pub text: crate::typography::TextEditor,
     pub pen: crate::tablet::PenInput,
     samples: Vec<(Pos2, f32)>,
+    pressure_seen: bool,
     pub reference_drag: Option<(usize, usize)>,
     pub reference_gizmo: Option<crate::mannequin::GizmoDrag>,
     pub reference_orbit: Option<(usize, Pos2, [f32; 3])>,
@@ -27,6 +28,7 @@ impl Default for Drawing {
             text: Default::default(),
             pen: Default::default(),
             samples: vec![],
+            pressure_seen: false,
             reference_drag: None,
             reference_gizmo: None,
             reference_orbit: None,
@@ -38,6 +40,7 @@ impl Default for Drawing {
 impl Drawing {
     pub fn cancel(&mut self) {
         self.samples.clear();
+        self.pressure_seen = false;
         self.reference_drag = None;
         self.reference_gizmo = None;
         self.reference_orbit = None;
@@ -49,13 +52,25 @@ impl Drawing {
     }
     pub fn start(&mut self, p: Pos2) {
         self.samples.clear();
+        self.pressure_seen = false;
         self.sample(p);
     }
     pub fn sample(&mut self, p: Pos2) {
-        let force = if self.pressure {
-            self.pen.force().clamp(0.02, 1.)
-        } else {
+        let force = if !self.pressure {
             1.
+        } else if let Some(sample) = self.pen.force() {
+            let force = sample.clamp(0.02, 1.);
+            if !self.pressure_seen {
+                // A driver can report pen contact before its first pressure packet.
+                for (_, pending) in &mut self.samples {
+                    *pending = force;
+                }
+                self.pressure_seen = true;
+            }
+            force
+        } else {
+            // Missing packets during a pen stroke must not jump to mouse width.
+            self.samples.last().map_or(1., |(_, previous)| *previous)
         };
         // Keep a bounded representation even for very long gestures.
         if self.samples.len() >= 2048 {
@@ -292,5 +307,31 @@ impl Editor {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pressure_gap_tests {
+    use super::*;
+
+    #[test]
+    fn late_pressure_and_missing_release_packet_do_not_make_full_width_dots() {
+        let mut drawing = Drawing::default();
+        drawing.start(Pos2::ZERO);
+        drawing.sample(Pos2::new(1., 0.));
+        drawing.pen.test_pressure(Some(0.2));
+        drawing.sample(Pos2::new(2., 0.));
+        drawing.pen.test_pressure(None);
+        drawing.sample(Pos2::new(3., 0.));
+        let profile = drawing.profile(&[]);
+        assert!(!profile.is_empty());
+        assert!(
+            profile
+                .iter()
+                .all(|sample| (sample.width - 0.2).abs() < 0.001)
+        );
+        drawing.start(Pos2::ZERO);
+        drawing.sample(Pos2::new(1., 0.));
+        assert!(drawing.profile(&[]).is_empty());
     }
 }

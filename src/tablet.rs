@@ -29,10 +29,7 @@ impl PenInput {
                     }
                 }
             }
-            let contact = i.focused
-                && (i.pointer.primary_down()
-                    || i.pointer.primary_pressed()
-                    || i.pointer.primary_released());
+            let contact = i.focused && (i.pointer.primary_down() || i.pointer.primary_pressed());
             if !contact || i.time > self.touch_until {
                 self.pressure = touch_sample.filter(|_| contact);
             }
@@ -58,8 +55,8 @@ impl PenInput {
             }
         }
     }
-    pub fn force(&self) -> f32 {
-        self.pressure.unwrap_or(1.)
+    pub fn force(&self) -> Option<f32> {
+        self.pressure
     }
     pub fn detected(&self) -> bool {
         self.pressure.is_some()

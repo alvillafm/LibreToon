@@ -1639,7 +1639,6 @@ impl Editor {
                 }
             }
         }
-        self.stage_mask(&painter, area, stage_view);
         self.advanced_overlays(&painter, area, view);
         self.visual_canvas_overlays(&painter, view, &state.selected);
         self.rig_overlays(&painter, view);
@@ -1812,6 +1811,7 @@ impl Editor {
                 painter.circle_stroke(pointer, radius, Stroke::new(1., Color32::WHITE));
             }
         }
+        self.stage_mask(&painter, area, stage_view);
         self.paint_rulers(&ruler_painter, ruler_area, view);
         self.sync_selected_style(&state.selected);
         self.canvas = state;

@@ -358,14 +358,20 @@ impl eframe::App for Editor {
         }
         if self.media_audio_ready(&ctx) {
             let elapsed = self.tick.elapsed().as_secs_f64();
-            let steps = (elapsed * self.doc.fps as f64).floor() as usize;
+            let steps = self
+                .media_audio_steps()
+                .unwrap_or_else(|| (elapsed * self.doc.fps as f64).floor() as usize);
             if steps > 0 {
                 let before = crate::animation::movie_offset(&self.doc, self.frame);
                 self.advance_animation(steps);
                 if crate::animation::movie_offset(&self.doc, self.frame) < before {
                     self.restart_media_audio();
                 }
-                self.tick += Duration::from_secs_f64(steps as f64 / self.doc.fps as f64);
+                if self.media_audio_steps().is_some() {
+                    self.tick = Instant::now();
+                } else {
+                    self.tick += Duration::from_secs_f64(steps as f64 / self.doc.fps as f64);
+                }
             }
             let period = Duration::from_secs_f64(1. / self.doc.fps as f64);
             ctx.request_repaint_after(period.saturating_sub(self.tick.elapsed()));

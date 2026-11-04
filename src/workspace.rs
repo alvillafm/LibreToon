@@ -389,6 +389,7 @@ impl Editor {
                         .clicked()
                         {
                             self.studio.stage_only = !self.studio.stage_only;
+                            ui.ctx().request_repaint();
                         }
                         if button(
                             ui,

@@ -45,7 +45,7 @@ def check_system_imports(binary):
         if "not found" in text:
             raise RuntimeError(text)
         imports=re.findall(r"^\s*(\S+)\s+=>",text,re.M)
-        if any(not re.fullmatch(r"(libc|libm|libdl|libpthread|librt|libgcc_s)\.so[.0-9]*",p) for p in imports):
+        if any(not re.fullmatch(r"(libc|libm|libdl|libpthread|librt|libgcc_s|libasound)\.so[.0-9]*",p) for p in imports):
             raise RuntimeError("Unpackaged non-system library: "+repr(imports))
 
 
@@ -197,7 +197,7 @@ def linux(dest):
     (control / "control").write_text(
         "Package: libretoon\nVersion: " + VERSION + "\nSection: graphics\nPriority: optional\n"
         "Architecture: amd64\nMaintainer: LibreToon project <noreply@github.com>\n"
-        "Depends: curl, coreutils, libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0\n"
+        "Depends: curl, coreutils, libasound2 | libasound2t64, libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0\n"
         "Recommends: xdg-desktop-portal, xdg-desktop-portal-gtk\n"
         "Description: LibreToon native 2D animation editor\n Includes application resources; FFmpeg is downloaded separately on request.\n")
     bindir = deb / "usr/bin"

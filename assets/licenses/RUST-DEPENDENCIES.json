@@ -258,6 +258,35 @@
     "archiveUrl": "https://static.crates.io/crates/allocator-api2/allocator-api2-0.2.21.crate"
   },
   {
+    "name": "alsa",
+    "version": "0.9.1",
+    "checksum": "ed7572b7ba83a31e20d1b48970ee402d2e3e0537dcfe0a3ff4d6eb7508617d43",
+    "license": "Apache-2.0/MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/diwic/alsa-rs",
+    "noticeFiles": [
+      "audio/alsa-0.9.1/LICENSE-APACHE",
+      "audio/alsa-0.9.1/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/alsa/alsa-0.9.1.crate"
+  },
+  {
+    "name": "alsa-sys",
+    "version": "0.3.1",
+    "checksum": "db8fee663d06c4e303404ef5f40488a53e062f89ba8bfed81f42325aafad1527",
+    "license": "MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/diwic/alsa-sys",
+    "noticeFiles": [
+      "audio/alsa-sys-0.3.1/LICENSE"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/alsa-sys/alsa-sys-0.3.1.crate"
+  },
+  {
     "name": "android-activity",
     "version": "0.6.1",
     "checksum": "0f2a1bb052857d5dd49572219344a7332b31b76405648eabac5bc68978251bcd",
@@ -889,6 +918,20 @@
     "archiveUrl": "https://static.crates.io/crates/cc/cc-1.10.0.crate"
   },
   {
+    "name": "cesu8",
+    "version": "1.1.0",
+    "checksum": "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c",
+    "license": "Apache-2.0/MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/emk/cesu8-rs",
+    "noticeFiles": [
+      "audio/cesu8-1.1.0/COPYRIGHT-RUST.txt"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/cesu8/cesu8-1.1.0.crate"
+  },
+  {
     "name": "cfg-if",
     "version": "1.0.5",
     "checksum": "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600",
@@ -1072,6 +1115,35 @@
     "archiveUrl": "https://static.crates.io/crates/core-graphics-types/core-graphics-types-0.1.3.crate"
   },
   {
+    "name": "coreaudio-rs",
+    "version": "0.13.0",
+    "checksum": "1aae284fbaf7d27aa0e292f7677dfbe26503b0d555026f702940805a630eac17",
+    "license": "MIT/Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/RustAudio/coreaudio-rs.git",
+    "noticeFiles": [
+      "audio/coreaudio-rs-0.13.0/LICENSE-APACHE",
+      "audio/coreaudio-rs-0.13.0/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/coreaudio-rs/coreaudio-rs-0.13.0.crate"
+  },
+  {
+    "name": "cpal",
+    "version": "0.16.0",
+    "checksum": "cbd307f43cc2a697e2d1f8bc7a1d824b5269e052209e28883e5bc04d095aaa3f",
+    "license": "Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rustaudio/cpal",
+    "noticeFiles": [
+      "audio/cpal-0.16.0/LICENSE"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/cpal/cpal-0.16.0.crate"
+  },
+  {
     "name": "crc32fast",
     "version": "1.5.3",
     "checksum": "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055",
@@ -1130,6 +1202,35 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/cursor-icon/cursor-icon-1.2.0.crate"
+  },
+  {
+    "name": "dasp_sample",
+    "version": "0.11.0",
+    "checksum": "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rustaudio/sample.git",
+    "noticeFiles": [
+      "audio/dasp_sample-0.11.0/LICENSE-MIT",
+      "audio/dasp_sample-0.11.0/LICENSE-APACHE",
+      "audio/dasp_sample-0.11.0/Cargo.toml.orig"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [
+      {
+        "url": "https://raw.githubusercontent.com/RustAudio/dasp/97c3bb9b2363c0b46ac1633858bf1054fd02a980/LICENSE-MIT",
+        "sha256": "b1d6df41ed3aa96806e74c729444d7c121d90e6660a6aed01d298e03fde475a0",
+        "revision": "97c3bb9b2363c0b46ac1633858bf1054fd02a980",
+        "evidence": "crate src/ files compared byte-for-byte with matching revision"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/RustAudio/dasp/97c3bb9b2363c0b46ac1633858bf1054fd02a980/LICENSE-APACHE",
+        "sha256": "756c8d2ab2dc24f256e1455b5f03937f4933d83d7bc9f2d55009fc962377d512",
+        "revision": "97c3bb9b2363c0b46ac1633858bf1054fd02a980",
+        "evidence": "crate src/ files compared byte-for-byte with matching revision"
+      }
+    ],
+    "archiveUrl": "https://static.crates.io/crates/dasp_sample/dasp_sample-0.11.0.crate"
   },
   {
     "name": "dispatch",
@@ -2633,6 +2734,21 @@
   },
   {
     "name": "jni",
+    "version": "0.21.1",
+    "checksum": "1a87aa2bb7d2af34197c04845522473242e1aa17c12f4935d5856491a7fb8c97",
+    "license": "MIT/Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/jni-rs/jni-rs",
+    "noticeFiles": [
+      "audio/jni-0.21.1/LICENSE-APACHE",
+      "audio/jni-0.21.1/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/jni/jni-0.21.1.crate"
+  },
+  {
+    "name": "jni",
     "version": "0.22.4",
     "checksum": "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498",
     "license": "MIT OR Apache-2.0",
@@ -2882,23 +2998,6 @@
   },
   {
     "name": "linux-raw-sys",
-    "version": "0.4.15",
-    "checksum": "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab",
-    "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
-    "licenseFile": null,
-    "repository": "https://github.com/sunfishcode/linux-raw-sys",
-    "noticeFiles": [
-      "linux-raw-sys-0.4.15/COPYRIGHT",
-      "linux-raw-sys-0.4.15/LICENSE-APACHE",
-      "linux-raw-sys-0.4.15/LICENSE-Apache-2.0_WITH_LLVM-exception",
-      "linux-raw-sys-0.4.15/LICENSE-MIT"
-    ],
-    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
-    "upstreamNotices": [],
-    "archiveUrl": "https://static.crates.io/crates/linux-raw-sys/linux-raw-sys-0.4.15.crate"
-  },
-  {
-    "name": "linux-raw-sys",
     "version": "0.12.1",
     "checksum": "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53",
     "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -2913,6 +3012,23 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/linux-raw-sys/linux-raw-sys-0.12.1.crate"
+  },
+  {
+    "name": "linux-raw-sys",
+    "version": "0.4.15",
+    "checksum": "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab",
+    "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/sunfishcode/linux-raw-sys",
+    "noticeFiles": [
+      "linux-raw-sys-0.4.15/COPYRIGHT",
+      "linux-raw-sys-0.4.15/LICENSE-APACHE",
+      "linux-raw-sys-0.4.15/LICENSE-Apache-2.0_WITH_LLVM-exception",
+      "linux-raw-sys-0.4.15/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/linux-raw-sys/linux-raw-sys-0.4.15.crate"
   },
   {
     "name": "litemap",
@@ -3041,6 +3157,22 @@
       }
     ],
     "archiveUrl": "https://static.crates.io/crates/lyon_tessellation/lyon_tessellation-1.0.22.crate"
+  },
+  {
+    "name": "mach2",
+    "version": "0.4.3",
+    "checksum": "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44",
+    "license": "BSD-2-Clause OR MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/JohnTitor/mach2",
+    "noticeFiles": [
+      "audio/mach2-0.4.3/LICENSE-APACHE",
+      "audio/mach2-0.4.3/LICENSE-BSD",
+      "audio/mach2-0.4.3/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/mach2/mach2-0.4.3.crate"
   },
   {
     "name": "memchr",
@@ -3264,6 +3396,66 @@
     "archiveUrl": "https://static.crates.io/crates/nom/nom-8.0.0.crate"
   },
   {
+    "name": "num-bigint",
+    "version": "0.4.8",
+    "checksum": "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rust-num/num-bigint",
+    "noticeFiles": [
+      "audio/num-bigint-0.4.8/LICENSE-APACHE",
+      "audio/num-bigint-0.4.8/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/num-bigint/num-bigint-0.4.8.crate"
+  },
+  {
+    "name": "num-derive",
+    "version": "0.4.2",
+    "checksum": "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rust-num/num-derive",
+    "noticeFiles": [
+      "audio/num-derive-0.4.2/LICENSE-APACHE",
+      "audio/num-derive-0.4.2/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/num-derive/num-derive-0.4.2.crate"
+  },
+  {
+    "name": "num-integer",
+    "version": "0.1.47",
+    "checksum": "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rust-num/num-integer",
+    "noticeFiles": [
+      "audio/num-integer-0.1.47/LICENSE-APACHE",
+      "audio/num-integer-0.1.47/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/num-integer/num-integer-0.1.47.crate"
+  },
+  {
+    "name": "num-rational",
+    "version": "0.4.2",
+    "checksum": "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/rust-num/num-rational",
+    "noticeFiles": [
+      "audio/num-rational-0.4.2/LICENSE-APACHE",
+      "audio/num-rational-0.4.2/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/num-rational/num-rational-0.4.2.crate"
+  },
+  {
     "name": "num-traits",
     "version": "0.2.19",
     "checksum": "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841",
@@ -3401,6 +3593,28 @@
     "archiveUrl": "https://static.crates.io/crates/objc2-app-kit/objc2-app-kit-0.3.2.crate"
   },
   {
+    "name": "objc2-audio-toolbox",
+    "version": "0.3.2",
+    "checksum": "6948501a91121d6399b79abaa33a8aa4ea7857fe019f341b8c23ad6e81b79b08",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/madsmtm/objc2",
+    "noticeFiles": [
+      "audio/objc2-audio-toolbox-0.3.2/LICENSE.md",
+      "audio/objc2-audio-toolbox-0.3.2/Cargo.toml.orig"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [
+      {
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+        "evidence": "upstream revision recorded in crate .cargo_vcs_info.json; generated framework sources are not present in that git archive"
+      }
+    ],
+    "archiveUrl": "https://static.crates.io/crates/objc2-audio-toolbox/objc2-audio-toolbox-0.3.2.crate"
+  },
+  {
     "name": "objc2-cloud-kit",
     "version": "0.2.2",
     "checksum": "74dd3b56391c7a0596a295029734d3c1c5e7e510a4cb30245f8221ccea96b009",
@@ -3435,6 +3649,50 @@
       }
     ],
     "archiveUrl": "https://static.crates.io/crates/objc2-contacts/objc2-contacts-0.2.2.crate"
+  },
+  {
+    "name": "objc2-core-audio",
+    "version": "0.3.2",
+    "checksum": "e1eebcea8b0dbff5f7c8504f3107c68fc061a3eb44932051c8cf8a68d969c3b2",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/madsmtm/objc2",
+    "noticeFiles": [
+      "audio/objc2-core-audio-0.3.2/LICENSE.md",
+      "audio/objc2-core-audio-0.3.2/Cargo.toml.orig"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [
+      {
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+        "evidence": "upstream revision recorded in crate .cargo_vcs_info.json; generated framework sources are not present in that git archive"
+      }
+    ],
+    "archiveUrl": "https://static.crates.io/crates/objc2-core-audio/objc2-core-audio-0.3.2.crate"
+  },
+  {
+    "name": "objc2-core-audio-types",
+    "version": "0.3.2",
+    "checksum": "5a89f2ec274a0cf4a32642b2991e8b351a404d290da87bb6a9a9d8632490bd1c",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/madsmtm/objc2",
+    "noticeFiles": [
+      "audio/objc2-core-audio-types-0.3.2/LICENSE.md",
+      "audio/objc2-core-audio-types-0.3.2/Cargo.toml.orig"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [
+      {
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+        "evidence": "upstream revision recorded in crate .cargo_vcs_info.json; generated framework sources are not present in that git archive"
+      }
+    ],
+    "archiveUrl": "https://static.crates.io/crates/objc2-core-audio-types/objc2-core-audio-types-0.3.2.crate"
   },
   {
     "name": "objc2-core-data",
@@ -4613,6 +4871,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/robust/robust-1.2.0.crate"
+  },
+  {
+    "name": "rodio",
+    "version": "0.21.1",
+    "checksum": "e40ecf59e742e03336be6a3d53755e789fd05a059fa22dfa0ed624722319e183",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/RustAudio/rodio",
+    "noticeFiles": [
+      "audio/rodio-0.21.1/LICENSE-APACHE",
+      "audio/rodio-0.21.1/LICENSE-MIT"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/rodio/rodio-0.21.1.crate"
   },
   {
     "name": "roxmltree",
@@ -6231,6 +6504,21 @@
   },
   {
     "name": "windows",
+    "version": "0.54.0",
+    "checksum": "9252e5725dbed82865af151df558e754e4a3c2c30818359eb17465f1346a1b49",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows-0.54.0/license-apache-2.0",
+      "audio/windows-0.54.0/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows/windows-0.54.0.crate"
+  },
+  {
+    "name": "windows",
     "version": "0.62.2",
     "checksum": "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580",
     "license": "MIT OR Apache-2.0",
@@ -6258,6 +6546,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/windows-collections/windows-collections-0.3.2.crate"
+  },
+  {
+    "name": "windows-core",
+    "version": "0.54.0",
+    "checksum": "12661b9c89351d684a50a8a643ce5f608e20243b9fb84687800163429f161d65",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows-core-0.54.0/license-apache-2.0",
+      "audio/windows-core-0.54.0/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows-core/windows-core-0.54.0.crate"
   },
   {
     "name": "windows-core",
@@ -6351,6 +6654,21 @@
   },
   {
     "name": "windows-result",
+    "version": "0.1.2",
+    "checksum": "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows-result-0.1.2/license-apache-2.0",
+      "audio/windows-result-0.1.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows-result/windows-result-0.1.2.crate"
+  },
+  {
+    "name": "windows-result",
     "version": "0.4.1",
     "checksum": "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5",
     "license": "MIT OR Apache-2.0",
@@ -6378,6 +6696,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/windows-strings/windows-strings-0.5.1.crate"
+  },
+  {
+    "name": "windows-sys",
+    "version": "0.45.0",
+    "checksum": "75283be5efb2831d37ea142365f009c02ec203cd29a3ebecbc093d52315b66d0",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows-sys-0.45.0/license-apache-2.0",
+      "audio/windows-sys-0.45.0/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows-sys/windows-sys-0.45.0.crate"
   },
   {
     "name": "windows-sys",
@@ -6411,6 +6744,21 @@
   },
   {
     "name": "windows-targets",
+    "version": "0.42.2",
+    "checksum": "8e5180c00cd44c9b1c88adb3693291f1cd93605ded80c250a75d472756b4d071",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows-targets-0.42.2/license-apache-2.0",
+      "audio/windows-targets-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows-targets/windows-targets-0.42.2.crate"
+  },
+  {
+    "name": "windows-targets",
     "version": "0.52.6",
     "checksum": "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973",
     "license": "MIT OR Apache-2.0",
@@ -6441,6 +6789,21 @@
   },
   {
     "name": "windows_aarch64_gnullvm",
+    "version": "0.42.2",
+    "checksum": "597a5118570b68bc08d8d59125332c54f1ba9d9adeedeef5b99b02ba2b0698f8",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_aarch64_gnullvm-0.42.2/license-apache-2.0",
+      "audio/windows_aarch64_gnullvm-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_aarch64_gnullvm/windows_aarch64_gnullvm-0.42.2.crate"
+  },
+  {
+    "name": "windows_aarch64_gnullvm",
     "version": "0.52.6",
     "checksum": "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3",
     "license": "MIT OR Apache-2.0",
@@ -6456,6 +6819,21 @@
   },
   {
     "name": "windows_aarch64_msvc",
+    "version": "0.42.2",
+    "checksum": "e08e8864a60f06ef0d0ff4ba04124db8b0fb3be5776a5cd47641e942e58c4d43",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_aarch64_msvc-0.42.2/license-apache-2.0",
+      "audio/windows_aarch64_msvc-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_aarch64_msvc/windows_aarch64_msvc-0.42.2.crate"
+  },
+  {
+    "name": "windows_aarch64_msvc",
     "version": "0.52.6",
     "checksum": "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469",
     "license": "MIT OR Apache-2.0",
@@ -6468,6 +6846,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/windows_aarch64_msvc/windows_aarch64_msvc-0.52.6.crate"
+  },
+  {
+    "name": "windows_i686_gnu",
+    "version": "0.42.2",
+    "checksum": "c61d927d8da41da96a81f029489353e68739737d3beca43145c8afec9a31a84f",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_i686_gnu-0.42.2/license-apache-2.0",
+      "audio/windows_i686_gnu-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_i686_gnu/windows_i686_gnu-0.42.2.crate"
   },
   {
     "name": "windows_i686_gnu",
@@ -6501,6 +6894,21 @@
   },
   {
     "name": "windows_i686_msvc",
+    "version": "0.42.2",
+    "checksum": "44d840b6ec649f480a41c8d80f9c65108b92d89345dd94027bfe06ac444d1060",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_i686_msvc-0.42.2/license-apache-2.0",
+      "audio/windows_i686_msvc-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_i686_msvc/windows_i686_msvc-0.42.2.crate"
+  },
+  {
+    "name": "windows_i686_msvc",
     "version": "0.52.6",
     "checksum": "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66",
     "license": "MIT OR Apache-2.0",
@@ -6513,6 +6921,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/windows_i686_msvc/windows_i686_msvc-0.52.6.crate"
+  },
+  {
+    "name": "windows_x86_64_gnu",
+    "version": "0.42.2",
+    "checksum": "8de912b8b8feb55c064867cf047dda097f92d51efad5b491dfb98f6bbb70cb36",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_x86_64_gnu-0.42.2/license-apache-2.0",
+      "audio/windows_x86_64_gnu-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_x86_64_gnu/windows_x86_64_gnu-0.42.2.crate"
   },
   {
     "name": "windows_x86_64_gnu",
@@ -6531,6 +6954,21 @@
   },
   {
     "name": "windows_x86_64_gnullvm",
+    "version": "0.42.2",
+    "checksum": "26d41b46a36d453748aedef1486d5c7a85db22e56aff34643984ea85514e94a3",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_x86_64_gnullvm-0.42.2/license-apache-2.0",
+      "audio/windows_x86_64_gnullvm-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_x86_64_gnullvm/windows_x86_64_gnullvm-0.42.2.crate"
+  },
+  {
+    "name": "windows_x86_64_gnullvm",
     "version": "0.52.6",
     "checksum": "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d",
     "license": "MIT OR Apache-2.0",
@@ -6543,6 +6981,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/windows_x86_64_gnullvm/windows_x86_64_gnullvm-0.52.6.crate"
+  },
+  {
+    "name": "windows_x86_64_msvc",
+    "version": "0.42.2",
+    "checksum": "9aec5da331524158c6d1a4ac0ab1541149c0b9505fde06423b02f5ef0106b9f0",
+    "license": "MIT OR Apache-2.0",
+    "licenseFile": null,
+    "repository": "https://github.com/microsoft/windows-rs",
+    "noticeFiles": [
+      "audio/windows_x86_64_msvc-0.42.2/license-apache-2.0",
+      "audio/windows_x86_64_msvc-0.42.2/license-mit"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest and available original declarations inspected",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/windows_x86_64_msvc/windows_x86_64_msvc-0.42.2.crate"
   },
   {
     "name": "windows_x86_64_msvc",

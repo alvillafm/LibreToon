@@ -996,20 +996,34 @@ impl Editor {
         let Some(track) = tracks.get(t) else {
             return;
         };
+        let original_clip = ui.clip_rect();
+        let label = Rect::from_min_size(
+            Pos2::new(original_clip.left(), row.top()),
+            Vec2::new(width, row.height()),
+        );
+        let grid_clip = Rect::from_min_max(
+            Pos2::new(
+                label.right().min(original_clip.right()),
+                original_clip.top(),
+            ),
+            original_clip.max,
+        );
+        ui.set_clip_rect(Rect::from_min_max(
+            original_clip.min,
+            Pos2::new(
+                label.right().min(original_clip.right()),
+                original_clip.bottom(),
+            ),
+        ));
         let frame_at = |pos: Pos2| ((pos.x - row.left() - width) / cell).floor().max(0.) as usize;
         let title = ui.interact(
-            Rect::from_min_size(row.min, Vec2::new(width - 55., row.height())),
+            Rect::from_min_size(label.min, Vec2::new(width - 55., row.height())),
             ui.scope_id().with(("media-row-title", track.id)),
-            Sense::drag(),
+            Sense::click_and_drag(),
         );
         if !track.locked && title.drag_started_by(egui::PointerButton::Primary) {
             title.dnd_set_drag_payload(MediaTrackDrag(t));
         }
-        let row_response = ui.interact(
-            Rect::from_min_max(row.min + Vec2::new(width, 0.), row.max),
-            ui.scope_id().with(("media-row-drop", track.id)),
-            Sense::hover(),
-        );
         let mut delete_track = false;
         title.context_menu(|ui| {
             let key = title.id.with("track-name");
@@ -1062,7 +1076,7 @@ impl Editor {
         ui.painter()
             .rect_filled(row, 3., color.gamma_multiply(0.45));
         ui.painter().text(
-            row.left_center() + Vec2::new(28., 0.),
+            label.left_center() + Vec2::new(28., 0.),
             egui::Align2::LEFT_CENTER,
             &track.name,
             egui::FontId::proportional(12.),
@@ -1074,7 +1088,7 @@ impl Editor {
             "♪"
         };
         ui.painter().text(
-            row.left_center() + Vec2::new(8., 0.),
+            label.left_center() + Vec2::new(8., 0.),
             egui::Align2::LEFT_CENTER,
             icon,
             egui::FontId::proportional(13.),
@@ -1093,7 +1107,7 @@ impl Editor {
             (1, crate::design::Icon::Lock, track.locked),
         ] {
             let rect = Rect::from_center_size(
-                row.left_center() + Vec2::new(width - 42. + column as f32 * 23., 0.),
+                label.left_center() + Vec2::new(width - 42. + column as f32 * 23., 0.),
                 Vec2::splat(20.),
             );
             let response = ui.interact(
@@ -1129,6 +1143,14 @@ impl Editor {
                 self.recover();
             }
         }
+        ui.set_clip_rect(grid_clip);
+        ui.painter()
+            .rect_filled(row, 3., color.gamma_multiply(0.45));
+        let row_response = ui.interact(
+            Rect::from_min_max(row.min + Vec2::new(width, 0.), row.max),
+            ui.scope_id().with(("media-row-drop", track.id)),
+            Sense::hover(),
+        );
         if row_response.container_contains_pointer()
             && let Some(payload) = egui::DragAndDrop::payload::<MediaDrag>(ui.ctx())
             && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
@@ -1291,6 +1313,11 @@ impl Editor {
                             self.doc.extras.media.tracks[destination]
                                 .clips
                                 .push(preview.clone());
+                            self.doc
+                                .extras
+                                .media
+                                .tracks
+                                .retain(|track| !track.clips.is_empty());
                         }
                         self.recover();
                     } else {
@@ -1379,13 +1406,37 @@ impl Editor {
                     .add_enabled(!track.locked, egui::Button::new(tr("Borrar clip")))
                     .clicked()
                 {
-                    self.checkpoint();
-                    self.doc.extras.media.tracks[t].clips.remove(c);
-                    self.recover();
+                    self.delete_media_clip(track.id, c);
                     ui.close();
                 }
             });
         }
+    }
+
+    fn delete_media_clip(&mut self, track_id: u64, clip: usize) {
+        let Some(index) = self
+            .doc
+            .extras
+            .media
+            .tracks
+            .iter()
+            .position(|track| track.id == track_id)
+        else {
+            return;
+        };
+        let track = &self.doc.extras.media.tracks[index];
+        if track.locked || clip >= track.clips.len() {
+            return;
+        }
+        self.checkpoint();
+        self.doc.extras.media.tracks[index].clips.remove(clip);
+        self.doc
+            .extras
+            .media
+            .tracks
+            .retain(|track| !track.clips.is_empty());
+        self.restart_media_audio();
+        self.recover();
     }
 
     fn media_waveform(&mut self, ctx: &egui::Context, asset: Asset) -> SharedVec<u8> {
@@ -1460,6 +1511,9 @@ impl Editor {
 }
 
 impl MediaLibrary {
+    pub(crate) fn remove_empty_tracks(&mut self) {
+        self.tracks.retain(|track| !track.clips.is_empty());
+    }
     fn can_add(&self, asset: &Asset) -> bool {
         asset.data.len() <= ASSET_LIMIT
             && self
@@ -1834,25 +1888,104 @@ impl VideoExport {
     }
 }
 
+const AUDIO_RATE: u32 = 48000;
+const AUDIO_CHANNELS: u16 = 2;
+
 #[derive(Default)]
-enum AudioPreview {
-    #[default]
-    Idle,
-    Preparing(std::sync::mpsc::Receiver<Result<Option<MediaFile>, String>>),
-    Playing {
-        child: std::process::Child,
-        _file: MediaFile,
-    },
-    Silent,
+struct AudioPreview {
+    stream: Option<rodio::OutputStream>,
+    sink: Option<rodio::Sink>,
+    plan: Vec<u64>,
+    plan_revision: Option<(usize, usize, usize, u32, usize, bool, usize)>,
+    plan_snapshot: Option<crate::Document>,
+    samples: Option<std::sync::Arc<[f32]>>,
+    preparing: Option<std::sync::mpsc::Receiver<Result<Option<std::sync::Arc<[f32]>>, String>>>,
+    failed: bool,
+    continuous: bool,
+    origin: usize,
+    scrub: Option<(usize, std::time::Instant)>,
 }
 
 impl AudioPreview {
     fn stop(&mut self) {
-        if let Self::Playing { child, .. } = self {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
         }
-        *self = Self::Idle;
+        self.continuous = false;
+    }
+
+    fn play(&mut self, frame: usize, fps: u32, scrub: bool) -> Result<(), String> {
+        use rodio::Source;
+        self.stop();
+        let Some(samples) = self.samples.clone() else {
+            return Ok(());
+        };
+        let start = audio_sample_offset(frame, fps).min(samples.len());
+        let end = if scrub {
+            (start + AUDIO_RATE as usize * AUDIO_CHANNELS as usize * 70 / 1000).min(samples.len())
+        } else {
+            samples.len()
+        };
+        if start >= end {
+            return Ok(());
+        }
+        if self.stream.is_none() {
+            let mut stream = rodio::OutputStreamBuilder::open_default_stream()
+                .map_err(|e| format!("Audio device: {e}"))?;
+            stream.log_on_drop(false);
+            self.stream = Some(stream);
+        }
+        let sink = rodio::Sink::connect_new(self.stream.as_ref().unwrap().mixer());
+        let source = AudioSlice {
+            samples,
+            at: start,
+            end,
+            duration: std::time::Duration::from_secs_f64(
+                (end - start) as f64 / (AUDIO_RATE as f64 * AUDIO_CHANNELS as f64),
+            ),
+        };
+        sink.append(source.amplify(1.));
+        self.origin = frame;
+        self.continuous = !scrub;
+        self.sink = Some(sink);
+        Ok(())
+    }
+}
+
+fn audio_sample_offset(frame: usize, fps: u32) -> usize {
+    ((frame as u64 * AUDIO_RATE as u64 / fps.max(1) as u64) * AUDIO_CHANNELS as u64) as usize
+}
+
+struct AudioSlice {
+    samples: std::sync::Arc<[f32]>,
+    at: usize,
+    end: usize,
+    duration: std::time::Duration,
+}
+
+impl Iterator for AudioSlice {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        if self.at >= self.end {
+            return None;
+        }
+        let sample = self.samples[self.at];
+        self.at += 1;
+        Some(sample)
+    }
+}
+impl rodio::Source for AudioSlice {
+    fn current_span_len(&self) -> Option<usize> {
+        Some(self.end - self.at)
+    }
+    fn channels(&self) -> u16 {
+        AUDIO_CHANNELS
+    }
+    fn sample_rate(&self) -> u32 {
+        AUDIO_RATE
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        Some(self.duration)
     }
 }
 
@@ -1863,71 +1996,234 @@ impl Drop for MediaEditor {
 }
 
 impl Editor {
-    pub(crate) fn media_audio_ready(&mut self, ctx: &egui::Context) -> bool {
-        if !self.playing || self.hub.home {
-            self.media.audio.stop();
-            return false;
+    fn audio_document(&self) -> crate::Document {
+        if self.animation.play_all {
+            self.doc.clone()
+        } else {
+            crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene)
         }
-        if matches!(self.media.audio, AudioPreview::Idle) {
-            let has_audio = |tracks: &[Track]| {
-                tracks
-                    .iter()
-                    .any(|t| t.kind == Kind::Audio && !t.clips.is_empty())
-            };
-            let all = self.animation.play_all;
-            if !has_audio(&self.doc.extras.media.tracks)
-                && !(all
-                    && self
-                        .doc
-                        .extras
-                        .scenes
-                        .iter()
-                        .any(|scene| has_audio(&scene.media_tracks)))
+    }
+
+    fn audio_plan(&self, doc: &crate::Document) -> Vec<u64> {
+        let mut plan = vec![
+            doc.fps as u64,
+            if self.animation.play_all {
+                0
+            } else {
+                doc.extras.active_scene as u64
+            },
+            self.animation.play_all as u64,
+        ];
+        for asset in &doc.extras.media.assets {
+            if asset.kind == Kind::Audio {
+                plan.extend([asset.id, asset.data.identity() as u64]);
+            }
+        }
+        for index in 0..doc.extras.scenes.len().max(1) {
+            let scene = crate::animation::scene_doc(doc, index);
+            plan.push(scene.layers[0].frames.len() as u64);
+            for track in scene
+                .extras
+                .media
+                .tracks
+                .iter()
+                .filter(|track| track.kind == Kind::Audio && !track.hidden)
             {
-                self.media.audio = AudioPreview::Silent;
+                plan.extend([track.id, track.clips.len() as u64]);
+                for clip in &track.clips {
+                    plan.extend([
+                        clip.asset,
+                        clip.start as u64,
+                        clip.offset as u64,
+                        clip.length as u64,
+                    ]);
+                }
+            }
+            plan.push(u64::MAX);
+        }
+        plan
+    }
+
+    fn ensure_audio(&mut self, ctx: &egui::Context) -> bool {
+        let doc = self.audio_document();
+        let revision = (
+            doc.extras.media.assets.identity(),
+            doc.extras.media.tracks.identity(),
+            if doc.extras.scenes.is_empty() {
+                0
+            } else {
+                doc.extras.scenes.identity()
+            },
+            doc.fps,
+            doc.layers[0].frames.len(),
+            self.animation.play_all,
+            doc.extras.active_scene,
+        );
+        if self.media.audio.plan_revision != Some(revision) {
+            let plan = self.audio_plan(&doc);
+            if self.media.audio.plan != plan {
+                self.media.audio.stop();
+                self.media.audio.plan = plan;
+                self.media.audio.samples = None;
+                self.media.audio.preparing = None;
+                self.media.audio.failed = false;
+            }
+            self.media.audio.plan_revision = Some(revision);
+            // Keep shared containers alive so subsequent edits change identity.
+            self.media.audio.plan_snapshot = Some(doc.clone());
+        }
+        if let Some(job) = &self.media.audio.preparing {
+            let result = match job.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Audio preparation stopped".into()))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                self.media.audio.preparing = None;
+                match result {
+                    Ok(samples) => self.media.audio.samples = samples,
+                    Err(error) => {
+                        self.media.audio.failed = true;
+                        self.status = error;
+                    }
+                }
+                // A scene with no audible clips uses the animation clock.
+                if self.media.audio.samples.is_none() {
+                    self.media.audio.failed = true;
+                }
+            }
+        }
+        if self.media.audio.failed || self.media.audio.samples.is_some() {
+            return true;
+        }
+        if self.media.audio.preparing.is_none() {
+            let last = crate::animation::movie_count(&doc);
+            let has_audio = (0..doc.extras.scenes.len().max(1)).any(|index| {
+                crate::animation::scene_doc(&doc, index)
+                    .extras
+                    .media
+                    .tracks
+                    .iter()
+                    .any(|track| {
+                        track.kind == Kind::Audio && !track.hidden && !track.clips.is_empty()
+                    })
+            });
+            if !has_audio {
+                self.media.audio.failed = true;
                 return true;
             }
-            let doc = if all {
-                self.doc.clone()
-            } else {
-                crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene)
-            };
-            let first = if all {
-                crate::animation::movie_offset(&doc, self.frame)
+            let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+            let (send, receive) = std::sync::mpsc::channel();
+            self.media.audio.preparing = Some(receive);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let Some(file) = prepare_audio(&doc, 0, last, &ffmpeg)? else {
+                        return Ok(None);
+                    };
+                    let bytes = std::fs::read(&file.0).map_err(|e| e.to_string())?;
+                    if bytes.len() % 4 != 0 || bytes.len() > 256 * 1024 * 1024 {
+                        return Err("Audio preview exceeds the supported decoded size".into());
+                    }
+                    let samples: Vec<f32> = bytes
+                        .chunks_exact(4)
+                        .map(|sample| {
+                            let value = f32::from_le_bytes(sample.try_into().unwrap());
+                            if value.is_finite() {
+                                value.clamp(-1., 1.)
+                            } else {
+                                0.
+                            }
+                        })
+                        .collect();
+                    Ok(Some(std::sync::Arc::from(samples)))
+                })();
+                let _ = send.send(result);
+                ctx.request_repaint();
+            });
+        }
+        false
+    }
+
+    pub(crate) fn media_audio_ready(&mut self, ctx: &egui::Context) -> bool {
+        if !self.playing || self.hub.home {
+            if self.media.audio.continuous {
+                self.media.audio.stop();
+            }
+            if !self.hub.home {
+                let ready = self.ensure_audio(ctx);
+                if ready
+                    && let Some((frame, requested)) = self.media.audio.scrub.take()
+                    && requested.elapsed() < std::time::Duration::from_millis(250)
+                    && let Err(error) = self.media.audio.play(frame, self.doc.fps, true)
+                {
+                    self.status = error;
+                }
+            }
+            return false;
+        }
+        self.media.audio.scrub = None;
+        if !self.ensure_audio(ctx) {
+            return false;
+        }
+        if self.media.audio.samples.is_some() && !self.media.audio.continuous {
+            let frame = if self.animation.play_all {
+                crate::animation::movie_offset(&self.doc, self.frame)
             } else {
                 self.frame
             };
-            let last = crate::animation::movie_count(&doc);
-            let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
-            let (send, receive) = std::sync::mpsc::channel();
-            let ctx = ctx.clone();
-            self.media.audio = AudioPreview::Preparing(receive);
-            std::thread::spawn(move || {
-                let _ = send.send(prepare_audio(&doc, first, last, &ffmpeg));
-                ctx.request_repaint();
-            });
-            return false;
-        }
-        if let AudioPreview::Preparing(job) = &self.media.audio {
-            let result = match job.try_recv() {
-                Ok(result) => result,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Err("Audio preview stopped".into())
-                }
-            };
-            self.media.audio = AudioPreview::Silent;
-            match result {
-                Ok(Some(file)) => match play_audio(&file.0) {
-                    Ok(child) => self.media.audio = AudioPreview::Playing { child, _file: file },
-                    Err(error) => self.status = error,
-                },
-                Ok(None) => {}
-                Err(error) => self.status = error,
+            if let Err(error) = self.media.audio.play(frame, self.doc.fps, false) {
+                self.status = error;
+                self.media.audio.samples = None;
+                self.media.audio.failed = true;
             }
             self.tick = std::time::Instant::now();
         }
         true
+    }
+
+    pub(crate) fn media_audio_steps(&self) -> Option<usize> {
+        if !self.media.audio.continuous {
+            return None;
+        }
+        let sink = self.media.audio.sink.as_ref()?;
+        let current = if self.animation.play_all {
+            crate::animation::movie_offset(&self.doc, self.frame)
+        } else {
+            self.frame
+        };
+        if sink.empty() {
+            let frames = self.media.audio.samples.as_ref().map_or(0, |samples| {
+                (samples.len() as u64 * self.doc.fps as u64)
+                    .div_ceil(AUDIO_RATE as u64 * AUDIO_CHANNELS as u64) as usize
+            });
+            return Some(frames.saturating_sub(current));
+        }
+        let target =
+            self.media.audio.origin.saturating_add(
+                (sink.get_pos().as_secs_f64() * self.doc.fps as f64).floor() as usize,
+            );
+        Some(target.saturating_sub(current))
+    }
+
+    pub(crate) fn scrub_media_audio(&mut self, ctx: &egui::Context) {
+        if self.playing {
+            return;
+        }
+        let frame = if self.animation.play_all {
+            crate::animation::movie_offset(&self.doc, self.frame)
+        } else {
+            self.frame
+        };
+        self.media.audio.scrub = Some((frame, std::time::Instant::now()));
+        if self.ensure_audio(ctx) {
+            self.media.audio.scrub = None;
+            if let Err(error) = self.media.audio.play(frame, self.doc.fps, true) {
+                self.status = error;
+            }
+        }
     }
 
     pub(crate) fn restart_media_audio(&mut self) {
@@ -1941,6 +2237,9 @@ fn prepare_audio(
     last: usize,
     ffmpeg: &Path,
 ) -> Result<Option<MediaFile>, String> {
+    if audio_sample_offset(last.saturating_sub(first), doc.fps) > 256 * 1024 * 1024 / 4 {
+        return Err("Audio preview exceeds the supported decoded size".into());
+    }
     let mut command = Command::new(ffmpeg);
     crate::exporter::hidden(&mut command);
     command.args([
@@ -1960,7 +2259,16 @@ fn prepare_audio(
     }
     let output = MediaFile::new(&[])?;
     let result = command
-        .args(["-ar", "48000", "-ac", "2", "-f", "wav"])
+        .args([
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "f32le",
+        ])
         .arg(&output.0)
         .output()
         .map_err(|e| e.to_string())?;
@@ -1973,47 +2281,141 @@ fn prepare_audio(
     Ok(Some(output))
 }
 
-fn play_audio(path: &Path) -> Result<std::process::Child, String> {
-    use std::process::Stdio;
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object System.Media.SoundPlayer -ArgumentList $env:LIBRETOON_PREVIEW_WAV).PlaySync()"])
-            .env("LIBRETOON_PREVIEW_WAV", path);
-        command
-    } else {
-        let mut command = Command::new(if cfg!(target_os = "macos") {
-            "/usr/bin/afplay"
-        } else {
-            "paplay"
-        });
-        command.arg(path);
-        command
-    };
-    crate::exporter::hidden(&mut command);
-    let result = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if cfg!(target_os = "linux")
-        && result
-            .as_ref()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
-        return Command::new("aplay")
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Audio preview needs paplay or aplay: {e}"));
-    }
-    result.map_err(|e| format!("Could not play audio preview: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_header_opens_delete_action_with_right_click() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        editor.doc.extras.media.tracks.push(Track {
+            id: 7,
+            slot: 0,
+            name: "Test audio".into(),
+            kind: Kind::Audio,
+            hidden: false,
+            locked: false,
+            clips: vec![Clip {
+                asset: 9,
+                start: 0,
+                offset: 0,
+                length: 3,
+                transform: Default::default(),
+            }]
+            .into(),
+        });
+        let render = |editor: &mut Editor, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 500.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    editor.media_track_ui(
+                        ui,
+                        0,
+                        Rect::from_min_size(Pos2::new(10., 10.), Vec2::new(700., 28.)),
+                        300.,
+                        22.,
+                        24,
+                        |_| Some((0, 10.)),
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == tr("Borrar pista"))
+            })
+        };
+        render(&mut editor, vec![]);
+        let point = Pos2::new(80., 20.);
+        let event = |pressed| egui::Event::PointerButton {
+            pos: point,
+            pressed,
+            button: egui::PointerButton::Secondary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(
+            &mut editor,
+            vec![egui::Event::PointerMoved(point), event(true)],
+        );
+        let opened = render(&mut editor, vec![event(false)]);
+        assert!(
+            opened || render(&mut editor, vec![]),
+            "right-click must expose track deletion"
+        );
+    }
+
+    #[test]
+    fn deleting_last_clip_removes_its_track_and_undo_restores_it() {
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        editor.recovery =
+            std::env::temp_dir().join(format!("delete-media-track-{}.json", std::process::id()));
+        for kind in [Kind::Audio, Kind::Video] {
+            let track_id = id();
+            editor.doc.extras.media.tracks.push(Track {
+                id: track_id,
+                slot: 0,
+                name: "fixture".into(),
+                kind,
+                hidden: false,
+                locked: false,
+                clips: vec![
+                    Clip {
+                        asset: 9,
+                        start: 0,
+                        offset: 0,
+                        length: 3,
+                        transform: Default::default(),
+                    },
+                    Clip {
+                        asset: 9,
+                        start: 3,
+                        offset: 0,
+                        length: 3,
+                        transform: Default::default(),
+                    },
+                ]
+                .into(),
+            });
+            editor.delete_media_clip(track_id, 0);
+            assert_eq!(
+                editor.doc.extras.media.tracks.last().unwrap().clips.len(),
+                1
+            );
+            editor.delete_media_clip(track_id, 0);
+            assert!(
+                editor
+                    .doc
+                    .extras
+                    .media
+                    .tracks
+                    .iter()
+                    .all(|track| track.id != track_id)
+            );
+            editor.history(false);
+            assert_eq!(editor.doc.extras.media.tracks.last().unwrap().id, track_id);
+        }
+    }
+
+    #[test]
+    fn native_audio_slice_starts_at_the_requested_frame_without_copying_the_mix() {
+        let samples: std::sync::Arc<[f32]> = (0..9600).map(|i| i as f32).collect::<Vec<_>>().into();
+        let start = audio_sample_offset(1, 24);
+        assert_eq!(start, 4000);
+        let slice = AudioSlice {
+            samples: samples.clone(),
+            at: start,
+            end: start + 8,
+            duration: std::time::Duration::from_millis(1),
+        };
+        assert_eq!(slice.collect::<Vec<_>>(), samples[start..start + 8]);
+        assert_eq!(audio_sample_offset(0, 24), 0);
+    }
 
     #[test]
     fn imported_bitmap_survives_native_serialization_and_renders_in_export() {
@@ -2156,6 +2558,12 @@ fn draw_waveform(ui: &egui::Ui, rect: Rect, peaks: &[u8], clip: &Clip, fps: u32)
             [Pos2::new(x, center - height), Pos2::new(x, center + height)],
             egui::Stroke::new(1., Color32::from_white_alpha(100)),
         );
+    }
+}
+
+impl Track {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.clips.is_empty()
     }
 }
 

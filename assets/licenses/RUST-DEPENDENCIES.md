@@ -476,3 +476,36 @@ The eleventh entry, dispatch 0.2.0, is now documented with its original Cargo.to
 | zvariant | 5.15.1 | MIT | 1 packaged; 0 pinned upstream |
 | zvariant_derive | 5.15.1 | MIT | 1 packaged; 0 pinned upstream |
 | zvariant_utils | 4.2.0 | MIT | 1 packaged; 0 pinned upstream |
+
+## Native audio playback additions
+
+Original available declarations are included in RUST-NOTICES.txt and audio/. Each new crate archive SHA-256 was checked against Cargo.lock. The dasp_sample source files were compared byte-for-byte against its recorded upstream revision. The objc2 notices were recovered from the revision declared by each wrapper in .cargo_vcs_info.json; generated framework sources are not present in that upstream git archive and were not compared. The objc2 upstream LICENSE.md describes its Apple SDK derivation limitation and does not include a standalone license grant text. That limitation is retained in the included original declaration. Existing verification limits elsewhere in this inventory remain applicable.
+
+- alsa 0.9.1 — Apache-2.0/MIT
+- alsa-sys 0.3.1 — MIT
+- cesu8 1.1.0 — Apache-2.0/MIT
+- coreaudio-rs 0.13.0 — MIT/Apache-2.0
+- cpal 0.16.0 — Apache-2.0
+- dasp_sample 0.11.0 — MIT OR Apache-2.0
+- jni 0.21.1 — MIT/Apache-2.0
+- mach2 0.4.3 — BSD-2-Clause OR MIT OR Apache-2.0
+- num-bigint 0.4.8 — MIT OR Apache-2.0
+- num-derive 0.4.2 — MIT OR Apache-2.0
+- num-integer 0.1.47 — MIT OR Apache-2.0
+- num-rational 0.4.2 — MIT OR Apache-2.0
+- objc2-audio-toolbox 0.3.2 — Zlib OR Apache-2.0 OR MIT
+- objc2-core-audio 0.3.2 — Zlib OR Apache-2.0 OR MIT
+- objc2-core-audio-types 0.3.2 — Zlib OR Apache-2.0 OR MIT
+- rodio 0.21.1 — MIT OR Apache-2.0
+- windows 0.54.0 — MIT OR Apache-2.0
+- windows-core 0.54.0 — MIT OR Apache-2.0
+- windows-result 0.1.2 — MIT OR Apache-2.0
+- windows-sys 0.45.0 — MIT OR Apache-2.0
+- windows-targets 0.42.2 — MIT OR Apache-2.0
+- windows_aarch64_gnullvm 0.42.2 — MIT OR Apache-2.0
+- windows_aarch64_msvc 0.42.2 — MIT OR Apache-2.0
+- windows_i686_gnu 0.42.2 — MIT OR Apache-2.0
+- windows_i686_msvc 0.42.2 — MIT OR Apache-2.0
+- windows_x86_64_gnu 0.42.2 — MIT OR Apache-2.0
+- windows_x86_64_gnullvm 0.42.2 — MIT OR Apache-2.0
+- windows_x86_64_msvc 0.42.2 — MIT OR Apache-2.0

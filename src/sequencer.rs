@@ -387,6 +387,7 @@ impl Editor {
         }
     }
     pub fn sequencer(&mut self, ui: &mut egui::Ui) {
+        let previous_frame = self.frame;
         egui::Panel::bottom("timeline")
             .default_size(245.)
             .min_size(150.)
@@ -746,12 +747,15 @@ impl Editor {
                         );
                         let painter = ui.painter().clone();
                         let clip = ui.clip_rect();
+                        let label_left = clip.left();
+                        let labels_clip = Rect::from_min_max(clip.min, Pos2::new((label_left + label_w).min(clip.right()), clip.bottom()));
+                        let grid_clip = Rect::from_min_max(Pos2::new((label_left + label_w).min(clip.right()), clip.top()), clip.max);
                         let frames = crate::workspace::visible_range(
                             r.left() + label_w,
                             cell,
                             count,
-                            clip.left(),
-                            clip.right(),
+                            grid_clip.left(),
+                            grid_clip.right(),
                         );
                         let visible = crate::workspace::visible_range(
                             r.top() + 24.,
@@ -767,19 +771,20 @@ impl Editor {
                             crate::themes::color(Color32::from_gray(31)),
                         );
                         painter.text(
-                            r.min + Vec2::new(60., 12.),
+                            Pos2::new(label_left + 60., r.top() + 12.),
                             egui::Align2::LEFT_CENTER,
                             tr("Nombre de capa"),
                             egui::FontId::proportional(10.),
                             crate::themes::muted(),
                         );
-                        if Rect::from_min_size(r.min, Vec2::new(label_w, 24.))
+                        if Rect::from_min_size(Pos2::new(label_left, r.top()), Vec2::new(label_w, 24.))
                             .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
                         {
                             target = Some((false, usize::MAX));
                         }
+                        ui.set_clip_rect(grid_clip);
                         let scrub = ui.interact(
-                            Rect::from_min_max(Pos2::new(r.left() + label_w, r.top()), header.max),
+                            Rect::from_min_max(Pos2::new(grid_clip.left(), r.top()), header.max),
                             ui.scope_id().with("scrub"),
                             Sense::click_and_drag(),
                         );
@@ -793,7 +798,7 @@ impl Editor {
                         }
                         for f in frames.clone() {
                             if f == 0 || (f + 1) % 5 == 0 {
-                                painter.text(
+                                painter.with_clip_rect(grid_clip).text(
                                     Pos2::new(
                                         r.left() + label_w + (f as f32 + 0.5) * cell,
                                         r.top() + 12.,
@@ -806,9 +811,11 @@ impl Editor {
                             }
                         }
                         for row in visible {
+                            ui.set_clip_rect(labels_clip);
+                            let painter = ui.painter().with_clip_rect(labels_clip);
                             let y = r.top() + 24. + row as f32 * row_h;
                             let label = Rect::from_min_size(
-                                Pos2::new(r.left(), y),
+                                Pos2::new(label_left, y),
                                 Vec2::new(label_w, row_h),
                             );
                             match all[row] {
@@ -872,7 +879,7 @@ impl Editor {
                                 }
                                 Row::Media(index) => {
                                     let track_at = |pos: Pos2| {
-                                        if pos.x < r.left() + label_w || !clip.contains(pos) { return None; }
+                                        if pos.x < grid_clip.left() || !clip.contains(pos) { return None; }
                                         let index = ((pos.y - r.top() - 24.) / row_h).floor();
                                         if index < 0. { return None; }
                                         match all.get(index as usize) {
@@ -880,7 +887,8 @@ impl Editor {
                                             _ => None,
                                         }
                                     };
-                                    self.media_track_ui(ui, index, Rect::from_min_size(label.min, Vec2::new(r.width(), row_h)), label_w, cell, count, track_at);
+                                    ui.set_clip_rect(clip);
+                                    self.media_track_ui(ui, index, Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), row_h)), label_w, cell, count, track_at);
                                 }
                                 Row::Layer(l, depth) => {
                                     let drop = ui.interact(label, ui.scope_id().with(("media-layer-drop", l)), Sense::hover());
@@ -1050,6 +1058,8 @@ impl Editor {
                                     ) {
                                         target = Some((false, l));
                                     }
+                                    ui.set_clip_rect(grid_clip);
+                                    let painter = ui.painter().with_clip_rect(grid_clip);
                                     for f in frames.clone() {
                                         let rect = Rect::from_min_size(
                                             Pos2::new(r.left() + label_w + f as f32 * cell, y),
@@ -1287,6 +1297,8 @@ impl Editor {
                                         egui::FontId::proportional(11.),
                                         color,
                                     );
+                                    ui.set_clip_rect(grid_clip);
+                                    let painter = ui.painter().with_clip_rect(grid_clip);
                                     for f in frames.clone() {
                                         let x = r.left() + label_w + (f as f32 + 0.5) * cell;
                                         let q = Pos2::new(x, y + row_h / 2.);
@@ -1392,6 +1404,8 @@ impl Editor {
                                         egui::FontId::proportional(11.),
                                         orange,
                                     );
+                                    ui.set_clip_rect(grid_clip);
+                                    let painter = ui.painter().with_clip_rect(grid_clip);
                                     for (index, c) in
                                         self.doc.extras.cameras.clone().iter().enumerate()
                                     {
@@ -1596,20 +1610,21 @@ impl Editor {
                                 }
                             }
                         }
+                        ui.set_clip_rect(clip);
                         if let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                             && clip.contains(pos) && r.contains(pos)
                         {
                             let local_row = ((pos.y - r.top() - 24.) / row_h).floor();
                             let row = (local_row >= 0.).then(|| all.get(local_row as usize)).flatten();
                             let top = r.top() + 24. + local_row * row_h;
-                            let x = r.left() + label_w;
+                            let x = grid_clip.left();
                             if let Some(Row::Layer(layer, _)) = row
                                 && pos.x >= x
                                 && egui::DragAndDrop::has_payload_of_type::<crate::media::MediaDrag>(ui.ctx())
                             {
-                                let frame = ((pos.x - x) / cell).floor() as usize;
+                                let frame = ((pos.x - r.left() - label_w) / cell).floor() as usize;
                                 if frame < count {
-                                    let dest = Rect::from_min_size(Pos2::new(x + frame as f32 * cell, top), Vec2::new(cell, row_h));
+                                    let dest = Rect::from_min_size(Pos2::new(r.left() + label_w + frame as f32 * cell, top), Vec2::new(cell, row_h));
                                     let options = &self.doc.layers[*layer].options;
                                     timeline_drop_marker(&painter, dest, !options.locked && options.mannequin.is_none());
                                 }
@@ -1619,11 +1634,11 @@ impl Editor {
                                     && egui::DragAndDrop::has_payload_of_type::<crate::media::MediaTrackDrag>(ui.ctx())
                                 {
                                     let y = if pos.y < top + row_h / 2. || matches!(row, Row::Media(..)) { top } else { top + row_h };
-                                    painter.line_segment([Pos2::new(r.left(), y), Pos2::new(r.right(), y)], Stroke::new(3., crate::themes::accent()));
+                                    painter.line_segment([Pos2::new(label_left, y), Pos2::new(r.right(), y)], Stroke::new(3., crate::themes::accent()));
                                 } else if self.feature.row_drag.is_some() && target.is_some()
                                     && matches!(row, Row::Layer(..) | Row::Folder(..))
                                 {
-                                    let dest = Rect::from_min_size(Pos2::new(r.left(), top), Vec2::new(label_w, row_h));
+                                    let dest = Rect::from_min_size(Pos2::new(label_left, top), Vec2::new(label_w, row_h));
                                     timeline_drop_marker(&painter, dest, true);
                                 }
                             }
@@ -1642,7 +1657,7 @@ impl Editor {
                             }
                         }
                         let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell;
-                        painter.line_segment(
+                        painter.with_clip_rect(grid_clip).line_segment(
                             [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
                             Stroke::new(1., crate::themes::accent()),
                         );
@@ -1672,6 +1687,12 @@ impl Editor {
                     }
                 }
             });
+        if self.frame != previous_frame
+            && !self.playing
+            && ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())
+        {
+            self.scrub_media_audio(ui.ctx());
+        }
     }
     pub fn move_camera(&mut self, source: usize, target: usize) {
         if source == target
@@ -2108,7 +2129,7 @@ mod viewport_input_tests {
                     })
                     .unwrap_or_else(|| panic!("timeline ruler label {number} missing"))
             };
-            [label("5"), label("10")]
+            [label("5"), label("10"), label("Layer 1")]
         };
         render(&mut editor, vec![]);
         let before = render(&mut editor, vec![]);
@@ -2139,6 +2160,10 @@ mod viewport_input_tests {
             vec![egui::Event::PointerMoved(pointer - Vec2::new(40., 0.))],
         );
         assert!(panned[1].x < before_pan[1].x - 20.);
+        assert!(
+            (panned[2].x - before_pan[2].x).abs() < 1.,
+            "layer labels must stay pinned while frames move"
+        );
         assert_eq!(editor.frame, 0);
     }
 }
