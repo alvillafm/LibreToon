@@ -530,10 +530,9 @@ impl Editor {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_width(112.);
+                        ui.set_width(160.);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
-                            if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
                         });
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -581,6 +580,7 @@ impl Editor {
                                     !self.doc.layers[self.layer].options.clip;
                                 self.recover();
                             }
+                            if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
                         });
                     });
                     let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 58.), Sense::hover());
@@ -1774,6 +1774,7 @@ impl Editor {
         r.center = pose.center;
         r.zoom = pose.zoom;
         r.angle = pose.angle;
+        r.optics = pose.optics(&right);
         let mut keys = vec![];
         for key in &right.animation.keys {
             let at = key.frame as isize - shift;
@@ -1953,6 +1954,7 @@ impl Editor {
                 right.center = pose.center;
                 right.zoom = pose.zoom;
                 right.angle = pose.angle;
+                right.optics = pose.optics(&camera);
                 right.animation.keys.retain(|k| k.frame >= local);
                 for k in &mut right.animation.keys {
                     k.frame -= local;
@@ -2044,12 +2046,14 @@ mod special_track_tests {
             animation: CameraAnimation {
                 keys: vec![
                     CameraKey {
+                        optics: None,
                         frame: 0,
                         center: [10., 20.],
                         zoom: 1.,
                         angle: 0.,
                     },
                     CameraKey {
+                        optics: None,
                         frame: 3,
                         center: [20., 40.],
                         zoom: 2.,

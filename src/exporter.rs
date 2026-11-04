@@ -754,15 +754,15 @@ fn raster_composited(
 ) -> Vec<u8> {
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
-    if let Some(camera) = crate::depth::camera(&scene, local).filter(|c| c.optics.strength > 0.) {
+    if let Some(optics) = crate::depth::camera(&scene, local)
+        .map(|c| crate::animation::camera_optics(c, local))
+        .filter(|o| o.strength > 0.)
+    {
         let mut result = vec![255u8; (w * h * 3) as usize];
         let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
         let mut clips = video.iter().enumerate().peekable();
         let mut render = |subset, plane: &crate::depth::LayerDepth| {
-            let radius = camera
-                .optics
-                .radius(plane.distance - camera.optics.position)
-                * scale;
+            let radius = optics.radius(plane.distance - optics.position) * scale;
             let pad = if radius >= 0.1 {
                 (radius * 2. + 3.).ceil() as u32
             } else {
@@ -770,7 +770,7 @@ fn raster_composited(
             };
             let (pw, ph) = (w + pad * 2, h + pad * 2);
             let raw = raster_flat(doc, w, h, ctx, cache, video, Some(subset), &resolved, pad);
-            let blurred = crate::depth::blur(raw, pw, ph, radius, &camera.optics);
+            let blurred = crate::depth::blur(raw, pw, ph, radius, &optics);
             if pad == 0 {
                 composite(&mut result, &blurred);
             } else {
@@ -1092,6 +1092,7 @@ mod tests {
         crate::animation::camera_record(
             &mut d.extras.cameras[0],
             crate::animation::CameraKey {
+                optics: None,
                 frame: 10,
                 center: [52., 32.],
                 zoom: 1.,

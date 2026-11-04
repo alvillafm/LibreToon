@@ -627,11 +627,13 @@ impl Editor {
             .and_then(|id| self.doc.extras.cameras.iter().position(|c| c.id == id))
         {
             let mut c = self.doc.extras.cameras[index].clone();
-            let base = (c.center, c.zoom, c.angle);
+            let base = (c.center, c.zoom, c.angle, c.optics.clone());
             let pose = crate::animation::camera_at(&c, self.frame);
             c.center = pose.center;
             c.zoom = pose.zoom;
             c.angle = pose.angle;
+            c.optics = pose.optics(&c);
+            let evaluated_optics = c.optics.clone();
             ui.horizontal(|ui| {
                 for (mode, icon, label) in [
                     (0, Icon::Pan, "Pan camera"),
@@ -698,9 +700,12 @@ impl Editor {
                 }
                 self.animation.timing_transaction =
                     timing_changed && self.animation.ease_handle.is_some();
-                let pose_changed =
-                    c.center != pose.center || c.zoom != pose.zoom || c.angle != pose.angle;
+                let pose_changed = c.center != pose.center
+                    || c.zoom != pose.zoom
+                    || c.angle != pose.angle
+                    || c.optics != evaluated_optics;
                 let key = crate::animation::CameraKey {
+                    optics: Some(c.optics.clone()),
                     frame: self.frame.saturating_sub(c.start).min(c.duration - 1),
                     center: c.center,
                     zoom: c.zoom,
@@ -709,6 +714,7 @@ impl Editor {
                 c.center = base.0;
                 c.zoom = base.1;
                 c.angle = base.2;
+                c.optics = base.3;
                 if pose_changed {
                     crate::animation::camera_record(&mut c, key);
                 }

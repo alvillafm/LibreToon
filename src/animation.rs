@@ -197,10 +197,20 @@ pub struct Tween {
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraKey {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optics: Option<crate::depth::Optics>,
     pub frame: usize,
     pub center: [f32; 2],
     pub zoom: f32,
     pub angle: f32,
+}
+impl CameraKey {
+    pub fn optics(&self, camera: &Camera) -> crate::depth::Optics {
+        self.optics.clone().unwrap_or_else(|| camera.optics.clone())
+    }
+}
+pub fn camera_optics(camera: &Camera, frame: usize) -> crate::depth::Optics {
+    camera_at(camera, frame).optics(camera)
 }
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -473,6 +483,7 @@ pub fn marks(layer: &Layer, frame: usize) -> SharedVec<Mark> {
 pub fn camera_at(camera: &Camera, frame: usize) -> CameraKey {
     let local = frame.saturating_sub(camera.start).min(camera.duration - 1);
     let base = CameraKey {
+        optics: Some(camera.optics.clone()),
         frame: 0,
         center: camera.center,
         zoom: camera.zoom,
@@ -486,13 +497,16 @@ pub fn camera_at(camera: &Camera, frame: usize) -> CameraKey {
         .find(|k| k.frame <= local)
         .unwrap_or(&base);
     let Some(b) = camera.animation.keys.iter().find(|k| k.frame > local) else {
-        return a.clone();
+        let mut key = a.clone();
+        key.optics = Some(a.optics(camera));
+        return key;
     };
     let t = camera
         .animation
         .curve
         .time((local - a.frame) as f32 / (b.frame - a.frame) as f32);
     CameraKey {
+        optics: Some(a.optics(camera).interpolate(&b.optics(camera), t)),
         frame: local,
         center: crate::vector::xy(camera.animation.curve.point(
             crate::vector::pos(a.center),
@@ -508,6 +522,9 @@ pub fn camera_record(camera: &mut Camera, key: CameraKey) {
         camera.center = key.center;
         camera.zoom = key.zoom;
         camera.angle = key.angle;
+        if let Some(optics) = &key.optics {
+            camera.optics = optics.clone();
+        }
     }
     if let Some(k) = camera
         .animation
@@ -541,6 +558,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
                 .any(|k| k[0].frame >= k[1].frame)
             || c.animation.keys.iter().any(|k| {
                 k.frame >= c.duration
+                    || k.optics.as_ref().is_some_and(|o| !o.valid())
                     || !k.zoom.is_finite()
                     || !(0.01..=100.).contains(&k.zoom)
                     || !k.angle.is_finite()

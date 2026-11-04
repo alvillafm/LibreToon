@@ -391,13 +391,13 @@ impl Editor {
                             self.studio.stage_only = !self.studio.stage_only;
                             ui.ctx().request_repaint();
                         }
-                        if crate::depth::camera(&self.doc, self.frame)
-                            .is_some_and(|c| c.optics.strength > 0.)
-                        {
+                        if crate::depth::camera(&self.doc, self.frame).is_some_and(|c| {
+                            crate::animation::camera_optics(c, self.frame).strength > 0.
+                        }) {
                             if button(
                                 ui,
                                 Icon::Blur,
-                                "Show / Hide Camera Blur",
+                                "",
                                 "Show / Hide Camera Blur",
                                 !self.depth.hide_blur,
                                 true,

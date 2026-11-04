@@ -1633,7 +1633,10 @@ impl Editor {
             let layer_view = self.camera_depth_view(self.camera_view(stage_view), l);
             if crate::depth::active(self)
                 && crate::depth::camera(&self.doc, self.frame).is_some_and(|c| {
-                    !crate::depth::visible(&self.doc.layers[l].options.depth, &c.optics)
+                    !crate::depth::visible(
+                        &self.doc.layers[l].options.depth,
+                        &crate::animation::camera_optics(c, self.frame),
+                    )
                 })
             {
                 while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {

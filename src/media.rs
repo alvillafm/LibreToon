@@ -450,8 +450,9 @@ impl Editor {
                 continue;
             };
             if depth_active
-                && crate::depth::camera(&self.doc, frame)
-                    .is_some_and(|c| !crate::depth::visible(&track.depth, &c.optics))
+                && crate::depth::camera(&self.doc, frame).is_some_and(|c| {
+                    !crate::depth::visible(&track.depth, &crate::animation::camera_optics(c, frame))
+                })
             {
                 continue;
             }
@@ -1926,12 +1927,12 @@ impl VideoExport {
                 .iter()
                 .find(|camera| local >= camera.start && local - camera.start < camera.duration)
             {
-                if !crate::depth::visible(&track.depth, &camera.optics) {
+                let optics = crate::animation::camera_optics(camera, local);
+                if !crate::depth::visible(&track.depth, &optics) {
                     continue;
                 }
                 let pose = crate::animation::camera_at(camera, local);
-                mark =
-                    crate::depth::project_mark(&scene, &pose, &camera.optics, &track.depth, &mark);
+                mark = crate::depth::project_mark(&scene, &pose, &optics, &track.depth, &mark);
                 let camera = pose;
                 mark = crate::vector::transform(&mark, |p| {
                     Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.)
@@ -2675,7 +2676,7 @@ impl Editor {
                     mark = crate::depth::project_mark(
                         &self.doc,
                         &pose,
-                        &camera.optics,
+                        &pose.optics(camera),
                         &track.depth,
                         &mark,
                     );

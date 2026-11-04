@@ -158,6 +158,7 @@ fn camera_keys_interpolate_and_editor_frame_stays_fixed() {
     camera_record(
         c,
         CameraKey {
+            optics: None,
             frame: 10,
             center: [base[0] + 100., base[1] + 50.],
             zoom: 2.,

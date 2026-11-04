@@ -63,6 +63,20 @@ impl Default for Optics {
     }
 }
 impl Optics {
+    pub fn interpolate(&self, to: &Self, t: f32) -> Self {
+        let t = t.clamp(0., 1.);
+        let lerp = |a: f32, b: f32| a + (b - a) * t;
+        // Discrete settings belong to the preceding key, even if easing reaches 1 early.
+        let discrete = self;
+        Self {
+            position: lerp(self.position, to.position),
+            focus: lerp(self.focus, to.focus),
+            range: lerp(self.range, to.range),
+            strength: lerp(self.strength, to.strength),
+            method: discrete.method,
+            quality: discrete.quality,
+        }
+    }
     pub fn valid(&self) -> bool {
         self.position.is_finite()
             && self.position.abs() <= 1e6
@@ -124,7 +138,7 @@ pub fn view_for_plane(doc: &Document, frame: usize, plane: &LayerDepth, base: Vi
         return base;
     };
     let pose = crate::animation::camera_at(c, frame);
-    let (size, motion) = factors(plane, &c.optics);
+    let (size, motion) = factors(plane, &pose.optics(c));
     let center = Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.);
     View {
         scale: base.scale * size,
@@ -293,7 +307,10 @@ impl Editor {
                             self.frame >= c.start && self.frame < c.start + c.duration
                         })
                     });
-                let mut position = index.map_or(0., |i| self.doc.extras.cameras[i].optics.position);
+                let mut position = index.map_or(0., |i| {
+                    crate::animation::camera_optics(&self.doc.extras.cameras[i], self.frame)
+                        .position
+                });
                 ui.horizontal(|ui| {
                     label(ui, Icon::Depth, "Posición de cámara");
                     if ui
@@ -304,7 +321,16 @@ impl Editor {
                         .changed()
                     {
                         self.checkpoint();
-                        self.doc.extras.cameras[index.unwrap()].optics.position = position;
+                        let camera = &mut self.doc.extras.cameras[index.unwrap()];
+                        let mut key = crate::animation::camera_at(camera, self.frame);
+                        let mut optics = key.optics(camera);
+                        optics.position = position;
+                        key.optics = Some(optics);
+                        key.frame = self
+                            .frame
+                            .saturating_sub(camera.start)
+                            .min(camera.duration - 1);
+                        crate::animation::camera_record(camera, key);
                         self.recover();
                     }
                 });
@@ -500,7 +526,8 @@ impl Editor {
     }
     pub fn camera_blur_preview(&mut self, painter: &egui::Painter, stage: View) -> bool {
         let enabled = self.depth.open || active(self);
-        let optics = camera(&self.doc, self.frame).map(|c| c.optics.clone());
+        let optics =
+            camera(&self.doc, self.frame).map(|c| crate::animation::camera_optics(c, self.frame));
         if optics.is_none() {
             self.depth.preview = None;
             self.depth.job = None;
@@ -996,5 +1023,117 @@ mod integration_tests {
                 );
             }
         }
+    }
+}
+#[cfg(test)]
+mod focus_key_tests {
+    use super::*;
+    fn project() -> Document {
+        let mut d = crate::fresh_document();
+        d.width = 96;
+        d.height = 64;
+        let mut camera = crate::features::Camera {
+            optics: Optics {
+                focus: 200.,
+                range: 100.,
+                strength: 50.,
+                ..Default::default()
+            },
+            animation: Default::default(),
+            id: 1,
+            name: "Camera".into(),
+            start: 0,
+            duration: 24,
+            center: [48., 32.],
+            zoom: 1.,
+            angle: 0.,
+        };
+        let a = crate::animation::camera_at(&camera, 0);
+        crate::animation::camera_record(&mut camera, a);
+        let mut b = crate::animation::camera_at(&camera, 20);
+        b.frame = 20;
+        b.optics.as_mut().unwrap().focus = 1000.;
+        crate::animation::camera_record(&mut camera, b);
+        d.extras.cameras.push(camera);
+        d
+    }
+    #[test]
+    fn keys_interpolate_all_numeric_optics_and_step_method_and_quality() {
+        let mut d = project();
+        let c = &mut d.extras.cameras[0];
+        let end = c.animation.keys[1].optics.as_mut().unwrap();
+        end.position = 100.;
+        end.range = 40.;
+        end.strength = 90.;
+        end.method = BlurMethod::Lens;
+        end.quality = Quality::High;
+        let middle = crate::animation::camera_optics(c, 10);
+        assert_eq!(
+            (middle.focus, middle.range, middle.position, middle.strength),
+            (600., 70., 50., 70.)
+        );
+        assert!(middle.method == BlurMethod::Gaussian && middle.quality == Quality::Medium);
+        let end = crate::animation::camera_optics(c, 20);
+        assert!(end.method == BlurMethod::Lens && end.quality == Quality::High);
+        let restored: Document = serde_json::from_slice(&serde_json::to_vec(&d).unwrap()).unwrap();
+        assert!(crate::animation::camera_optics(&restored.extras.cameras[0], 10) == middle);
+        let restored = crate::fla::decode(&crate::fla::encode(&d).unwrap()).unwrap();
+        assert!(crate::animation::camera_optics(&restored.extras.cameras[0], 10) == middle);
+        let mut old = serde_json::to_value(&d).unwrap();
+        for k in old["extras"]["cameras"][0]["animation"]["keys"]
+            .as_array_mut()
+            .unwrap()
+        {
+            k.as_object_mut().unwrap().remove("optics");
+        }
+        let old: Document = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            crate::animation::camera_optics(&old.extras.cameras[0], 10).focus,
+            200.
+        );
+    }
+    #[test]
+    fn focus_pull_changes_the_exported_sharp_plane() {
+        let mut d = project();
+        let rectangle = |x| Mark {
+            points: vec![[x, 20.], [x + 8., 44.]].into(),
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            fill: Some([0, 0, 0, 255]),
+            ..Default::default()
+        };
+        d.layers[0].frames[0] = vec![rectangle(20.)].into();
+        d.layers[0].frames[20] = d.layers[0].frames[0].clone();
+        let mut layer = d.layers[0].clone();
+        layer.options.depth.distance = 200.;
+        layer.frames[0] = vec![rectangle(70.)].into();
+        layer.frames[20] = layer.frames[0].clone();
+        d.layers.push(layer);
+        let ctx = egui::Context::default();
+        let mut cache = crate::paint::RenderCache::default();
+        let a = crate::exporter::raster(&d, 0, 96, 64, &ctx, &mut cache);
+        let b = crate::exporter::raster(&d, 20, 96, 64, &ctx, &mut cache);
+        assert!(a[(32 * 96 + 17) * 3] < b[(32 * 96 + 17) * 3]);
+        assert!(a[(32 * 96 + 67) * 3] > b[(32 * 96 + 67) * 3]);
+    }
+    #[test]
+    fn splitting_and_trimming_a_camera_preserve_evaluated_focus_and_undo() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        e.doc = project();
+        let original = e.doc.extras.cameras[0].clone();
+        let expected = crate::animation::camera_optics(&original, 10);
+        e.camera_timeline_action(1, 10, 4);
+        assert_eq!(e.doc.extras.cameras.len(), 2);
+        let right = &e.doc.extras.cameras[1];
+        assert!(crate::animation::camera_optics(right, 10) == expected);
+        assert_eq!(
+            crate::animation::camera_optics(right, 15).focus,
+            crate::animation::camera_optics(&original, 15).focus
+        );
+        e.history(false);
+        assert_eq!(e.doc.extras.cameras.len(), 1);
+        assert!(crate::animation::camera_optics(&e.doc.extras.cameras[0], 10) == expected);
     }
 }

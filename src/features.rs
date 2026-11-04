@@ -556,7 +556,7 @@ fn resolve_mode(
             .iter()
             .find(|c| frame >= c.start && frame < c.start + c.duration)
         {
-            let optics = c.optics.clone();
+            let optics = crate::animation::camera_optics(c, frame);
             let c = crate::animation::camera_at(c, frame);
             marks.retain(|(l, _, _)| crate::depth::visible(&doc.layers[*l].options.depth, &optics));
             for (l, _, m) in &mut marks {
@@ -912,12 +912,12 @@ pub fn svg(doc: &Document, frame: usize) -> String {
             }
             group = Some(layer);
             if let Some(camera) = crate::depth::camera(doc, frame) {
-                let radius = camera
-                    .optics
-                    .radius(doc.layers[layer].options.depth.distance - camera.optics.position);
+                let optics = crate::animation::camera_optics(camera, frame);
+                let radius =
+                    optics.radius(doc.layers[layer].options.depth.distance - optics.position);
                 if radius > 0.1 {
                     let pad = radius * 2. + 3.;
-                    let filter = match camera.optics.method {
+                    let filter = match optics.method {
                         crate::depth::BlurMethod::Gaussian => {
                             format!("<feGaussianBlur stdDeviation=\"{}\"/>", radius * 0.5)
                         }
