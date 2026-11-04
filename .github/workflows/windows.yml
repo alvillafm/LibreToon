@@ -267,9 +267,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/packaging/native.py ${{ matrix.platform }}
 
+      - name: Prepare Ubuntu ClamAV updater
+        if: matrix.platform == 'linux' && (inputs.platform == 'all' || inputs.platform == matrix.platform)
+        # Avoid a concurrent updater holding the distro database/log lock.
+        # Keep the distribution's configuration, certificates and confinement.
+        run: sudo systemctl stop clamav-freshclam.service
+
       - name: Scan native payload and packages with updated ClamAV
         if: inputs.platform == 'all' || inputs.platform == matrix.platform
         timeout-minutes: 20
+        env:
+          LIBRETOON_CLAMAV_MODE: ${{ matrix.platform == 'linux' && 'ubuntu-system' || 'isolated' }}
         run: python3 scripts/packaging/security_native.py
 
       - name: Upload native download packages

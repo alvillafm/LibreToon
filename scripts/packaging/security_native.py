@@ -51,8 +51,16 @@ def scan(root=ROOT):
     def command(args, name):
         with (reports / name).open("w", encoding="utf-8") as log:
             result = subprocess.run(list(map(str, args)), stdout=log, stderr=subprocess.STDOUT, env=env, timeout=900)
-        require_success(result.returncode, name)
-        return (reports / name).read_text(errors="replace")
+        output = (reports / name).read_text(encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            # Surface the actual updater/scanner diagnostic in Actions, not only
+            # in an artifact. Updater failures are not malware detections.
+            print(f"--- {name} (exit {result.returncode}) ---", file=sys.stderr)
+            print(output[-16000:], file=sys.stderr)
+            phase = "definition update" if name == "intelligence-update.log" else "antivirus command"
+            report["failedCommand"] = {"phase": phase, "log": name, "exitCode": result.returncode}
+            raise RuntimeError(f"ClamAV {phase} failed (exit {result.returncode}); packages are blocked. See {name} above and in the security-report artifact.")
+        return output
 
     try:
         scanner, updater = shutil.which("clamscan"), shutil.which("freshclam")
@@ -60,11 +68,29 @@ def scan(root=ROOT):
             raise RuntimeError("ClamAV scanner/updater unavailable; no scan performed")
         directory = root / "dist"
         report["files"] = inventory(directory)
-        database = Path(os.environ.get("RUNNER_TEMP", root / "work")) / "libretoon-clamav"
-        database.mkdir(parents=True, exist_ok=True)
-        config = database / "freshclam.conf"
-        config.write_text(f'DatabaseDirectory "{database}"\nDatabaseMirror database.clamav.net\nForeground yes\nTestDatabases yes\n', encoding="utf-8")
-        command([updater, f"--config-file={config}", "--stdout"], "intelligence-update.log")
+        mode = os.environ.get("LIBRETOON_CLAMAV_MODE", "isolated")
+        if mode == "ubuntu-system":
+            # Ubuntu's packaged updater uses distro-managed paths (and may be
+            # confined by AppArmor). Never place its configuration in RUNNER_TEMP.
+            # Only the updater needs sudo; scanning the packages stays unprivileged.
+            if not sys.platform.startswith("linux"):
+                raise RuntimeError("ubuntu-system ClamAV mode requires Linux")
+            database = Path("/var/lib/clamav")
+            config = Path("/etc/clamav/freshclam.conf")
+            if not config.is_file() or not database.is_dir():
+                raise RuntimeError("Ubuntu ClamAV configuration/database directory is missing")
+            update_args = ["sudo", "-n", updater, f"--config-file={config}",
+                           f"--datadir={database}", "--stdout"]
+        elif mode == "isolated":
+            database = Path(os.environ.get("RUNNER_TEMP", root / "work")) / "libretoon-clamav"
+            database.mkdir(parents=True, exist_ok=True)
+            config = database / "freshclam.conf"
+            config.write_text(f'DatabaseDirectory "{database}"\nDatabaseMirror database.clamav.net\nForeground yes\nTestDatabases yes\n', encoding="utf-8")
+            update_args = [updater, f"--config-file={config}", "--stdout"]
+        else:
+            raise RuntimeError("Unknown ClamAV mode: " + mode)
+        report.update(databaseMode=mode, databaseDirectory=str(database), updaterConfig=str(config))
+        command(update_args, "intelligence-update.log")
         version = command([scanner, f"--database={database}", "--version"], "scanner-version.log").strip()
         now = dt.datetime.now(dt.timezone.utc)
         report.update(scannerVersion=version, intelligenceUpdatedUtc=database_timestamp(version, now).isoformat(), timeUtc=now.isoformat())
