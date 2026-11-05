@@ -20,6 +20,7 @@ LibreToon is a **vibe-coded project**, created by an animator. The idea is simpl
 
 ## Features
 
+<<<<<<< HEAD
 ### Copy frames between projects
 Open both projects in tabs. Select a timeline range with Shift-click, choose **Copy frames**, then select the destination layer/frame and choose **Paste frames**. Ctrl+C/Ctrl+V (Cmd on macOS) use the frame clipboard while the timeline is active. Pasting adds the copied artwork to the existing drawing layer; it does not create a layer or erase its previous contents. Frame counts are preserved even when project FPS differ.
 
