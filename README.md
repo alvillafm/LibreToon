@@ -36,6 +36,8 @@ Animation tracks have a trash button in their header and a **Delete animation tr
 
 Double-click opens the shared source with the captured frame range selected. Source drawings, bones, puppet data and keyframes stay editable, and edits update its instances. **Duplicate animation** makes an independent source for variations. Native save/recovery and LibreToon FLA metadata retain clips; the visible XFL preview is baked for interoperability. This does not provide automatic motion retargeting between different skeletons.
 
+=======
+>>>>>>> d75b2f98cb1e3144330d13b4362c8e316d6fb830
 LibreToon combines traditional animation tools with features that go beyond what Adobe Animate currently offers.
 
 ### Drawing & Painting
