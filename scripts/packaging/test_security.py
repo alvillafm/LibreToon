@@ -130,6 +130,10 @@ $blocked=$false;try {Assert-DefenderReady $ready} catch {$blocked=$true};if(-not
         self.assertIn("LIBRETOON_CLAMAV_MODE: ${{ matrix.platform == 'linux' && 'ubuntu-system' || 'isolated' }}",source)
         self.assertIn('sudo systemctl stop clamav-freshclam.service',source)
         self.assertIn('SignedUninstaller=yes',(ROOT/'scripts/packaging/windows.iss').read_text())
+        installer=(ROOT/'scripts/packaging/windows.iss').read_text()
+        for option in ['UsePreviousAppDir=yes','Uninstallable=yes','CreateUninstallRegKey=yes','CloseApplications=no','RestartApplications=no']:
+            self.assertIn(option,installer)
+        self.assertIn('Uninstall LibreToon',installer)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

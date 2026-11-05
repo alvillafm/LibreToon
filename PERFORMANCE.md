@@ -248,3 +248,6 @@ La copia conserva geometría compartida del intervalo y únicamente sus recursos
 
 ## Ajustes de vista y duración de exposiciones
 Los destinos escalares de ajuste se preparan una vez al iniciar el gesto con la geometría visible del fotograma activo. Las búsquedas durante el movimiento usan listas ordenadas. La cuadrícula limita su dibujo al área visible y adapta el paso al zoom; no altera geometría ni exportaciones. El tirador de duración conserva únicamente índices durante la previsualización y confirma una sola entrada de historial al soltar.
+
+## Temporización de clips
+El recorte y el estirado calculan su previsualización únicamente a partir del bloque original del gesto. La fase y la velocidad usan f64; el muestreo de bucle y ping-pong es aritmético y no hornea fotogramas. El borrado confirmado de un recurso es una operación explícita global: conserva una sola entrada de historial, reutiliza las exposiciones filtradas por identidad reteniendo sus propietarios y mantiene los fotogramas de las capas no afectadas.

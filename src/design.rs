@@ -13,6 +13,7 @@ pub enum Icon {
     KeyRemove,
     FrameExtend,
     FrameShorten,
+    PingPong,
     Grid,
     Snap,
     Depth,
@@ -217,6 +218,12 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             } else {
                 path(&[(18., 6.), (14., 10.), (18., 14.)]);
             }
+        }
+        Icon::PingPong => {
+            line((2., 6.), (18., 6.));
+            path(&[(14., 2.), (18., 6.), (14., 10.)]);
+            line((18., 14.), (2., 14.));
+            path(&[(6., 10.), (2., 14.), (6., 18.)]);
         }
         Icon::Grid => {
             for i in [4., 10., 16.] {

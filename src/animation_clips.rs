@@ -52,9 +52,11 @@ impl Collection {
 pub struct Timing {
     pub asset: u64,
     pub offset: f64,
-    pub rate: f32,
+    pub rate: f64,
     pub looping: bool,
     pub reversed: bool,
+    #[serde(default)]
+    pub ping_pong: bool,
 }
 #[derive(Clone, Copy)]
 pub struct ClipDrag(pub u64);
@@ -72,6 +74,7 @@ struct Gesture {
     original: Span,
     preview: Span,
     mode: i8,
+    stretch: bool,
     pointer: f32,
     valid: bool,
 }
@@ -105,6 +108,7 @@ pub struct Manager {
     folder_color_transaction: bool,
     rename_focus: bool,
     selected: Option<u64>,
+    delete_asset: Option<u64>,
     search: String,
     create: Option<Create>,
     playing: bool,
@@ -161,12 +165,15 @@ pub fn source_frame(doc: &Document, timing: &Timing, born: usize, frame: usize) 
         .iter()
         .find(|a| a.id == timing.asset)?;
     let count = asset.end.checked_sub(asset.start)?.max(1);
-    let elapsed = frame.saturating_sub(born) as f64 * timing.rate as f64;
-    let position = (timing.offset + elapsed).floor() as usize;
-    let position = if timing.looping {
-        position % count
+    let phase = timing.offset + frame.saturating_sub(born) as f64 * timing.rate;
+    let position = if timing.ping_pong && count > 1 {
+        let period = 2 * (count - 1);
+        let step = stable_floor(phase.rem_euclid(period as f64));
+        if step < count { step } else { period - step }
+    } else if timing.looping {
+        stable_floor(phase.rem_euclid(count as f64)) % count
     } else {
-        position.min(count - 1)
+        stable_floor(phase).min(count - 1)
     };
     Some(
         asset.start
@@ -177,6 +184,93 @@ pub fn source_frame(doc: &Document, timing: &Timing, born: usize, frame: usize) 
             },
     )
 }
+fn stable_floor(value: f64) -> usize {
+    let rounded = value.round();
+    (if (value - rounded).abs() < 1e-8 {
+        rounded
+    } else {
+        value
+    })
+    .floor()
+    .max(0.) as usize
+}
+fn frame_duration(value: f64) -> usize {
+    let rounded = value.round();
+    (if (value - rounded).abs() < 1e-8 {
+        rounded
+    } else {
+        value
+    })
+    .ceil()
+    .clamp(1., 10000.) as usize
+}
+impl Timing {
+    fn repeats(&self) -> bool {
+        self.looping || self.ping_pong
+    }
+    fn period(&self, count: usize) -> f64 {
+        if self.ping_pong && count > 1 {
+            2. * (count - 1) as f64
+        } else {
+            count as f64
+        }
+    }
+}
+fn edit_edge(original: &Span, mode: i8, delta: isize, stretch: bool, count: usize) -> Span {
+    let mut preview = original.clone();
+    if mode == 0 {
+        let length = preview.end - preview.start;
+        preview.start =
+            (preview.start as isize + delta).clamp(0, (10000 - length) as isize) as usize;
+        preview.end = preview.start + length;
+    } else if mode == 1 {
+        preview.end =
+            (preview.end as isize + delta).clamp((preview.start + 1) as isize, 10000) as usize;
+        let timing = preview.mark.style.animation_clip.as_mut().unwrap();
+        if stretch {
+            timing.rate *=
+                (original.end - original.start) as f64 / (preview.end - preview.start) as f64;
+        } else if !timing.repeats() {
+            preview.end = preview.end.min(
+                preview.start
+                    + frame_duration((count as f64 - timing.offset).max(0.) / timing.rate),
+            );
+        }
+    } else {
+        let timing = preview.mark.style.animation_clip.as_mut().unwrap();
+        let lower = if stretch || timing.repeats() {
+            -(preview.start as isize)
+        } else {
+            -(stable_floor(timing.offset / timing.rate) as isize)
+        };
+        let delta = delta.clamp(
+            lower.max(-(preview.start as isize)),
+            (preview.end - preview.start - 1) as isize,
+        );
+        preview.start = (preview.start as isize + delta) as usize;
+        if stretch {
+            timing.rate *=
+                (original.end - original.start) as f64 / (preview.end - preview.start) as f64;
+        } else {
+            let offset = timing.offset + delta as f64 * timing.rate;
+            timing.offset = if timing.repeats() {
+                offset.rem_euclid(timing.period(count))
+            } else {
+                offset.max(0.)
+            };
+        }
+    }
+    preview
+}
+fn retime_span(original: &Span, rate: f64) -> Span {
+    let mut span = original.clone();
+    let timing = span.mark.style.animation_clip.as_mut().unwrap();
+    span.end =
+        span.start + frame_duration((original.end - original.start) as f64 * timing.rate / rate);
+    timing.rate = rate;
+    span
+}
+
 pub(crate) fn normalize_asset_ranges(doc: &mut Document, symbol_id: u64) {
     let Some(count) = doc
         .extras
@@ -251,7 +345,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
                     if !t.rate.is_finite()
                         || !(0.01..=100.).contains(&t.rate)
                         || !t.offset.is_finite()
-                        || !(0. ..10000.).contains(&t.offset)
+                        || !(0. ..20000.).contains(&t.offset)
                         || mark
                             .style
                             .instance
@@ -386,22 +480,11 @@ impl Editor {
         self.checkpoint();
         self.doc = candidate;
         self.clips.selected = Some(asset);
+        self.clips.selected_folder = None;
         self.clips.open = true;
         self.feature.library = false;
         self.recover();
         Ok(asset)
-    }
-    fn clip_duration(&self, timing: &Timing) -> usize {
-        self.doc
-            .extras
-            .animation_clips
-            .iter()
-            .find(|a| a.id == timing.asset)
-            .map_or(1, |a| {
-                ((((a.end - a.start) as f64 - timing.offset).max(1.) / timing.rate as f64).ceil()
-                    as usize)
-                    .max(1)
-            })
     }
     pub(crate) fn place_animation_clip(
         &mut self,
@@ -454,6 +537,7 @@ impl Editor {
             rate: 1.,
             looping: asset.looping,
             reversed: false,
+            ping_pong: false,
         });
         let destination = track.filter(|&l| {
             self.doc
@@ -514,6 +598,7 @@ impl Editor {
         self.canvas.selected = vec![(layer, 0)];
         self.playing = false;
         self.clips.selected = Some(asset_id);
+        self.clips.selected_folder = None;
         self.clips.selected_span = Some((layer, at));
         self.activate_tool(crate::canvas::Tool::Object);
         self.fit_camera_duration();
@@ -653,9 +738,16 @@ impl Editor {
     }
     fn delete_animation_asset(&mut self, id: u64) {
         if self.clip_in_use(id) {
-            self.status =
-                tr("This animation is in use. Delete its clips from the timeline first.").into();
+            self.clips.delete_asset = Some(id);
             return;
+        }
+        self.remove_animation_asset(id);
+    }
+    fn remove_animation_asset(&mut self, id: u64) {
+        // Resource deletion is global. Return to the root before checkpointing so
+        // Undo restores the whole project, including parent scenes and symbols.
+        while !self.feature.symbol_stack.is_empty() {
+            self.exit_symbol();
         }
         let Some(asset) = self
             .doc
@@ -668,19 +760,62 @@ impl Editor {
             return;
         };
         self.checkpoint();
+        remove_asset_instances(&mut self.doc, id);
+        self.layer = self.layer.min(self.doc.layers.len() - 1);
+        self.clips.reset_document();
+        self.feature.frame_selection = None;
         self.doc.extras.animation_clips.retain(|a| a.id != id);
         self.doc
             .extras
             .animation_library
             .order
             .retain(|entry| *entry != Entry::Clip(id));
-        if !self.symbol_in_use(asset.symbol) {
+        if !self.symbol_in_use(asset.symbol)
+            && !self
+                .doc
+                .extras
+                .animation_clips
+                .iter()
+                .any(|a| a.symbol == asset.symbol)
+        {
             self.doc.extras.symbols.retain(|s| s.id != asset.symbol);
         }
         self.clips.selected = None;
         self.recover();
     }
+    fn animation_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.clips.delete_asset else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let response=egui::Modal::new(egui::Id::unique("delete-animation-resource")).show(ctx,|ui|{
+            ui.heading(tr("Delete animation?"));
+            ui.label(tr("This animation is in use. Delete it and all its placed clips? Other animation resources and artwork are kept. Undo restores the deletion."));
+            ui.horizontal(|ui|{
+                confirm=button(ui,Icon::Trash,"Delete animation and clips","Delete animation and clips",false,true).clicked();
+                cancel=button(ui,Icon::Close,"Cancelar","Cancelar",false,true).clicked();
+            });
+        });
+        cancel |= response.should_close();
+        if confirm {
+            self.clips.delete_asset = None;
+            self.remove_animation_asset(id);
+        } else if cancel {
+            self.clips.delete_asset = None;
+        }
+    }
     pub(crate) fn animation_manager_ui(&mut self, ui: &mut egui::Ui) {
+        if ui.rect_contains_pointer(ui.max_rect())
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
+        {
+            if let Some(id) = self.clips.selected_folder {
+                self.delete_animation_folder(id);
+            } else if let Some(id) = self.clips.selected {
+                self.delete_animation_asset(id);
+            }
+        }
         if !ui.input(|i| i.pointer.primary_down()) {
             self.clips.folder_color_transaction = false;
         }
@@ -745,6 +880,7 @@ impl Editor {
                         asset.name = format!("{} {}", asset.name, tr("Copy"));
                         self.doc.extras.symbols.push(symbol);
                         self.clips.selected = Some(asset.id);
+                        self.clips.selected_folder = None;
                         self.doc.extras.animation_clips.push(asset);
                         self.recover();
                     }
@@ -778,6 +914,7 @@ impl Editor {
                 .desired_width(f32::INFINITY),
         );
         let mut edit = self.animation_collection_ui(ui);
+        self.animation_delete_dialog(ui.ctx());
         if self.doc.extras.animation_clips.is_empty() {
             ui.add_space(12.);
             ui.label(tr("Select a frame range, then create an animation clip. Characters, objects and effects are supported."));
@@ -1207,6 +1344,7 @@ impl Editor {
                 self.playing = false;
                 self.clips.selected_span = Some((layer, span.start));
                 self.clips.selected = asset.as_ref().map(|a| a.id);
+                self.clips.selected_folder = None;
                 self.canvas.selected = vec![(layer, 0)];
             }
             if response.double_clicked() {
@@ -1231,6 +1369,7 @@ impl Editor {
                         original: span.clone(),
                         preview: span.clone(),
                         mode,
+                        stretch: ui.input(|i| i.modifiers.shift),
                         pointer: pos.x,
                         valid: true,
                     });
@@ -1294,7 +1433,21 @@ impl Editor {
                     });
                     ui.horizontal(|ui| {
                         button(ui, Icon::Loop, "", "Loop", false, false);
-                        update |= ui.checkbox(&mut timing.looping, tr("Loop")).changed();
+                        let toggled = ui.checkbox(&mut timing.looping, tr("Loop")).changed();
+                        if toggled && timing.looping {
+                            timing.ping_pong = false;
+                        }
+                        update |= toggled;
+                    });
+                    ui.horizontal(|ui| {
+                        button(ui, Icon::PingPong, "", "Ping-pong", false, false);
+                        let toggled = ui
+                            .checkbox(&mut timing.ping_pong, tr("Ping-pong"))
+                            .changed();
+                        if toggled && timing.ping_pong {
+                            timing.looping = false;
+                        }
+                        update |= toggled;
                     });
                     ui.horizontal(|ui| {
                         button(ui, Icon::Previous, "", "Reverse", false, false);
@@ -1302,9 +1455,23 @@ impl Editor {
                     });
                 });
                 if update {
-                    self.clips
-                        .pending
-                        .push(Operation::Change(layer, span.start, Some(changed)));
+                    let rate = changed.mark.style.animation_clip.as_ref().unwrap().rate;
+                    if rate != span.mark.style.animation_clip.as_ref().unwrap().rate {
+                        let retimed = retime_span(&span, rate);
+                        changed.end = retimed.end;
+                    }
+                    if self.clip_drop_valid(layer, span.start, &changed) {
+                        self.clips.pending.push(Operation::Change(
+                            layer,
+                            span.start,
+                            Some(changed),
+                        ));
+                    } else {
+                        self.status = tr(
+                            "Not enough space to change playback speed. Move the next clip first.",
+                        )
+                        .into();
+                    }
                 }
                 if button(
                     ui,
@@ -1356,65 +1523,28 @@ impl Editor {
                     gesture.drop_area = row.intersect(ui.clip_rect());
                 }
                 let delta = ((pos.x - gesture.pointer) / cell).round() as isize;
-                let mut preview = gesture.original.clone();
-                if gesture.mode == 0 {
-                    let duration = preview.end - preview.start;
-                    preview.start = (preview.start as isize + delta)
-                        .clamp(0, (10000 - duration) as isize)
-                        as usize;
-                    preview.end = preview.start + duration;
-                } else if gesture.mode == 1 {
-                    preview.end = (preview.end as isize + delta)
-                        .clamp((preview.start + 1) as isize, 10000)
-                        as usize;
-                    if ui.input(|i| i.modifiers.shift) {
-                        let timing = preview.mark.style.animation_clip.as_mut().unwrap();
-                        timing.rate = (timing.rate
-                            * (gesture.original.end - gesture.original.start) as f32
-                            / (preview.end - preview.start) as f32)
-                            .clamp(0.01, 100.);
-                    } else {
-                        let timing = preview.mark.style.animation_clip.as_ref().unwrap();
-                        if !timing.looping {
-                            preview.end =
-                                preview.end.min(preview.start + self.clip_duration(timing));
-                        }
-                    }
-                } else {
-                    let timing = preview.mark.style.animation_clip.as_mut().unwrap();
-                    let max_back = (timing.offset / timing.rate as f64).floor() as isize;
-                    let lower = if ui.input(|i| i.modifiers.shift) {
-                        -(preview.start as isize)
-                    } else {
-                        -max_back
-                    };
-                    let delta = delta
-                        .clamp(lower, (preview.end - preview.start - 1) as isize)
-                        .max(-(preview.start as isize));
-                    preview.start = (preview.start as isize + delta) as usize;
-                    if ui.input(|i| i.modifiers.shift) {
-                        timing.rate = (timing.rate
-                            * (gesture.original.end - gesture.original.start) as f32
-                            / (preview.end - preview.start) as f32)
-                            .clamp(0.01, 100.);
-                    } else {
-                        timing.offset =
-                            (timing.offset + delta as f64 * timing.rate as f64).clamp(0., 9999.999);
-                        if timing.looping {
-                            if let Some(asset) = self
-                                .doc
-                                .extras
-                                .animation_clips
-                                .iter()
-                                .find(|a| a.id == timing.asset)
-                            {
-                                timing.offset =
-                                    timing.offset.rem_euclid((asset.end - asset.start) as f64);
-                            }
-                        }
-                    }
-                }
+                let timing = gesture.original.mark.style.animation_clip.as_ref().unwrap();
+                let count = self
+                    .doc
+                    .extras
+                    .animation_clips
+                    .iter()
+                    .find(|a| a.id == timing.asset)
+                    .map_or(1, |a| a.end - a.start);
+                let preview = edit_edge(
+                    &gesture.original,
+                    gesture.mode,
+                    delta,
+                    gesture.stretch,
+                    count,
+                );
                 gesture.valid = !locked
+                    && preview
+                        .mark
+                        .style
+                        .animation_clip
+                        .as_ref()
+                        .is_some_and(|t| t.rate.is_finite() && (0.01..=100.).contains(&t.rate))
                     && preview.start < preview.end
                     && preview.end <= 10000
                     && clear_of_other_clips(
@@ -1724,6 +1854,134 @@ mod tests {
         assert!(e.doc.validate().is_ok());
     }
     #[test]
+    fn trim_stretch_and_speed_share_the_same_source_window() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 10, None, None);
+        let original = spans(&e.doc.layers[e.layer])[0].clone();
+        let left = edit_edge(&original, -1, 2, false, 6);
+        let trimmed = edit_edge(&left, 1, -2, false, 6);
+        let stretched = edit_edge(&trimmed, 1, 4, true, 6);
+        let timing = stretched.mark.style.animation_clip.as_ref().unwrap();
+        assert_eq!((stretched.start, stretched.end), (12, 18));
+        assert!((timing.rate - 1. / 3.).abs() < 1e-12);
+        assert_eq!(timing.offset, 2.);
+        let frames: Vec<_> = (12..18)
+            .map(|f| source_frame(&e.doc, timing, 12, f).unwrap())
+            .collect();
+        assert_eq!(frames, vec![4, 4, 4, 5, 5, 5]);
+        let faster = retime_span(&stretched, 2. / 3.);
+        assert_eq!((faster.start, faster.end), (12, 15));
+        assert_eq!(
+            faster.mark.style.animation_clip.as_ref().unwrap().offset,
+            2.
+        );
+        let restored = retime_span(&faster, 1. / 3.);
+        assert_eq!(restored.end, 18);
+        assert!(e.change_animation_span(e.layer, 10, Some(restored)));
+        assert!(e.doc.validate().is_ok());
+        e.history(false);
+        assert_eq!(spans(&e.doc.layers[e.layer])[0].end, 16);
+    }
+    #[test]
+    fn extending_loop_left_preserves_fractional_phase_in_both_directions() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 10, None, None);
+        for ping_pong in [false, true] {
+            for reverse in [false, true] {
+                let mut original = spans(&e.doc.layers[e.layer])[0].clone();
+                let timing = original.mark.style.animation_clip.as_mut().unwrap();
+                timing.looping = !ping_pong;
+                timing.ping_pong = ping_pong;
+                timing.reversed = reverse;
+                timing.rate = 0.5;
+                let extended = edit_edge(&original, -1, -3, false, 6);
+                assert_eq!(extended.start, 7);
+                for f in 10..16 {
+                    assert_eq!(
+                        source_frame(
+                            &e.doc,
+                            original.mark.style.animation_clip.as_ref().unwrap(),
+                            10,
+                            f
+                        ),
+                        source_frame(
+                            &e.doc,
+                            extended.mark.style.animation_clip.as_ref().unwrap(),
+                            7,
+                            f
+                        )
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn ping_pong_has_no_duplicated_endpoints_and_survives_serialization() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 0, None, None);
+        let mut timing = spans(&e.doc.layers[e.layer])[0]
+            .mark
+            .style
+            .animation_clip
+            .clone()
+            .unwrap();
+        timing.ping_pong = true;
+        let frames: Vec<_> = (0..11)
+            .map(|f| source_frame(&e.doc, &timing, 0, f).unwrap())
+            .collect();
+        assert_eq!(frames, vec![2, 3, 4, 5, 6, 7, 6, 5, 4, 3, 2]);
+        let bytes = serde_json::to_vec(&timing).unwrap();
+        let restored: Timing = serde_json::from_slice(&bytes).unwrap();
+        assert!(timing == restored);
+        let old: Timing = serde_json::from_str(
+            r#"{"asset":1,"offset":0,"rate":1,"looping":true,"reversed":false}"#,
+        )
+        .unwrap();
+        assert!(!old.ping_pong);
+        e.doc.extras.animation_clips[0].end = 3;
+        for f in 0..20 {
+            assert_eq!(source_frame(&e.doc, &timing, 0, f), Some(2));
+        }
+    }
+    #[test]
+    fn speed_changes_do_not_silently_drop_source_frames_at_scene_limit() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 10, None, None);
+        let original = spans(&e.doc.layers[e.layer])[0].clone();
+        let mut huge = original.clone();
+        huge.end = 10000;
+        let too_long = retime_span(&huge, 0.01);
+        assert!(too_long.end > 10000);
+        assert!(!e.change_animation_span(e.layer, 10, Some(too_long)));
+        assert_eq!(spans(&e.doc.layers[e.layer])[0].end, 16);
+    }
+    #[test]
+    fn deleting_a_used_resource_confirms_then_removes_instances_and_undo_restores() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 10, None, None);
+        let track = e.layer;
+        let original = e.doc.layers[0].frames.clone();
+        e.delete_animation_asset(asset);
+        assert_eq!(e.clips.delete_asset, Some(asset));
+        assert!(e.clip_in_use(asset));
+        e.remove_animation_asset(asset);
+        assert!(!e.doc.extras.animation_clips.iter().any(|a| a.id == asset));
+        assert!(!e.clip_in_use(asset));
+        assert_eq!(e.doc.layers.len(), 1);
+        assert_eq!(e.doc.layers[0].frames.identity(), original.identity());
+        assert!(e.doc.validate().is_ok());
+        e.history(false);
+        assert!(e.doc.extras.animation_clips.iter().any(|a| a.id == asset));
+        assert_eq!(spans(&e.doc.layers[track]).len(), 1);
+        assert!(e.doc.validate().is_ok());
+    }
+
+    #[test]
     fn animated_instance_selection_follows_the_current_pose() {
         let mut e = fixture();
         let asset = create(&mut e);
@@ -1749,6 +2007,7 @@ mod tests {
             rate: 0.5,
             looping: false,
             reversed: false,
+            ping_pong: false,
         };
         let mut trimmed = timing.clone();
         trimmed.offset = 0.5;
@@ -1876,7 +2135,7 @@ mod tests {
             .animation_clip
             .as_mut()
             .unwrap()
-            .rate = f32::NAN;
+            .rate = f64::NAN;
         assert!(bad.validate().is_err());
     }
     fn button_at(pos: Pos2, pressed: bool) -> egui::Event {
@@ -1931,6 +2190,92 @@ mod tests {
         assert_eq!(list.len(), 1);
     }
     #[test]
+    fn releasing_shift_before_mouse_keeps_stretch_mode() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 2, None, None);
+        let ctx = egui::Context::default();
+        let run = |e: &mut Editor, mut events: Vec<egui::Event>, shift: bool| {
+            events.insert(
+                0,
+                egui::Event::ModifiersChanged(egui::Modifiers {
+                    shift,
+                    ..Default::default()
+                }),
+            );
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 250.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    e.animation_track_ui(
+                        ui,
+                        1,
+                        Rect::from_min_max(Pos2::new(100., 60.), Pos2::new(900., 88.)),
+                        100.,
+                        20.,
+                    )
+                },
+            );
+            output.textures_delta.clear();
+            e.finish_animation_clip_ui(&ctx);
+        };
+        run(&mut e, vec![], false);
+        let from = Pos2::new(258., 74.);
+        let to = Pos2::new(378., 74.);
+        run(&mut e, vec![egui::Event::PointerMoved(from)], true);
+        let press = |pos, pressed, shift| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        };
+        run(&mut e, vec![press(from, true, true)], true);
+        run(&mut e, vec![egui::Event::PointerMoved(to)], true);
+        assert!(e.clips.gesture.as_ref().unwrap().stretch);
+        run(&mut e, vec![press(to, false, false)], false);
+        let list = spans(&e.doc.layers[1]);
+        assert_eq!((list[0].start, list[0].end), (2, 14));
+        assert_eq!(
+            list[0].mark.style.animation_clip.as_ref().unwrap().rate,
+            0.5
+        );
+    }
+    #[test]
+    fn resource_deletion_preserves_other_resources_and_cleans_other_scenes() {
+        let mut e = fixture();
+        let asset = create(&mut e);
+        e.place_animation_clip(asset, 2, None, None);
+        let scene = crate::animation::scene_from(&e.doc, id(), "Other".into());
+        e.doc.extras.scenes.push(scene.clone());
+        let mut other_scene = scene;
+        other_scene.id = id();
+        e.doc.extras.scenes.push(other_scene);
+        e.doc.extras.active_scene = 0;
+        let mut other = e.doc.extras.animation_clips[0].clone();
+        other.id = id();
+        let other_id = other.id;
+        let shared_symbol = other.symbol;
+        e.doc.extras.animation_clips.push(other);
+        e.remove_animation_asset(asset);
+        assert!(
+            e.doc
+                .extras
+                .animation_clips
+                .iter()
+                .any(|a| a.id == other_id)
+        );
+        assert!(e.doc.extras.symbols.iter().any(|s| s.id == shared_symbol));
+        assert!(!e.clip_in_use(asset));
+        assert!(e.doc.extras.scenes.iter().all(|s| s.layers.len() == 1));
+        assert!(e.doc.validate().is_ok());
+    }
+    #[test]
     fn manager_and_creation_dialog_render_without_touching_document() {
         let mut e = fixture();
         create(&mut e);
@@ -1965,9 +2310,107 @@ mod tests {
     }
 }
 
+fn remove_asset_instances(doc: &mut Document, id: u64) {
+    fn layers(layers: &mut SharedVec<Layer>, rig: &mut crate::rig::Rig, id: u64) -> Vec<usize> {
+        let count = layers.first().map_or(1, |l| l.frames.len());
+        let mut converted =
+            std::collections::HashMap::<usize, (SharedVec<Mark>, SharedVec<Mark>)>::new();
+        let mut affected = std::collections::HashSet::new();
+        let mut targets = std::collections::HashSet::new();
+        for (index, layer) in layers.iter_mut().enumerate() {
+            if !layer.frames.iter().any(|f| {
+                f.iter().any(|m| {
+                    m.style
+                        .animation_clip
+                        .as_ref()
+                        .is_some_and(|t| t.asset == id)
+                })
+            }) {
+                continue;
+            }
+            for frame in layer.frames.iter_mut() {
+                if let Some((_, replacement)) = converted.get(&frame.identity()) {
+                    affected.insert(index);
+                    *frame = replacement.clone();
+                    continue;
+                }
+                if frame.iter().any(|m| {
+                    m.style
+                        .animation_clip
+                        .as_ref()
+                        .is_some_and(|t| t.asset == id)
+                }) {
+                    affected.insert(index);
+                    let original = frame.clone();
+                    let replacement: SharedVec<Mark> = frame
+                        .iter()
+                        .filter(|m| {
+                            let remove = m
+                                .style
+                                .animation_clip
+                                .as_ref()
+                                .is_some_and(|t| t.asset == id);
+                            if remove {
+                                targets.insert(m.style.track);
+                            }
+                            !remove
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into();
+                    converted.insert(original.identity(), (original, replacement.clone()));
+                    *frame = replacement;
+                }
+            }
+        }
+        let removed: Vec<_> = layers
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                affected.contains(i)
+                    && l.options.animation_track
+                    && l.frames.iter().all(|f| f.is_empty())
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let mut index = 0;
+        layers.retain(|_| {
+            let keep = !removed.contains(&index);
+            index += 1;
+            keep
+        });
+        if layers.is_empty() {
+            let mut layer = crate::fresh_document().layers[0].clone();
+            layer.frames.resize(count, Default::default());
+            layer.init_keys();
+            layers.push(layer);
+        }
+        rig.bindings.retain(|b| !targets.contains(&b.target));
+        for bone in &mut rig.bones {
+            bone.targets.retain(|target| !targets.contains(target));
+        }
+        removed
+    }
+    fn slots(tracks: &mut SharedVec<crate::media::Track>, removed: &[usize]) {
+        for track in tracks {
+            track.slot -= removed.iter().filter(|&&i| i < track.slot).count();
+        }
+    }
+    let removed = layers(&mut doc.layers, &mut doc.extras.rig, id);
+    slots(&mut doc.extras.media.tracks, &removed);
+    for scene in &mut doc.extras.scenes {
+        let removed = layers(&mut scene.layers, &mut scene.rig, id);
+        slots(&mut scene.media_tracks, &removed);
+    }
+    for symbol in &mut doc.extras.symbols {
+        layers(&mut symbol.layers, &mut symbol.rig, id);
+    }
+}
+
 impl Manager {
     pub(crate) fn reset_document(&mut self) {
         self.cache.clear();
+        self.delete_asset = None;
         self.preview_bounds = None;
         self.gesture = None;
         self.selected_span = None;
@@ -2547,6 +2990,8 @@ impl Editor {
                         crate::themes::palette().text,
                     );
                     if response.clicked() {
+                        self.clips.selected_span = None;
+                        self.canvas.clear_selection();
                         match entry {
                             Entry::Folder(id) => {
                                 self.clips.selected_folder = Some(id);

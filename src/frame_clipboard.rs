@@ -240,7 +240,9 @@ fn retime(mark: &mut Mark, source_start: usize, destination: usize, doc: &Docume
                     .find(|a| a.id == timing.asset)
                 {
                     let count = (asset.end - asset.start) as f64;
-                    timing.offset = if timing.looping {
+                    timing.offset = if timing.ping_pong && count > 1. {
+                        timing.offset.rem_euclid(2. * (count - 1.))
+                    } else if timing.looping {
                         timing.offset.rem_euclid(count)
                     } else {
                         timing.offset.min(count - 1.)
@@ -522,6 +524,48 @@ impl Editor {
 mod tests {
     use super::*;
     use eframe::egui::{self, Pos2, Rect, Vec2};
+    #[test]
+    fn copying_ping_pong_frames_preserves_the_return_leg() {
+        let mut doc = crate::fresh_document();
+        doc.extras
+            .animation_clips
+            .push(crate::animation_clips::Asset {
+                folder: None,
+                id: 77,
+                name: "clip".into(),
+                resource: "resource".into(),
+                symbol: 88,
+                start: 2,
+                end: 8,
+                looping: false,
+            });
+        let mut mark = Mark::default();
+        mark.style.instance = Some(Instance {
+            symbol: 88,
+            born: 0,
+            matrix: crate::rig::IDENTITY,
+            mode: Playback::Once,
+            first: 2,
+            clock: crate::features::SymbolClock::Scene,
+        });
+        mark.style.animation_clip = Some(crate::animation_clips::Timing {
+            asset: 77,
+            offset: 0.,
+            rate: 0.5,
+            looping: false,
+            reversed: false,
+            ping_pong: true,
+        });
+        let original = mark.style.animation_clip.clone().unwrap();
+        retime(&mut mark, 15, 30, &doc);
+        let copied = mark.style.animation_clip.as_ref().unwrap();
+        for frame in 0..8 {
+            assert_eq!(
+                crate::animation_clips::source_frame(&doc, &original, 0, 15 + frame),
+                crate::animation_clips::source_frame(&doc, copied, 30, 30 + frame)
+            );
+        }
+    }
     fn ink(color: [u8; 4], x: f32) -> Mark {
         Mark {
             points: vec![[x, 10.], [x + 10., 20.]].into(),

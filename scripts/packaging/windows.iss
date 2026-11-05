@@ -26,6 +26,13 @@ SignedUninstallerDir={#SignCache}
 DefaultDirName={localappdata}\Programs\LibreToon
 DefaultGroupName=LibreToon
 PrivilegesRequired=lowest
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+Uninstallable=yes
+CreateUninstallRegKey=yes
+UninstallDisplayName=LibreToon
+CloseApplications=no
+RestartApplications=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
@@ -40,6 +47,7 @@ LicenseFile={#Payload}\LICENSE
 [Files]
 Source: "{#Payload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]
+Name: "{group}\Uninstall LibreToon"; Filename: "{uninstallexe}"
 Name: "{group}\LibreToon"; Filename: "{app}\libretoon.exe"
 [Run]
 Filename: "{app}\libretoon.exe"; Description: "Open LibreToon"; Flags: nowait postinstall skipifsilent unchecked

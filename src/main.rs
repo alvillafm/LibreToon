@@ -52,6 +52,7 @@ mod tablet;
 mod themes;
 mod tools_editor;
 mod typography;
+mod update_install;
 mod updater;
 mod vector;
 mod view_options;
@@ -396,6 +397,7 @@ impl eframe::App for Editor {
         self.workspace(ui);
         self.media_dialog(&ctx);
         self.updater.show(&ctx);
+        self.update_installation(&ctx);
         if was_home != self.hub.home {
             ctx.request_repaint();
         }
@@ -418,6 +420,9 @@ impl eframe::App for Editor {
     }
 }
 fn main() -> eframe::Result {
+    if let Some(result) = update_install::helper_entry() {
+        return result;
+    }
     eframe::run_native(
         "LibreToon",
         eframe::NativeOptions {
