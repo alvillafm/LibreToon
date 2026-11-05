@@ -47,6 +47,7 @@ pub const TOOLS: &[Tool] = &[
     Tool::Mannequin,
     Tool::Bones,
     Tool::Puppet,
+    Tool::Trim,
 ];
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Binding {
@@ -94,6 +95,7 @@ pub struct Preferences {
     #[serde(deserialize_with = "crate::i18n::deserialize_language")]
     pub language: Option<crate::i18n::Language>,
     pub theme: crate::themes::Theme,
+    pub auto_key_paint: bool,
     pub bindings: Vec<Binding>,
     pub actions: Vec<Binding>,
     pub dpi: f32,
@@ -119,7 +121,12 @@ impl Default for Preferences {
             spanish: false,
             language: None,
             theme: Default::default(),
-            bindings: defaults.into_iter().map(Binding::new).collect(),
+            auto_key_paint: false,
+            bindings: TOOLS
+                .iter()
+                .enumerate()
+                .map(|(i, _)| Binding::new(defaults.get(i).copied().unwrap_or("")))
+                .collect(),
             actions: crate::shortcuts::defaults(),
             dpi: 96.,
             ffmpeg: String::new(),
@@ -129,6 +136,7 @@ impl Default for Preferences {
 pub struct Studio {
     pub prefs: Preferences,
     pub preferences_open: bool,
+    pub credits_open: bool,
     preference_category: usize,
     pub stage_only: bool,
     pub onion_before: usize,
@@ -194,6 +202,7 @@ impl Studio {
         Self {
             prefs,
             preferences_open: false,
+            credits_open: false,
             preference_category: 0,
             stage_only: false,
             onion_before: 1,
@@ -426,6 +435,7 @@ impl Editor {
             || self.studio.preferences_open
             || self.studio.export.is_some()
             || self.view_options.draft.is_some()
+            || self.folder_groups.dialog.is_some()
         {
             return;
         }

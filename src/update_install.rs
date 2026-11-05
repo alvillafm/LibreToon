@@ -652,7 +652,7 @@ impl crate::Editor {
         if !self.updater.install_pending {
             return;
         }
-        if self.studio.export_job.is_some() || self.loader.busy() {
+        if self.studio.export_job.is_some() || self.loader.busy() || self.references.importing() {
             self.updater.install_error(
                 tr("Wait for the current import or export to finish before updating.").into(),
             );

@@ -251,3 +251,17 @@ Los destinos escalares de ajuste se preparan una vez al iniciar el gesto con la 
 
 ## Temporización de clips
 El recorte y el estirado calculan su previsualización únicamente a partir del bloque original del gesto. La fase y la velocidad usan f64; el muestreo de bucle y ping-pong es aritmético y no hornea fotogramas. El borrado confirmado de un recurso es una operación explícita global: conserva una sola entrada de historial, reutiliza las exposiciones filtradas por identidad reteniendo sus propietarios y mantiene los fotogramas de las capas no afectadas.
+
+## Carpetas como grupos
+Las transformaciones estáticas de carpeta se componen como matrices de similitud. La previsualización usa la vista por capa y conserva la geometría y la teselación originales; no crea claves ni transforma todos los fotogramas durante un gesto. Los límites temporales se calculan por identidad de capas con propietarios retenidos; cambiar solo el transform de una carpeta no vuelve a recorrer sus fotogramas. El gizmo conserva los límites iniciales durante el arrastre y añade una sola entrada de historial.
+
+Dividir y recolocar son operaciones explícitas limitadas a las capas descendientes. Se comparten las exposiciones originales cuando es posible y se retienen propietarios en las cachés de retiming. Una interpolación que cruza el corte se muestrea únicamente en su intervalo afectado para conservar el aspecto. Los rigs mantienen su reloj de origen por carpeta, sin duplicar esqueletos ni hornear la deformación. Los bloques conservan el límite de 10.000 fotogramas, 100 capas y 200 carpetas; las capas ajenas al grupo no se retiman.
+
+
+## RefTool y recorte vectorial
+Las imágenes de referencia usan bytes compartidos en el documento y una textura/RGBA por ventana activa. Se decodifican en un único trabajador, con presupuestos de bytes y píxeles; al cambiar de documento se descartan resultados obsoletos. Los FLA guardan los bytes fuera del JSON, en entradas binarias. Los movimientos de ventana no duplican imágenes y generan una sola entrada de historial por gesto.
+El recorte calcula intersecciones al cambiar de contorno objetivo o invalidarse el documento, conservando propietarios compartidos en la clave. El movimiento sobre ese contorno reutiliza los tramos calculados. Solo la confirmación cambia la geometría, mediante subdivisión Bézier y remapeo del perfil de anchura; no rasteriza ni hornea fotogramas.
+
+
+## Clave automática al pintar
+El conmutador A, desactivado inicialmente y guardado en preferencias, crea una clave en el fotograma actual al confirmar un trazo sobre una exposición. Conserva la pose existente con datos compartidos y usa la misma entrada de historial del trazo. No inserta fotogramas, no desplaza claves y no avanza el cabezal. Si ya existe una clave, la reutiliza. El estado desactivado conserva la edición habitual de la exposición completa.

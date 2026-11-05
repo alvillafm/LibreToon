@@ -65,6 +65,7 @@ impl Editor {
             next.extras.animation_library = child.extras.animation_library.clone();
             next.extras.library = child.extras.library.clone();
             next.extras.media.assets = child.extras.media.assets.clone();
+            next.extras.references = child.extras.references.clone();
             if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
                 s.layers = child.layers.clone();
                 s.rig = child.extras.rig.clone();
@@ -206,6 +207,7 @@ impl Editor {
             parent.extras.animation_library = self.doc.extras.animation_library.clone();
             parent.extras.library = self.doc.extras.library.clone();
             parent.extras.media.assets = self.doc.extras.media.assets.clone();
+            parent.extras.references = self.doc.extras.references.clone();
             if let Some(s) = parent.extras.symbols.iter_mut().find(|s| s.id == id) {
                 s.layers = self.doc.layers.clone();
                 s.rig = self.doc.extras.rig.clone();
@@ -1174,6 +1176,9 @@ mod tests {
             name: "Inside symbol".into(),
             parent: None,
             collapsed: false,
+            transform: Default::default(),
+            range: None,
+            source_shift: 0,
         });
         e.doc.layers[0].options.folder = Some(500);
         e.checkpoint();
@@ -1302,6 +1307,9 @@ mod tests {
             name: "A".into(),
             parent: Some(1),
             collapsed: false,
+            transform: Default::default(),
+            range: None,
+            source_shift: 0,
         });
         assert!(e.doc.validate().is_err());
         e.doc.extras.folders.clear();

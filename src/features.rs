@@ -146,6 +146,7 @@ pub struct MarkStyle {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
+    pub composition: crate::folder_groups::LayerGroup,
     pub animation_track: bool,
     pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
@@ -159,6 +160,7 @@ pub struct LayerOptions {
 impl Default for LayerOptions {
     fn default() -> Self {
         Self {
+            composition: Default::default(),
             animation_track: false,
             depth: Default::default(),
             mannequin: None,
@@ -178,7 +180,8 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    extras.animation_library.is_empty()
+    extras.references.is_empty()
+        && extras.animation_library.is_empty()
         && extras.animation_clips.is_empty()
         && !extras.imported
         && extras.import_warnings.is_empty()
@@ -199,6 +202,12 @@ pub struct Folder {
     pub name: String,
     pub parent: Option<u64>,
     pub collapsed: bool,
+    #[serde(default)]
+    pub transform: crate::folder_groups::Transform,
+    #[serde(default)]
+    pub range: Option<[usize; 2]>,
+    #[serde(default)]
+    pub source_shift: i32,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Symbol {
@@ -248,6 +257,7 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    pub references: SharedVec<crate::reftool::Reference>,
     pub animation_library: crate::animation_clips::Collection,
     pub animation_clips: SharedVec<crate::animation_clips::Asset>,
     pub imported: bool,
@@ -408,6 +418,7 @@ fn expand(
     doc: &Document,
     mark: &Mark,
     frame: usize,
+    rig_frame: usize,
     depth: usize,
     out: &mut Vec<Mark>,
     guides: bool,
@@ -425,7 +436,7 @@ fn expand(
             return;
         };
         let count = symbol.layers.first().map_or(1, |l| l.frames.len()).max(1);
-        let parent_frame = frame;
+        let parent_frame = rig_frame;
         let frame = mark
             .style
             .animation_clip
@@ -438,6 +449,7 @@ fn expand(
         sub.layers = symbol.layers.clone();
         sub.extras.cameras = Default::default();
         sub.extras.rig = symbol.rig.clone();
+        sub.extras.folders = symbol.folders.clone();
         let binding = doc
             .extras
             .rig
@@ -500,20 +512,34 @@ fn resolve_internal(
     guides: bool,
     clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
-    let poses = doc.extras.rig.poses(frame);
+    let mut pose_cache = std::collections::HashMap::new();
+    let mut previous_folder = crate::rig::IDENTITY;
     let mut output = vec![];
     let mut below = vec![];
     for (l, layer) in doc.layers.iter().enumerate() {
         if layer.options.mannequin.is_some() {
             continue;
         }
-        if !layer.visible {
+        if !layer.visible || !crate::folder_groups::layer_active(doc, layer, frame) {
             below.clear();
             continue;
         }
+        let folder = crate::folder_groups::layer_matrix(doc, layer);
+        let rig_frame = crate::folder_groups::rig_frame(doc, layer, frame);
+        let poses = pose_cache
+            .entry(rig_frame)
+            .or_insert_with(|| doc.extras.rig.poses(rig_frame));
         let mut current = vec![];
         let mask = if layer.options.clip {
-            Some(ink(&below))
+            let relative = crate::rig::multiply(
+                crate::folder_groups::inverse(folder).unwrap_or(crate::rig::IDENTITY),
+                previous_folder,
+            );
+            let converted: Vec<_> = below
+                .iter()
+                .map(|m| crate::folder_groups::mark(m, relative))
+                .collect();
+            Some(ink(&converted))
         } else {
             None
         };
@@ -526,11 +552,12 @@ fn resolve_internal(
                 doc,
                 mark,
                 frame,
+                rig_frame,
                 depth,
                 &mut expanded,
                 guides,
                 clock,
-                &poses,
+                poses,
             );
             for original in expanded {
                 let parts = mask
@@ -548,11 +575,20 @@ fn resolve_internal(
                         }
                     }
                     current.push(part.clone());
-                    output.push((l, m, part));
+                    output.push((
+                        l,
+                        m,
+                        if depth > 0 {
+                            crate::folder_groups::mark(&part, folder)
+                        } else {
+                            part
+                        },
+                    ));
                 }
             }
         }
         below = current;
+        previous_folder = folder;
     }
     output
 }
@@ -570,6 +606,12 @@ fn resolve_mode(
     clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
     let mut marks = resolve_internal(doc, frame, 0, guides, clock);
+    if camera || !guides {
+        for (l, _, mark) in &mut marks {
+            let matrix = crate::folder_groups::layer_matrix(doc, &doc.layers[*l]);
+            *mark = crate::folder_groups::mark(mark, matrix);
+        }
+    }
     if camera {
         if let Some(c) = doc
             .extras
@@ -594,11 +636,17 @@ fn resolve_mode(
 }
 pub fn baked(doc: &Document) -> Document {
     if doc.extras.rig.is_empty()
+        && doc
+            .extras
+            .folders
+            .iter()
+            .all(|f| f.transform == crate::folder_groups::Transform::default() && f.range.is_none())
         && doc.extras.scenes.is_empty()
         && doc.extras.symbols.is_empty()
         && doc.extras.cameras.is_empty()
         && doc.layers.iter().all(|l| {
-            l.options.tweens.is_empty()
+            l.options.composition == crate::folder_groups::LayerGroup::default()
+                && l.options.tweens.is_empty()
                 && l.options.tweens.is_empty()
                 && l.options.mannequin.is_none()
                 && l.options.opacity == 1.
@@ -660,6 +708,7 @@ pub fn baked(doc: &Document) -> Document {
     result
 }
 pub fn validate(doc: &Document) -> Result<(), String> {
+    crate::reftool::validate(&doc.extras.references)?;
     doc.extras.rig.validate()?;
     doc.extras.library.validate(&doc.extras.symbols)?;
     for symbol in &doc.extras.symbols {
@@ -765,11 +814,23 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
         }
         let mut ids = std::collections::HashSet::new();
         for f in folders {
+            if !f.transform.valid()
+                || f.range.is_some_and(|r| r[0] > r[1] || r[1] > 10000)
+                || f.source_shift.unsigned_abs() > 1000000
+            {
+                return Err("Invalid folder composition".into());
+            }
             if !ids.insert(f.id) {
                 return Err("Duplicate folder ID".into());
             }
         }
         for f in folders {
+            let m = crate::folder_groups::matrix(folders, Some(f.id));
+            if m.iter().any(|v| !v.is_finite() || v.abs() > 1e12)
+                || crate::folder_groups::inverse(m).is_none()
+            {
+                return Err("Invalid combined folder transform".into());
+            }
             let mut parent = f.parent;
             for depth in 0..=32 {
                 if let Some(id) = parent {
@@ -798,6 +859,9 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
     fn layers(layers: &[Layer], symbols: &[Symbol]) -> Result<(), String> {
         let mut checked = std::collections::HashSet::new();
         for layer in layers {
+            if !layer.options.composition.valid() {
+                return Err("Invalid layer composition".into());
+            }
             if layer.options.mannequin.as_ref().is_some_and(|m| !m.valid()) {
                 return Err("Invalid mannequin".into());
             }

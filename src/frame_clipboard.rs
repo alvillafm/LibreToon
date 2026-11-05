@@ -19,6 +19,7 @@ struct Package {
     frames: SharedVec<SharedVec<Mark>>,
     keys: Vec<bool>,
     first: usize,
+    source_matrix: crate::rig::Matrix,
 }
 impl State {
     pub fn has_frames(&self) -> bool {
@@ -227,7 +228,7 @@ impl Remap {
         }
     }
 }
-fn retime(mark: &mut Mark, source_start: usize, destination: usize, doc: &Document) {
+pub(crate) fn retime(mark: &mut Mark, source_start: usize, destination: usize, doc: &Document) {
     if let Some(instance) = &mut mark.style.instance {
         let elapsed = source_start.saturating_sub(instance.born);
         if instance.born < source_start {
@@ -318,11 +319,7 @@ impl Editor {
             }
             let layers: SharedVec<Layer> = self.doc.layers[start..=layer]
                 .iter()
-                .map(|l| {
-                    let mut l = l.clone();
-                    l.options.folder = None;
-                    l
-                })
+                .map(|l| crate::folder_groups::inherited_layer(&self.doc, l))
                 .collect();
             let allowed: HashSet<_> = layers
                 .iter()
@@ -359,7 +356,13 @@ impl Editor {
             (first..=last).map(|_| frame.clone()).collect()
         } else {
             (first..=last)
-                .map(|f| crate::animation::marks(selected, f))
+                .map(|f| {
+                    if crate::folder_groups::layer_active(&self.doc, selected, f) {
+                        crate::animation::marks(selected, f)
+                    } else {
+                        Default::default()
+                    }
+                })
                 .collect()
         };
         source.layers = vec![selected.clone()].into();
@@ -368,6 +371,11 @@ impl Editor {
             frames,
             keys,
             first,
+            source_matrix: if bound || selected.options.clip {
+                crate::rig::IDENTITY
+            } else {
+                crate::folder_groups::layer_matrix(&self.doc, selected)
+            },
         };
         // Release unrelated documents/media when the source tab is closed.
         let needs = match Remap::dependencies(&package) {
@@ -395,6 +403,7 @@ impl Editor {
             .retain(|a| needs.clips.contains_key(&a.id));
         package.source.extras.media.tracks = Default::default();
         package.source.extras.rig = Default::default();
+        package.source.extras.references = Default::default();
         package.source.extras.active_scene = 0;
         package.source.layers = vec![Layer {
             name: tr("Copied frames").into(),
@@ -455,6 +464,13 @@ impl Editor {
             layer.frames.resize(count, held);
             layer.options.keys.resize(count, false);
         }
+        let destination =
+            crate::folder_groups::layer_matrix(&candidate, &candidate.layers[self.layer]);
+        let relative = crate::rig::multiply(
+            crate::folder_groups::inverse(destination)
+                .ok_or("Invalid destination folder transform")?,
+            package.source_matrix,
+        );
         let target = &mut candidate.layers[self.layer];
         let intersecting: Vec<_> = target
             .options
@@ -485,7 +501,7 @@ impl Editor {
                     .map(|m| {
                         let mut m = m.clone();
                         retime(&mut m, package.first, start, &package.source);
-                        remap.mark(&m)
+                        crate::folder_groups::mark(&remap.mark(&m), relative)
                     })
                     .collect();
                 retimed.insert(frame.identity(), marks.clone());
@@ -565,6 +581,48 @@ mod tests {
                 crate::animation_clips::source_frame(&doc, copied, 30, 30 + frame)
             );
         }
+    }
+    #[test]
+    fn copying_between_transformed_folders_preserves_stage_position() {
+        let mut e = editor();
+        let f = crate::features::Folder {
+            id: 990,
+            name: "Source".into(),
+            parent: None,
+            collapsed: false,
+            transform: crate::folder_groups::Transform {
+                position: [40., 20.],
+                scale: 2.,
+                ..Default::default()
+            },
+            range: None,
+            source_shift: 0,
+        };
+        e.doc.extras.folders.push(f.clone());
+        e.doc.layers[0].options.folder = Some(990);
+        e.doc.layers[0].frames[0] = vec![ink([120, 90, 220, 255], 10.)].into();
+        e.feature.frame_selection = Some((0, 0, 0));
+        let original = crate::features::resolve_export(&e.doc, 0, false)[0]
+            .2
+            .clone();
+        assert!(e.copy_timeline_frames());
+        e.doc = crate::fresh_document();
+        let mut dest = f;
+        dest.id = 991;
+        dest.transform.position = [-80., 5.];
+        dest.transform.angle = 0.4;
+        dest.transform.scale = 0.5;
+        e.doc.extras.folders.push(dest);
+        e.doc.layers[0].options.folder = Some(991);
+        e.frame = 4;
+        assert!(e.paste_timeline_frames());
+        let output = crate::features::resolve_export(&e.doc, 4, false);
+        assert_eq!(output.len(), 1);
+        let a = crate::vector::control_bounds(&original);
+        let b = crate::vector::control_bounds(&output[0].2);
+        assert!(a.min.distance(b.min) < 0.01);
+        assert!(a.max.distance(b.max) < 0.01);
+        assert!(e.doc.validate().is_ok());
     }
     fn ink(color: [u8; 4], x: f32) -> Mark {
         Mark {

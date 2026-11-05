@@ -39,10 +39,12 @@ pub enum Tool {
     Polygon,
     Pan,
     Zoom,
+    Trim,
 }
 impl Tool {
     pub fn name(self) -> &'static str {
         crate::i18n::tr(match self {
+            Self::Trim => "Vector trim",
             Self::Bones => "Huesos",
             Self::Puppet => "Puppet",
             Self::Text => "Texto",
@@ -82,6 +84,7 @@ impl Tool {
     }
     pub fn icon(self) -> Icon {
         match self {
+            Self::Trim => Icon::Cut,
             Self::Bones => Icon::Bones,
             Self::Puppet => Icon::Puppet,
             Self::Text => Icon::Text,
@@ -407,7 +410,7 @@ fn safe_ratio(a: f32, b: f32) -> f32 {
         }
     }
 }
-fn paint_mark(
+pub(crate) fn paint_mark(
     p: &egui::Painter,
     m: &Mark,
     v: View,
@@ -444,6 +447,7 @@ impl Editor {
                     | Tool::Pan
                     | Tool::Zoom
                     | Tool::Eyedropper
+                    | Tool::Trim
             ) {
             Tool::Object
         } else {
@@ -513,7 +517,11 @@ impl Editor {
                 state = std::mem::take(&mut self.canvas);
             }
         }
-        let video_input = self.video_transform_input(ui, area, self.camera_view(stage_view));
+        let trim_input = self.vector_trim_input(ui, area, self.camera_view(stage_view));
+        let folder_input =
+            !trim_input && self.folder_canvas_input(ui, area, self.camera_view(stage_view));
+        let video_input =
+            !folder_input && self.video_transform_input(ui, area, self.camera_view(stage_view));
         if video_input {
             state.clear_selection();
         }
@@ -594,7 +602,11 @@ impl Editor {
             })
         });
         let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
-        let guide_handled = if self.document_settings.is_some() || self.view_options.draft.is_some()
+        let guide_handled = if trim_input
+            || folder_input
+            || self.folder_groups.dialog.is_some()
+            || self.document_settings.is_some()
+            || self.view_options.draft.is_some()
         {
             true
         } else if self.drawing.pen.eraser() {
@@ -1450,6 +1462,7 @@ impl Editor {
                             });
                             if !parts.is_empty() {
                                 self.checkpoint();
+                                self.prepare_paint_key(self.layer, self.frame);
                                 let parts = self.symmetry_marks(parts);
                                 if matches!(*tool, Tool::ShadeBrush | Tool::LightBrush) {
                                     self.tone_paint(parts, *tool == Tool::LightBrush);
@@ -1716,7 +1729,9 @@ impl Editor {
                 }
                 continue;
             }
-            self.paint_mannequin_layer(&painter, layer_view, l);
+            if crate::folder_groups::layer_active(&self.doc, &self.doc.layers[l], self.frame) {
+                self.paint_mannequin_layer(&painter, layer_view, l);
+            }
             while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
                 let (layer, m, mark) = marks.next().unwrap();
                 if self.paint_media_image(&painter, layer_view, &mark) {
@@ -1948,6 +1963,8 @@ impl Editor {
                 Stroke::new(1., crate::themes::accent()),
             ));
         }
+        self.paint_folder_gizmo(&painter, self.camera_view(stage_view));
+        self.paint_vector_trim(&painter, self.camera_view(stage_view));
         if over
             && !space
             && matches!(
@@ -3050,6 +3067,7 @@ impl Editor {
                     .find(|(_, m)| m.bucket && crate::vector::contains_fill(m, world))
                     .map(|(i, _)| i);
                 self.checkpoint();
+                self.prepare_paint_key(self.layer, self.frame);
                 state.clear_selection();
                 if let Some(index) = old.filter(|&i| {
                     let previous = &self.doc.layers[self.layer].frames[self.frame][i];

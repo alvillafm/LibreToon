@@ -393,6 +393,7 @@ impl Editor {
                 .map(|f| f.parent)
             {
                 self.checkpoint();
+                crate::folder_groups::preserve_ungroup(&mut self.doc, id);
                 for f in &mut self.doc.extras.folders {
                     if f.parent == Some(id) {
                         f.parent = parent;
@@ -410,6 +411,7 @@ impl Editor {
     }
     pub fn sequencer(&mut self, ui: &mut egui::Ui) {
         self.depth_window(ui.ctx());
+        self.folder_dialog(ui.ctx());
         let previous_frame = self.frame;
         egui::Panel::bottom("timeline")
             .default_size(245.)
@@ -637,7 +639,8 @@ impl Editor {
                                     name: format!("Folder {}", number),
                                     parent: self.feature.selected_folder,
                                     collapsed: false,
-                                });
+                                transform:Default::default(), range:None, source_shift:0,
+});
                                 self.feature.selected_folder = Some(id);
                                 self.recover();
                             }
@@ -662,7 +665,7 @@ impl Editor {
                     );
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.;
-                        ui.set_width(242.);
+                        ui.set_width(275.);
                         ui.label(
                             egui::RichText::new(tr("FOTOGRAMAS"))
                                 .small()
@@ -670,6 +673,10 @@ impl Editor {
                         );
                         ui.separator();
                         ui.horizontal(|ui| {
+                            if button(ui, Icon::AutoKey, "", "Auto keyframe when painting", self.studio.prefs.auto_key_paint, true).clicked() {
+                                self.studio.prefs.auto_key_paint = !self.studio.prefs.auto_key_paint;
+                                if let Err(error) = self.studio.save() { self.status = error; }
+                            }
                             for (action, icon, tip) in [
                                 (0, Icon::KeyAdd, "Fotograma clave"),
                                 (1, Icon::BlankKeyAdd, "Fotograma clave en blanco"),
@@ -765,7 +772,7 @@ impl Editor {
                         let row_h = 28.;
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
-                                label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).max(self.feature.exposure_drag.map_or(count,|d|d.target)).min(10000) as f32 * cell,
+                                label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).max(self.feature.exposure_drag.map_or(count,|d|d.target)).max(self.folder_groups.timeline_end()).min(10000) as f32 * cell,
                                 24. + (all.len()+1) as f32 * row_h,
                             ),
                             Sense::hover(),
@@ -849,7 +856,7 @@ impl Editor {
                                     painter.rect_filled(
                                         label,
                                         0.,
-                                        if self.feature.selected_folder == Some(folder.id) {
+                                        if self.folder_groups.selected == Some(folder.id) {
                                             crate::themes::color(Color32::from_rgb(50, 70, 85))
                                         } else {
                                             crate::themes::color(Color32::from_gray(39))
@@ -877,7 +884,7 @@ impl Editor {
                                         crate::themes::muted(),
                                     );
                                     if response.clicked() {
-                                        self.feature.selected_folder = Some(folder.id);
+                                        self.select_folder_group(folder.id);
                                     }
                                     if response.double_clicked() {
                                         self.doc.extras.folders[index].collapsed =
@@ -890,6 +897,7 @@ impl Editor {
                                             self.doc.extras.folders[index].name = name;
                                             self.recover();
                                         }
+                                        self.folder_context(ui,folder.id);
                                     });
                                     if response.drag_started_by(egui::PointerButton::Primary) {
                                         self.feature.row_drag = Some((true, index));
@@ -901,6 +909,8 @@ impl Editor {
                                     ) {
                                         target = Some((true, index));
                                     }
+                                    ui.set_clip_rect(grid_clip);
+                                    self.folder_track(ui,index,Rect::from_min_max(Pos2::new(grid_clip.left(),y),Pos2::new(grid_clip.right(),y+row_h)),r.left()+label_w,cell);
                                 }
                                 Row::Media(index) => {
                                     let track_at = |pos: Pos2| {
@@ -1034,6 +1044,7 @@ impl Editor {
                                             Sense::click_and_drag(),
                                         );
                                         if response.clicked() {
+                                            self.folder_groups.selected=None;
                                             self.layer = l;
                                             self.feature.selected_folder =
                                                 self.doc.layers[l].options.folder;
@@ -1739,6 +1750,7 @@ impl Editor {
                 ui.data_mut(|data| data.insert_temp(viewport_id, viewport));
                 if delete_rigging {self.delete_rigging_track();}
                 self.finish_exposure_resize(ui.ctx());
+                self.finish_folder_ui(ui.ctx());
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
                     if let Some(drag) = self.feature.frame_drag.take() {

@@ -23,6 +23,7 @@ mod features;
 mod ffmpeg_setup;
 mod fla;
 mod fla_zip;
+mod folder_groups;
 mod frame_clipboard;
 mod i18n;
 mod inspector;
@@ -35,6 +36,7 @@ mod media;
 mod ordering;
 mod paint;
 mod recovery;
+mod reftool;
 mod rig;
 #[cfg(test)]
 mod rig_tests;
@@ -55,6 +57,7 @@ mod typography;
 mod update_install;
 mod updater;
 mod vector;
+mod vector_trim;
 mod view_options;
 mod visual_controls;
 mod width;
@@ -69,6 +72,8 @@ use std::{
 
 struct Editor {
     updater: updater::Updater,
+    references: reftool::State,
+    vector_trim: vector_trim::State,
     media: media::MediaEditor,
     loader: loading::Loader,
     import_report_open: bool,
@@ -77,6 +82,7 @@ struct Editor {
     clips: animation_clips::Manager,
     frame_clipboard: frame_clipboard::State,
     view_options: view_options::State,
+    folder_groups: folder_groups::State,
     hub: documents::Hub,
     drawing: drawing::Drawing,
     feature: features::FeatureState,
@@ -158,6 +164,8 @@ impl Editor {
         .into();
         let mut editor = Self {
             updater: Default::default(),
+            references: Default::default(),
+            vector_trim: Default::default(),
             media: Default::default(),
             loader: Default::default(),
             import_report_open: false,
@@ -166,6 +174,7 @@ impl Editor {
             clips: Default::default(),
             frame_clipboard: Default::default(),
             view_options: Default::default(),
+            folder_groups: Default::default(),
             hub,
             drawing: Default::default(),
             feature: Default::default(),
@@ -236,6 +245,13 @@ impl Editor {
             .submit(self.recovery.clone(), self.project_document());
     }
     fn save_project(&mut self, save_as: bool) {
+        if self.references.importing() {
+            self.status = crate::i18n::tr(
+                "Wait for the reference image to finish loading before saving or closing.",
+            )
+            .into();
+            return;
+        }
         self.finish_pending_pen();
         let target = if save_as || self.path.is_none() || self.doc.extras.imported {
             rfd::FileDialog::new()
@@ -273,6 +289,8 @@ impl Editor {
     }
     fn history(&mut self, redo: bool) {
         self.feature.exposure_drag = None;
+        self.folder_groups.clear();
+        self.vector_trim.clear();
         self.clips.reset_document();
         self.rigging.cancel_gesture();
         let entry = if redo {
@@ -356,15 +374,23 @@ impl eframe::App for Editor {
             self.recover();
         }
         if ctx.input(|i| i.viewport().close_requested()) {
-            self.finish_pending_pen();
-            if self.hub.active.is_some() {
-                self.recover();
-            }
-            self.persist_documents();
-            if !self.hub.allow_quit && self.hub.tabs.iter().any(|t| t.record.dirty) {
+            if self.references.importing() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.hub.quitting = true;
-                self.hub.closing = self.hub.tabs.iter().position(|t| t.record.dirty);
+                self.status = crate::i18n::tr(
+                    "Wait for the reference image to finish loading before saving or closing.",
+                )
+                .into();
+            } else {
+                self.finish_pending_pen();
+                if self.hub.active.is_some() {
+                    self.recover();
+                }
+                self.persist_documents();
+                if !self.hub.allow_quit && self.hub.tabs.iter().any(|t| t.record.dirty) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.hub.quitting = true;
+                    self.hub.closing = self.hub.tabs.iter().position(|t| t.record.dirty);
+                }
             }
         }
         if self.media_audio_ready(&ctx) {
@@ -410,6 +436,35 @@ impl eframe::App for Editor {
                 )
                 .show(ui, |ui| {
                     self.canvas_ui(ui);
+                });
+        }
+        self.reference_windows(&ctx);
+        if self.studio.credits_open {
+            egui::Window::new(crate::i18n::tr("Credits"))
+                .id(egui::Id::unique("libretoon-credits"))
+                .open(&mut self.studio.credits_open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.)
+                .default_pos(ctx.content_rect().center() - egui::vec2(160., 120.))
+                .show(&ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        crate::design::button(
+                            ui,
+                            crate::design::Icon::Info,
+                            "",
+                            "Credits",
+                            false,
+                            false,
+                        );
+                        ui.heading(format!("LibreToon {}", env!("CARGO_PKG_VERSION")));
+                    });
+                    ui.separator();
+                    crate::design::category(ui, "Testers:");
+                    for name in ["'", "BarelyDead", "Maheshmv666", "Boctok-1 scary"] {
+                        ui.label(name);
+                    }
+                    ui.add_space(8.);
                 });
         }
         if ctx

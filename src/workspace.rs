@@ -234,11 +234,22 @@ impl Editor {
                         }
                     });
                     ui.menu_button(crate::i18n::tr("Vista"), |ui| self.view_menu(ui));
+                    ui.menu_button(crate::i18n::tr("Herramientas"), |ui| {
+                        if button(ui, Icon::Reference, "RefTool", "RefTool", false, true).clicked()
+                        {
+                            self.new_reference_window();
+                            ui.close();
+                        }
+                    });
                     ui.menu_button(crate::i18n::tr("Ayuda"), |ui| {
                         if button(ui, Icon::Rotate, "Buscar actualizaciones", "", false, true)
                             .clicked()
                         {
                             self.updater.check(ui.ctx(), true);
+                            ui.close();
+                        }
+                        if button(ui, Icon::Info, "Credits", "Credits", false, true).clicked() {
+                            self.studio.credits_open = true;
                             ui.close();
                         }
                         crate::design::category(ui, "VERSIÓN ACTUAL:");
@@ -318,7 +329,10 @@ impl Editor {
                         ),
                         ("EDICIÓN", vec![(Transform, Mirror)]),
                         ("PINTURA", vec![(Brush, Eraser), (Bucket, Eyedropper)]),
-                        ("VECTORIAL", vec![(VectorBrush, Pen), (Node, Width)]),
+                        (
+                            "VECTORIAL",
+                            vec![(VectorBrush, Pen), (Node, Width), (Trim, Trim)],
+                        ),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),
                         ("TEXTO", vec![(Text, Text)]),
                         (

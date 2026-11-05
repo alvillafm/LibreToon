@@ -34,6 +34,9 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
     for asset in &mut metadata.extras.media.assets {
         asset.data = Default::default();
     }
+    for reference in &mut metadata.extras.references {
+        reference.data = Default::default();
+    }
     let native = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
     if xml.len() > 64 * 1024 * 1024 || native.len() > 64 * 1024 * 1024 {
         return Err("Proyecto demasiado grande para el contenedor FLA actual".into());
@@ -55,6 +58,19 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
             .iter()
             .zip(doc.extras.media.assets.iter())
             .map(|(name, asset)| (name.as_str(), asset.data.as_slice())),
+    );
+    let reference_names: Vec<_> = doc
+        .extras
+        .references
+        .iter()
+        .filter(|r| !r.data.is_empty())
+        .map(|r| format!("LIBRETOON/references/{}.image", r.id))
+        .collect();
+    entries.extend(
+        reference_names
+            .iter()
+            .zip(doc.extras.references.iter().filter(|r| !r.data.is_empty()))
+            .map(|(name, r)| (name.as_str(), r.data.as_slice())),
     );
     Ok(crate::fla_zip::pack_slices(&entries))
 }
@@ -377,6 +393,19 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                         asset.data = archive
                             .entry(media_entry(asset.id).as_bytes())?
                             .ok_or("Missing embedded media data")?
+                            .into();
+                    }
+                }
+            }
+            if !doc.extras.references.is_empty() {
+                let archive = crate::fla_zip::Archive::new(bytes)?;
+                for reference in &mut doc.extras.references {
+                    if reference.data.is_empty() && reference.dimensions != [0, 0] {
+                        reference.data = archive
+                            .entry(
+                                format!("LIBRETOON/references/{}.image", reference.id).as_bytes(),
+                            )?
+                            .ok_or("Missing reference image")?
                             .into();
                     }
                 }

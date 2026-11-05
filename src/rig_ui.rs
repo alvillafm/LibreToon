@@ -119,13 +119,11 @@ impl Editor {
 
     pub fn rig_targets(&self) -> Vec<Target> {
         let mut out = vec![];
-        for (l, layer) in self
-            .doc
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked)
-        {
+        for (l, layer) in self.doc.layers.iter().enumerate().filter(|(_, l)| {
+            l.visible
+                && !l.options.locked
+                && crate::folder_groups::layer_active(&self.doc, l, self.frame)
+        }) {
             for (m, mark) in crate::animation::marks(layer, self.frame)
                 .iter()
                 .enumerate()
@@ -160,7 +158,7 @@ impl Editor {
             }
             let source = crate::animation::marks(&self.doc.layers[*l], self.frame);
             if source.get(*m).is_some_and(|m| m.style.instance.is_some())
-                && (vector::contains_fill(mark, p) || crate::canvas::stroke_hit(mark, p, tolerance))
+                && self.depth_hit(*l, mark, p, tolerance)
             {
                 Some((*l, *m))
             } else {
@@ -245,6 +243,7 @@ impl Editor {
         self.recover();
     }
     pub fn add_puppet_pin(&mut self, l: usize, m: usize, world: Pos2) {
+        let rig_frame = self.group_rig_frame();
         self.checkpoint();
         let Some(target) = self.rig_bind(l, m) else {
             return;
@@ -263,8 +262,8 @@ impl Editor {
         if binding.pins.len() >= 32 {
             return;
         }
-        let poses = self.doc.extras.rig.poses(self.frame);
-        let deformer = Deformer::new(binding, &poses, self.frame);
+        let poses = self.doc.extras.rig.poses(rig_frame);
+        let deformer = Deformer::new(binding, &poses, rig_frame);
         let current = crate::animation::marks(&self.doc.layers[l], self.frame)[m]
             .style
             .instance
@@ -289,11 +288,11 @@ impl Editor {
             position: vector::xy(rest),
             curve: Default::default(),
         }];
-        if self.frame == 0 {
+        if rig_frame == 0 {
             keys[0].position = vector::xy(target_position);
         } else {
             keys.push(PinKey {
-                frame: self.frame,
+                frame: rig_frame,
                 position: vector::xy(target_position),
                 curve: Default::default(),
             });
@@ -309,6 +308,7 @@ impl Editor {
         self.recover();
     }
     pub fn paint_rig_weights(&mut self, p: Pos2, remove: bool, smooth: bool) {
+        let rig_frame = self.group_rig_frame();
         let Some(bone) = self
             .rigging
             .bone
@@ -317,7 +317,7 @@ impl Editor {
         else {
             return;
         };
-        let poses = self.doc.extras.rig.poses(self.frame);
+        let poses = self.doc.extras.rig.poses(rig_frame);
         let available: std::collections::HashSet<_> =
             self.rig_targets().iter().map(|t| t.track).collect();
         let indices: Vec<_> = self
@@ -332,7 +332,7 @@ impl Editor {
             .collect();
         for i in indices {
             let binding = &self.doc.extras.rig.bindings[i];
-            let deformer = Deformer::new(binding, &poses, self.frame);
+            let deformer = Deformer::new(binding, &poses, rig_frame);
             let delta = self.binding_delta(binding);
             let cells = binding.cells.clone();
             let rect = binding.rect();
@@ -375,6 +375,7 @@ impl Editor {
         }
     }
     pub fn rig_input(&mut self, ui: &egui::Ui, area: Rect, view: View) -> bool {
+        let rig_frame = self.group_rig_frame();
         if !matches!(self.tool, Tool::Bones | Tool::Puppet) || self.playing {
             return false;
         }
@@ -402,7 +403,7 @@ impl Editor {
             && area.contains(screen)
             && ui.ctx().layer_id_at(screen) == Some(ui.layer_id())
         {
-            let poses = self.doc.extras.rig.poses(self.frame);
+            let poses = self.doc.extras.rig.poses(rig_frame);
             if self.tool == Tool::Bones {
                 if self.rigging.paint && self.rigging.bone.is_some() {
                     self.checkpoint();
@@ -456,7 +457,7 @@ impl Editor {
                                 .iter()
                                 .find(|bone| bone.id == id)
                                 .unwrap();
-                            let key = rig::bone_value(bone, self.frame);
+                            let key = rig::bone_value(bone, rig_frame);
                             Some(Gesture::MoveBone {
                                 id,
                                 grab: world,
@@ -485,7 +486,7 @@ impl Editor {
                     for p in &b.pins {
                         let current = rig::point(
                             self.binding_delta(b),
-                            rig::skin_point(b, &poses, rig::pin_value(p, self.frame)),
+                            rig::skin_point(b, &poses, rig::pin_value(p, rig_frame)),
                         );
                         if view.screen(current).distance(screen) < 12. {
                             found = Some((b.target, p.id));
@@ -525,15 +526,15 @@ impl Editor {
                         return true;
                     };
                     if bone.ik {
-                        self.doc.extras.rig.solve_ik(id, world, self.frame);
+                        self.doc.extras.rig.solve_ik(id, world, rig_frame);
                     } else {
-                        let poses = self.doc.extras.rig.poses(self.frame);
+                        let poses = self.doc.extras.rig.poses(rig_frame);
                         if let Some(p) = poses.get(&id) {
-                            let mut key = rig::bone_value(&bone, self.frame);
+                            let mut key = rig::bone_value(&bone, rig_frame);
                             let d = world - p.start;
                             if d.length_sq() > 1e-6 {
                                 key.angle += crate::animation::shortest(d.angle() - p.angle);
-                                key.frame = self.frame;
+                                key.frame = rig_frame;
                                 self.doc.extras.rig.set_bone_key(id, key);
                             }
                         }
@@ -547,16 +548,16 @@ impl Editor {
                 } => {
                     if let Some(bone) = self.doc.extras.rig.bones.iter().find(|bone| bone.id == id)
                     {
-                        let mut key = rig::bone_value(bone, self.frame);
+                        let mut key = rig::bone_value(bone, rig_frame);
                         let moved =
                             translation + crate::canvas::rotate(world - grab, -parent_angle);
                         key.translation = vector::xy(moved.to_pos2());
-                        key.frame = self.frame;
+                        key.frame = rig_frame;
                         self.doc.extras.rig.set_bone_key(id, key);
                     }
                 }
                 Gesture::Pin { target, id } => {
-                    let poses = self.doc.extras.rig.poses(self.frame);
+                    let poses = self.doc.extras.rig.poses(rig_frame);
                     if let Some(b) = self
                         .doc
                         .extras
@@ -565,7 +566,7 @@ impl Editor {
                         .iter()
                         .find(|b| b.target == target)
                     {
-                        let deform = Deformer::new(b, &poses, self.frame);
+                        let deform = Deformer::new(b, &poses, rig_frame);
                         let local = rig::point(
                             rig::inverse(self.binding_delta(b)).unwrap_or(rig::IDENTITY),
                             world,
@@ -575,14 +576,14 @@ impl Editor {
                             .pins
                             .iter()
                             .find(|p| p.id == id)
-                            .and_then(|p| p.keys.iter().rev().find(|k| k.frame <= self.frame))
+                            .and_then(|p| p.keys.iter().rev().find(|k| k.frame <= rig_frame))
                             .map(|k| k.curve.clone())
                             .unwrap_or_default();
                         self.doc.extras.rig.set_pin_key(
                             target,
                             id,
                             PinKey {
-                                frame: self.frame,
+                                frame: rig_frame,
                                 position,
                                 curve,
                             },
@@ -613,7 +614,7 @@ impl Editor {
                                 self.doc
                                     .extras
                                     .rig
-                                    .poses(self.frame)
+                                    .poses(rig_frame)
                                     .get(&id)
                                     .and_then(|p| rig::inverse(p.matrix))
                             })
@@ -630,10 +631,11 @@ impl Editor {
         true
     }
     pub fn rig_overlays(&self, p: &egui::Painter, view: View) {
+        let rig_frame = self.group_rig_frame();
         if self.playing || !matches!(self.tool, Tool::Bones | Tool::Puppet) {
             return;
         }
-        let poses = self.doc.extras.rig.poses(self.frame);
+        let poses = self.doc.extras.rig.poses(rig_frame);
         if self.rigging.paint {
             if let Some(id) = self.rigging.bone {
                 self.weight_overlay(p, view, id, &poses);
@@ -714,7 +716,7 @@ impl Editor {
                 for pin in &b.pins {
                     let world = rig::point(
                         self.binding_delta(b),
-                        rig::skin_point(b, &poses, rig::pin_value(pin, self.frame)),
+                        rig::skin_point(b, &poses, rig::pin_value(pin, rig_frame)),
                     );
                     let q = view.screen(world);
                     let c = if self.rigging.target == Some(b.target)
@@ -738,6 +740,7 @@ impl Editor {
         bone: u64,
         poses: &std::collections::HashMap<u64, rig::Pose>,
     ) {
+        let rig_frame = self.group_rig_frame();
         let Some(bone) = self.doc.extras.rig.bones.iter().find(|b| b.id == bone) else {
             return;
         };
@@ -775,7 +778,7 @@ impl Editor {
                 self.frame,
                 self.animation.clock,
             );
-            let deformer = Deformer::new(binding, poses, self.frame);
+            let deformer = Deformer::new(binding, poses, rig_frame);
             let delta = rig::multiply(t.matrix, rig::inverse(binding.matrix).unwrap());
             for (_, _, mark) in crate::features::resolve(&doc, f, false) {
                 let mark = crate::features::affine(&mark, binding.matrix);
@@ -803,6 +806,7 @@ impl Editor {
         }
     }
     pub fn rig_properties(&mut self, ui: &mut egui::Ui) {
+        let rig_frame = self.group_rig_frame();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         ui.spacing_mut().slider_width = 105.;
         ui.spacing_mut().text_edit_width = ui.available_width().min(250.);
@@ -988,7 +992,7 @@ impl Editor {
             self.recover();
         }
         design::category(ui, "ANIMACIÓN");
-        let mut value = rig::bone_value(&bone, self.frame);
+        let mut value = rig::bone_value(&bone, rig_frame);
         let mut angle = value.angle.to_degrees();
         let mut pose_changed = ui
             .add(
@@ -1015,7 +1019,7 @@ impl Editor {
         });
         if pose_changed {
             self.checkpoint();
-            value.frame = self.frame;
+            value.frame = rig_frame;
             self.doc.extras.rig.set_bone_key(bone.id, value);
             self.recover();
         }
@@ -1023,7 +1027,7 @@ impl Editor {
         let current = self.doc.extras.rig.bones[index]
             .keys
             .iter()
-            .rposition(|k| k.frame <= self.frame)
+            .rposition(|k| k.frame <= rig_frame)
             .unwrap_or(0);
         if let Some(key) = self.doc.extras.rig.bones[index].keys.get(current) {
             let mut curve = key.curve.clone();
@@ -1068,6 +1072,7 @@ impl Editor {
         }
     }
     fn puppet_properties(&mut self, ui: &mut egui::Ui) {
+        let rig_frame = self.group_rig_frame();
         design::category(ui, "PUPPET VECTORIAL");
         ui.small(tr(
             "Clic en un símbolo añade un pin. Arrastra sus pines para deformar sin rasterizar.",
@@ -1131,7 +1136,7 @@ impl Editor {
             self.recover();
         }
         design::category(ui, "POSICIÓN DEL PIN");
-        let position = rig::pin_value(&pin, self.frame);
+        let position = rig::pin_value(&pin, rig_frame);
         let mut values = [position.x, position.y];
         let mut changed = false;
         ui.horizontal(|ui| {
@@ -1151,7 +1156,7 @@ impl Editor {
                 target,
                 pin.id,
                 PinKey {
-                    frame: self.frame,
+                    frame: rig_frame,
                     position: values,
                     curve: Default::default(),
                 },
@@ -1163,7 +1168,7 @@ impl Editor {
         let current = pin
             .keys
             .iter()
-            .rposition(|k| k.frame <= self.frame)
+            .rposition(|k| k.frame <= rig_frame)
             .unwrap_or(0);
         if let Some(key) = pin.keys.get(current) {
             let mut curve = key.curve.clone();
@@ -1207,6 +1212,7 @@ impl Editor {
         }
     }
     fn rig_animation_buttons(&mut self, ui: &mut egui::Ui) {
+        let rig_frame = self.group_rig_frame();
         ui.horizontal(|ui| {
             if design::button(
                 ui,
@@ -1226,7 +1232,7 @@ impl Editor {
                 "",
                 "Eliminar clave actual",
                 false,
-                self.frame > 0,
+                rig_frame > 0,
             )
             .clicked()
             {
@@ -1238,6 +1244,7 @@ impl Editor {
         ));
     }
     pub fn rig_key_action(&mut self, action: usize) {
+        let rig_frame = self.group_rig_frame();
         if action == 2 || action == 3 {
             let count = self.doc.layers[0].frames.len();
             let next = if action == 2 {
@@ -1251,16 +1258,16 @@ impl Editor {
         self.checkpoint();
         if self.tool == Tool::Bones {
             if let Some(id) = self.rigging.bone {
-                if action == 4 && self.frame > 0 {
+                if action == 4 && rig_frame > 0 {
                     if let Some(b) = self.doc.extras.rig.bones.iter_mut().find(|b| b.id == id) {
-                        b.keys.retain(|k| k.frame != self.frame);
+                        b.keys.retain(|k| k.frame != rig_frame);
                     }
                 } else if let Some(b) = self.doc.extras.rig.bones.iter().find(|b| b.id == id) {
-                    let mut key = rig::bone_value(b, self.frame);
+                    let mut key = rig::bone_value(b, rig_frame);
                     if action == 1 {
                         key = BoneKey::default();
                     }
-                    key.frame = self.frame;
+                    key.frame = rig_frame;
                     self.doc.extras.rig.set_bone_key(id, key);
                 }
             }
@@ -1275,7 +1282,7 @@ impl Editor {
                 .and_then(|b| b.pins.iter().find(|p| p.id == id))
                 .cloned();
             if let Some(pin) = pin {
-                if action == 4 && self.frame > 0 {
+                if action == 4 && rig_frame > 0 {
                     if let Some(p) = self
                         .doc
                         .extras
@@ -1285,19 +1292,19 @@ impl Editor {
                         .find(|b| b.target == target)
                         .and_then(|b| b.pins.iter_mut().find(|p| p.id == id))
                     {
-                        p.keys.retain(|k| k.frame != self.frame);
+                        p.keys.retain(|k| k.frame != rig_frame);
                     }
                 } else {
                     let position = if action == 1 {
                         pin.rest
                     } else {
-                        vector::xy(rig::pin_value(&pin, self.frame))
+                        vector::xy(rig::pin_value(&pin, rig_frame))
                     };
                     self.doc.extras.rig.set_pin_key(
                         target,
                         id,
                         PinKey {
-                            frame: self.frame,
+                            frame: rig_frame,
                             position,
                             curve: Default::default(),
                         },

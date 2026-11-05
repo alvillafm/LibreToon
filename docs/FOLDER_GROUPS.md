@@ -1,0 +1,9 @@
+# Timeline folders
+
+A timeline folder also acts as a static composition parent. Existing folders and older projects keep an identity transform. Select its timeline label or block to show the canvas bounding box: drag inside to move, drag the lower-right handle for uniform scale, or drag the rotation handle above the box. No transform keyframes are created. Expand the folder and select a child layer to edit its artwork.
+
+Right-click the label or block and choose **Transform folder…** for numeric position, scale, rotation and pivot controls. **Center pivot** preserves the current placement. Nested folder transforms compose. Ungrouping preserves the stage appearance rather than dropping the removed folder’s transform.
+
+**Split folder at playhead** creates two sibling folders containing the left and right portions of their editable layers. Nested folders stay nested; each part has its own static transform. Drag the folder block horizontally to move all its child frames together. The destination preview shows the complete interval. Nested blocks stay within the explicit time range of their parent; move the parent folder to move the whole segment. Content outside the moved folder is preserved. The drawing-layer clock moves with the content; rigs retain their source clock. Interpolations crossing the split are sampled as editable frames to preserve their exact appearance; contained tweens remain tweens. Normal instance and animation-clip timing is retimed with the group.
+
+Empty folders remain organizational containers. Unlock child layers before a split or time move. These operations respect the document limits of 100 layers, 200 folders and 10,000 frames and can be undone. Video and audio tracks currently have no timeline-folder membership and remain separate tracks. Native save/recovery and LibreToon FLA metadata retain the folder data; the interoperable XFL preview bakes the resulting visible animation.

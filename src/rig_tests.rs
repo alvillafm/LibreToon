@@ -827,3 +827,48 @@ fn library_symbol_drop_inserts_at_the_canvas_pointer() {
     assert_ne!(&instance.matrix[4..], &[0., 0.]);
     assert!(e.assets.drag.is_none());
 }
+
+#[test]
+fn folder_split_relocation_preserves_rigged_poses_and_source_key_editing() {
+    let mut e = setup();
+    e.doc.extras.folders.push(crate::features::Folder {
+        id: 555,
+        name: "Rig folder".into(),
+        parent: None,
+        collapsed: false,
+        transform: Default::default(),
+        range: None,
+        source_shift: 0,
+    });
+    e.doc.layers[0].options.folder = Some(555);
+    e.add_bone(Pos2::new(0., 50.), Pos2::new(100., 50.), None);
+    let bone = e.rigging.bone.unwrap();
+    e.doc.extras.rig.set_bone_key(
+        bone,
+        BoneKey {
+            frame: 20,
+            angle: 0.9,
+            translation: [30., 10.],
+            ..Default::default()
+        },
+    );
+    let original = e.doc.clone();
+    let right = e.split_folder_group(555, 12).unwrap();
+    e.move_folder_group(right, 30).unwrap();
+    for f in 30..42 {
+        let before = crate::features::resolve_export(&original, f - 18, false);
+        let after = crate::features::resolve_export(&e.doc, f, false);
+        assert_eq!(before.len(), after.len());
+        for (a, b) in before.iter().zip(&after) {
+            let a = vector::control_bounds(&a.2);
+            let b = vector::control_bounds(&b.2);
+            near(a.min, b.min);
+            near(a.max, b.max);
+        }
+    }
+    e.frame = 35;
+    e.tool = Tool::Bones;
+    e.rig_key_action(0);
+    assert!(e.doc.extras.rig.bones[0].keys.iter().any(|k| k.frame == 17));
+    assert!(e.doc.validate().is_ok());
+}

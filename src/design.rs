@@ -9,10 +9,12 @@ pub enum Icon {
     LayerRemove,
     FolderRemove,
     KeyAdd,
+    AutoKey,
     BlankKeyAdd,
     KeyRemove,
     FrameExtend,
     FrameShorten,
+    Reference,
     PingPong,
     Grid,
     Snap,
@@ -198,6 +200,11 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             ]);
             line((7., 12.), (13., 12.));
         }
+        Icon::AutoKey => {
+            p.circle_filled(pt(6., 8.), 4.5 * scale, c);
+            path(&[(11., 18.), (15., 7.), (19., 18.)]);
+            line((12.5, 14.), (17.5, 14.));
+        }
         Icon::KeyAdd | Icon::BlankKeyAdd | Icon::KeyRemove => {
             if matches!(icon, Icon::BlankKeyAdd) {
                 p.circle_stroke(pt(7., 9.), 4.5 * scale, s);
@@ -218,6 +225,11 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             } else {
                 path(&[(18., 6.), (14., 10.), (18., 14.)]);
             }
+        }
+        Icon::Reference => {
+            rect(2., 2., 16., 16.);
+            circle(6., 6., 1.5);
+            path(&[(3., 16.), (8., 10.), (11., 13.), (14., 9.), (18., 15.)]);
         }
         Icon::PingPong => {
             line((2., 6.), (18., 6.));

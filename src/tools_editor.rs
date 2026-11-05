@@ -375,6 +375,9 @@ impl Editor {
         if self.tool == tool {
             return;
         }
+        if !matches!(tool, Tool::Select | Tool::Object | Tool::Transform) {
+            self.folder_groups.selected = None;
+        }
         self.finish_rig_gesture();
         if self.drawing.reference_gizmo.take().is_some() {
             self.recover();
@@ -499,11 +502,24 @@ impl Editor {
         self.recover();
         (id.0, id.1 + closest)
     }
+    pub(crate) fn prepare_paint_key(&mut self, layer: usize, frame: usize) {
+        if self.studio.prefs.auto_key_paint && !self.doc.layers[layer].key(frame) {
+            let pose = crate::animation::marks(&self.doc.layers[layer], frame);
+            let data = &mut self.doc.layers[layer];
+            data.init_keys();
+            data.frames[frame] = pose;
+            data.options.keys[frame] = true;
+        }
+    }
     pub fn commit_paint(&mut self, layer: usize, frame: usize, marks: Vec<Mark>) {
         if self.doc.layers[layer].options.mannequin.is_some() {
             return;
         }
+        if marks.is_empty() {
+            return;
+        }
         self.materialize_motion(&[(layer, 0)]);
+        self.prepare_paint_key(layer, frame);
         let composed = crate::editing::compose(&self.doc.layers[layer].frames[frame], marks);
         self.doc.layers[layer].frames[frame] = composed.into();
     }
@@ -587,5 +603,97 @@ impl Editor {
             }
             _ => {}
         }
+    }
+}
+#[cfg(test)]
+mod auto_key_tests {
+    use super::*;
+    fn fixture(enabled: bool) -> Editor {
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        e.doc = crate::fresh_document();
+        e.recovery = std::env::temp_dir().join(format!(
+            "auto-key-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let original: crate::shared::SharedVec<crate::Mark> = vec![crate::Mark {
+            points: vec![[10., 10.], [50., 50.]].into(),
+            ..Default::default()
+        }]
+        .into();
+        let layer = &mut e.doc.layers[0];
+        layer.init_keys();
+        for f in 0..12 {
+            layer.frames[f] = original.clone();
+        }
+        layer.options.keys[12] = true;
+        e.frame = 5;
+        e.studio.prefs.auto_key_paint = enabled;
+        e
+    }
+    #[test]
+    fn automatic_paint_key_preserves_previous_exposure_and_next_key_and_undo() {
+        let mut e = fixture(true);
+        let before = serde_json::to_vec(&e.doc).unwrap();
+        let original = e.doc.layers[0].frames[0].clone();
+        e.checkpoint();
+        e.commit_paint(
+            0,
+            5,
+            vec![crate::Mark {
+                points: vec![[100., 10.], [110., 20.]].into(),
+                ..Default::default()
+            }],
+        );
+        e.recover();
+        assert!(e.doc.layers[0].key(5));
+        assert_eq!(e.doc.layers[0].frames.len(), 24);
+        for f in 0..5 {
+            assert_eq!(e.doc.layers[0].frames[f].identity(), original.identity());
+        }
+        for f in 5..12 {
+            assert_eq!(e.doc.layers[0].frames[f].len(), 2);
+        }
+        assert!(e.doc.layers[0].frames[12].is_empty());
+        e.checkpoint();
+        e.commit_paint(
+            0,
+            5,
+            vec![crate::Mark {
+                points: vec![[120., 10.], [130., 20.]].into(),
+                ..Default::default()
+            }],
+        );
+        e.recover();
+        assert_eq!(
+            e.doc.layers[0].options.keys.iter().filter(|k| **k).count(),
+            3
+        );
+        e.history(false);
+        e.history(false);
+        assert_eq!(serde_json::to_vec(&e.doc).unwrap(), before);
+    }
+    #[test]
+    fn disabled_auto_key_keeps_existing_exposure_editing_and_empty_strokes_do_nothing() {
+        let mut e = fixture(false);
+        e.checkpoint();
+        e.commit_paint(
+            0,
+            5,
+            vec![crate::Mark {
+                points: vec![[100., 10.], [110., 20.]].into(),
+                ..Default::default()
+            }],
+        );
+        e.recover();
+        assert!(!e.doc.layers[0].key(5));
+        assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+        let mut e = fixture(true);
+        e.commit_paint(0, 5, vec![]);
+        assert!(!e.doc.layers[0].key(5));
+        let prefs: crate::studio::Preferences = serde_json::from_str("{}").unwrap();
+        assert!(!prefs.auto_key_paint);
     }
 }

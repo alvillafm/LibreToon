@@ -12,6 +12,10 @@ pub enum Theme {
     Forest,
     Plum,
     Graphite,
+    Porcelain,
+    Sand,
+    Aurora,
+    Ember,
 }
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -27,13 +31,17 @@ pub struct Palette {
 }
 thread_local! {static CURRENT:std::cell::Cell<Theme>=const{std::cell::Cell::new(Theme::Studio)};}
 impl Theme {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::Studio,
         Self::Paper,
         Self::Midnight,
         Self::Forest,
         Self::Plum,
         Self::Graphite,
+        Self::Porcelain,
+        Self::Sand,
+        Self::Aurora,
+        Self::Ember,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -43,6 +51,10 @@ impl Theme {
             Self::Forest => "Bosque",
             Self::Plum => "Ciruela",
             Self::Graphite => "Grafito",
+            Self::Porcelain => "Porcelain",
+            Self::Sand => "Sand",
+            Self::Aurora => "Aurora",
+            Self::Ember => "Ember",
         }
     }
     pub fn description(self) -> &'static str {
@@ -53,6 +65,10 @@ impl Theme {
             Self::Forest => "Grises verdes y acentos menta.",
             Self::Plum => "Paneles ciruela con acentos lavanda.",
             Self::Graphite => "Grises neutros con acentos ámbar.",
+            Self::Porcelain => "Cool ivory panels with crisp indigo accents.",
+            Self::Sand => "Warm cream panels with terracotta accents.",
+            Self::Aurora => "Deep teal panels with luminous lime accents.",
+            Self::Ember => "Charcoal aubergine panels with coral accents.",
         }
     }
     pub fn palette(self) -> Palette {
@@ -122,6 +138,50 @@ impl Theme {
                 [178, 175, 166],
                 [244, 193, 91],
                 [88, 68, 30],
+                false,
+            ),
+            Self::Porcelain => (
+                [248, 249, 252],
+                [228, 232, 242],
+                [236, 238, 247],
+                [166, 175, 202],
+                [35, 41, 67],
+                [83, 93, 123],
+                [76, 67, 170],
+                [220, 219, 248],
+                true,
+            ),
+            Self::Sand => (
+                [251, 245, 232],
+                [235, 225, 207],
+                [242, 232, 213],
+                [189, 170, 140],
+                [62, 45, 35],
+                [112, 89, 67],
+                [161, 66, 40],
+                [248, 214, 186],
+                true,
+            ),
+            Self::Aurora => (
+                [20, 43, 48],
+                [10, 27, 33],
+                [32, 62, 65],
+                [62, 100, 101],
+                [227, 243, 235],
+                [151, 189, 181],
+                [190, 233, 100],
+                [53, 84, 59],
+                false,
+            ),
+            Self::Ember => (
+                [46, 30, 40],
+                [29, 19, 28],
+                [67, 43, 53],
+                [103, 70, 79],
+                [250, 231, 226],
+                [203, 166, 165],
+                [255, 151, 123],
+                [101, 53, 55],
                 false,
             ),
         };

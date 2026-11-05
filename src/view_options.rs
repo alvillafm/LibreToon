@@ -152,7 +152,7 @@ impl Editor {
             self.view_options.draft = Some(draft);
             ui.close();
         }
-        let snap_menu = ui.menu_button(format!("     {}", tr("Ajustar")), |ui| {
+        let snap_menu = ui.menu_button(format!("        {}", tr("Ajustar")), |ui| {
             let snaps = &mut self.studio.prefs.view.snaps;
             for (icon, label, value) in [
                 (Icon::Ruler, "Ajustar a guías", &mut snaps.guides),

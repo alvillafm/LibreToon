@@ -518,11 +518,19 @@ pub fn blur(pixels: Vec<u8>, w: u32, h: u32, radius: f32, optics: &Optics) -> Ve
 }
 impl Editor {
     pub fn camera_depth_view(&self, base: View, layer: usize) -> View {
-        if active(self) {
+        let base = if active(self) {
             layer_view(&self.doc, self.frame, layer, base)
         } else {
             base
-        }
+        };
+        crate::folder_groups::view(
+            base,
+            self.doc
+                .layers
+                .get(layer)
+                .map(|l| crate::folder_groups::layer_matrix(&self.doc, l))
+                .unwrap_or(crate::rig::IDENTITY),
+        )
     }
     pub fn camera_blur_preview(&mut self, painter: &egui::Painter, stage: View) -> bool {
         let enabled = self.depth.open || active(self);
@@ -557,6 +565,7 @@ impl Editor {
             self.doc.layers.identity(),
             self.doc.extras.cameras.identity(),
             self.doc.extras.symbols.identity(),
+            self.doc.extras.folders.identity(),
             self.doc.extras.rig.bones.identity(),
             self.doc.extras.rig.bindings.identity(),
             self.doc.extras.media.assets.identity(),
@@ -658,7 +667,7 @@ impl Editor {
 }
 impl Editor {
     pub(crate) fn depth_point(&self, point: Pos2, from: usize, to: usize) -> Pos2 {
-        if !active(self) || from == to {
+        if from == to {
             return point;
         }
         let base = View {
@@ -667,12 +676,12 @@ impl Editor {
             scale: 1.,
             angle: 0.,
         };
-        let a = layer_view(&self.doc, self.frame, from, base);
-        let b = layer_view(&self.doc, self.frame, to, base);
+        let a = self.camera_depth_view(base, from);
+        let b = self.camera_depth_view(base, to);
         b.world(a.screen(point))
     }
     pub(crate) fn depth_mark(&self, mark: &Mark, from: usize, to: usize) -> Mark {
-        if !active(self) || from == to {
+        if from == to {
             return mark.clone();
         }
         let mut result = crate::vector::transform(mark, |p| self.depth_point(p, from, to));
@@ -683,7 +692,8 @@ impl Editor {
         result
     }
     pub(crate) fn depth_hit(&self, layer: usize, mark: &Mark, point: Pos2, tolerance: f32) -> bool {
-        self.selection_hit(mark, self.depth_point(point, self.layer, layer), tolerance)
+        crate::folder_groups::layer_active(&self.doc, &self.doc.layers[layer], self.frame)
+            && self.selection_hit(mark, self.depth_point(point, self.layer, layer), tolerance)
     }
 }
 
