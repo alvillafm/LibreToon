@@ -113,7 +113,7 @@ fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<(Asset, usi
             .media
             .assets
             .iter()
-            .filter(|asset| asset.folder == parent)
+            .filter(|asset| asset.folder == parent && !asset.raster_tile)
             .map(|asset| (Asset::Media(asset.id), depth)),
     );
     out[first..].sort_by_key(|(asset, _)| {

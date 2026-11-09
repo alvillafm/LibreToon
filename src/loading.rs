@@ -9,11 +9,16 @@ use std::{
 #[derive(Default)]
 struct State {
     pending: Option<(u64, PathBuf)>,
-    result: Option<(PathBuf, Result<Document, String>)>,
+    result: Option<Loaded>,
     generation: u64,
     busy: bool,
     shutdown: bool,
 }
+type Loaded = (
+    PathBuf,
+    Result<Document, String>,
+    Option<crate::project_save::Stamp>,
+);
 #[derive(Default)]
 pub struct Loader {
     shared: Arc<(Mutex<State>, Condvar)>,
@@ -41,13 +46,21 @@ impl Loader {
                     }
                     let (generation, path) = state.pending.take().unwrap();
                     drop(state);
-                    let result = std::panic::catch_unwind(|| crate::documents::read_project(&path))
-                        .unwrap_or_else(|_| {
-                            Err("El importador no pudo procesar este archivo".into())
-                        });
+                    let stamp = crate::project_save::stamp(&path);
+                    let mut result =
+                        std::panic::catch_unwind(|| crate::documents::read_project(&path))
+                            .unwrap_or_else(|_| {
+                                Err("El importador no pudo procesar este archivo".into())
+                            });
+                    if result.is_ok() && stamp != crate::project_save::stamp(&path) {
+                        result = Err(
+                            "The file changed while it was being opened. Try opening it again."
+                                .into(),
+                        );
+                    }
                     let mut state = lock.lock().unwrap();
                     if generation == state.generation {
-                        state.result = Some((path, result));
+                        state.result = Some((path, result, stamp));
                         state.busy = false;
                     }
                 }
@@ -60,7 +73,7 @@ impl Loader {
         state.busy = true;
         self.shared.1.notify_one();
     }
-    pub fn take(&self) -> Option<(PathBuf, Result<Document, String>)> {
+    pub fn take(&self) -> Option<Loaded> {
         self.shared.0.lock().unwrap().result.take()
     }
     pub fn busy(&self) -> bool {
@@ -78,10 +91,11 @@ impl Drop for Loader {
 }
 impl Editor {
     pub fn poll_open(&mut self, ctx: &eframe::egui::Context) {
-        if let Some((path, result)) = self.loader.take() {
+        if let Some((path, result, stamp)) = self.loader.take() {
             match result {
                 Ok(doc) => {
                     let imported = doc.extras.imported;
+                    let migrating = !crate::native_project::is_native_path(&path);
                     if self.loader.saved_copy {
                         let name = format!(
                             "{} ({})",
@@ -96,11 +110,19 @@ impl Editor {
                         self.persist_documents();
                     } else {
                         self.add_document(doc, Some(path));
+                        if let Some(index) = self.hub.active {
+                            self.hub.tabs[index].record.stamp = stamp;
+                            self.hub.tabs[index].record.dirty = migrating;
+                        }
+                        self.persist_documents();
                     }
                     if imported {
                         self.import_report_open = true;
                         self.status =
                             "FLA importado. Consulta el informe de compatibilidad.".into();
+                    } else if migrating && !self.loader.saved_copy {
+                        self.status =
+                            crate::i18n::tr("Legacy project opened. Save it as .ltoon.").into();
                     } else {
                         self.status = "Proyecto abierto".into();
                     }

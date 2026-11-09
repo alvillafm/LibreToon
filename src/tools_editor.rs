@@ -136,7 +136,7 @@ impl Editor {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked)
+            .filter(|(_, l)| l.visible && !l.options.locked && !l.options.raster)
         {
             let mut marks = vec![];
             let mut layer_changed = false;
@@ -512,7 +512,9 @@ impl Editor {
         }
     }
     pub fn commit_paint(&mut self, layer: usize, frame: usize, marks: Vec<Mark>) {
-        if self.doc.layers[layer].options.mannequin.is_some() {
+        if self.doc.layers[layer].options.mannequin.is_some()
+            || self.doc.layers[layer].options.adjustment.is_some()
+        {
             return;
         }
         if marks.is_empty() {

@@ -19,6 +19,7 @@ impl Editor {
         }
     }
     pub fn switch_scene(&mut self, index: usize) {
+        self.finish_raster_stroke();
         self.feature.exposure_drag = None;
         self.folder_groups.clear();
         self.clips.reset_document();
@@ -33,6 +34,10 @@ impl Editor {
         self.doc.extras.cameras = s.cameras;
         self.doc.extras.rig = s.rig;
         self.doc.extras.media.tracks = s.media_tracks;
+        self.doc.extras.markers = s.markers;
+        self.doc.extras.tags = s.tags;
+        self.animation.selected_tag = None;
+        self.animation.annotation = None;
         self.rigging = Default::default();
         self.doc.extras.perspective = s.perspective;
         self.doc.extras.active_scene = index;
@@ -251,6 +256,10 @@ impl Editor {
                             self.doc.extras.cameras = s.cameras;
                             self.doc.extras.rig = s.rig;
                             self.doc.extras.media.tracks = s.media_tracks;
+                            self.doc.extras.markers = s.markers;
+                            self.doc.extras.tags = s.tags;
+                            self.animation.selected_tag = None;
+                            self.animation.annotation = None;
                             self.rigging = Default::default();
                             self.doc.extras.perspective = s.perspective;
                             self.doc.extras.active_scene = next;

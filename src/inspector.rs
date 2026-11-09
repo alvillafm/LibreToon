@@ -269,7 +269,15 @@ impl Editor {
     pub fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);
+            if self.adjustment_active() {
+                self.adjustment_properties(ui);
+                return;
+            }
             design::category(ui, "HERRAMIENTA");
+            if self.raster_active() && Self::raster_tool(self.tool) {
+                self.raster_settings(ui);
+                return;
+            }
             if matches!(self.tool, Tool::Bones | Tool::Puppet) {
                 self.rig_properties(ui);
                 return;

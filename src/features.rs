@@ -132,6 +132,9 @@ pub struct MarkStyle {
     pub animation_clip: Option<crate::animation_clips::Timing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_image: Option<u64>,
+    pub raster_tile: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texture_basis: Option<[[f32; 2]; 3]>,
     pub instance_color: Option<[f32; 8]>,
     pub guide: bool,
     pub text: Option<Box<crate::typography::TextSpec>>,
@@ -148,12 +151,19 @@ pub struct MarkStyle {
 pub struct LayerOptions {
     pub composition: crate::folder_groups::LayerGroup,
     pub animation_track: bool,
+    pub raster: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<SharedVec<crate::post::Effect>>,
     pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
     pub locked: bool,
     pub opacity: f32,
     pub clip: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub masked_by: Option<u64>,
     pub folder: Option<u64>,
     pub keys: SharedVec<bool>,
 }
@@ -162,12 +172,16 @@ impl Default for LayerOptions {
         Self {
             composition: Default::default(),
             animation_track: false,
+            raster: false,
+            adjustment: None,
             depth: Default::default(),
             mannequin: None,
             locked: false,
             tweens: Default::default(),
             opacity: 1.,
             clip: false,
+            mask_id: None,
+            masked_by: None,
             folder: None,
             keys: Default::default(),
         }
@@ -180,7 +194,9 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    extras.references.is_empty()
+    extras.markers.is_empty()
+        && extras.tags.is_empty()
+        && extras.references.is_empty()
         && extras.animation_library.is_empty()
         && extras.animation_clips.is_empty()
         && !extras.imported
@@ -257,6 +273,8 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    pub markers: SharedVec<crate::dialogue::Marker>,
+    pub tags: SharedVec<crate::dialogue::Tag>,
     pub references: SharedVec<crate::reftool::Reference>,
     pub animation_library: crate::animation_clips::Collection,
     pub animation_clips: SharedVec<crate::animation_clips::Asset>,
@@ -366,6 +384,22 @@ pub fn styled(polys: geo::MultiPolygon<f64>, color: [u8; 4], style: &MarkStyle) 
     marks
 }
 pub fn clip_to(m: &Mark, area: &geo::MultiPolygon<f64>) -> Vec<Mark> {
+    if m.style.raster_tile && m.style.media_image.is_some() {
+        let points = crate::canvas::vertices(m);
+        let mut style = m.style.clone();
+        if style.texture_basis.is_none() && points.len() >= 4 {
+            style.texture_basis = Some([points[0], points[1], points[3]].map(crate::vector::xy));
+        }
+        let mut parts = styled(
+            crate::vector::polygon(m).intersection(area),
+            [0, 0, 0, 0],
+            &style,
+        );
+        for part in &mut parts {
+            part.color = m.color;
+        }
+        return parts;
+    }
     if m.style.text.is_some() {
         let mut style = m.style.clone();
         style.text = None;
@@ -514,10 +548,14 @@ fn resolve_internal(
 ) -> Vec<(usize, usize, Mark)> {
     let mut pose_cache = std::collections::HashMap::new();
     let mut previous_folder = crate::rig::IDENTITY;
+    let mut explicit_masks = std::collections::HashMap::new();
     let mut output = vec![];
     let mut below = vec![];
     for (l, layer) in doc.layers.iter().enumerate() {
-        if layer.options.mannequin.is_some() {
+        if layer.options.mannequin.is_some()
+            || layer.options.mask_id.is_some()
+            || layer.options.adjustment.is_some()
+        {
             continue;
         }
         if !layer.visible || !crate::folder_groups::layer_active(doc, layer, frame) {
@@ -530,7 +568,38 @@ fn resolve_internal(
             .entry(rig_frame)
             .or_insert_with(|| doc.extras.rig.poses(rig_frame));
         let mut current = vec![];
-        let mask = if layer.options.clip {
+        let mask = if let Some(id) = layer.options.masked_by {
+            let source = explicit_masks.entry(id).or_insert_with(|| {
+                let source = doc
+                    .layers
+                    .iter()
+                    .find(|layer| layer.options.mask_id == Some(id))?;
+                let mut marks = Vec::new();
+                if crate::folder_groups::layer_active(doc, source, frame) {
+                    let rig_frame = crate::folder_groups::rig_frame(doc, source, frame);
+                    let poses = doc.extras.rig.poses(rig_frame);
+                    for mark in
+                        crate::animation::marks(source, frame.min(source.frames.len() - 1)).iter()
+                    {
+                        expand(
+                            doc, mark, frame, rig_frame, depth, &mut marks, false, clock, &poses,
+                        );
+                    }
+                }
+                Some((marks, crate::folder_groups::layer_matrix(doc, source)))
+            });
+            source.as_ref().map(|(marks, matrix)| {
+                let relative = crate::rig::multiply(
+                    crate::folder_groups::inverse(folder).unwrap_or(crate::rig::IDENTITY),
+                    *matrix,
+                );
+                let converted: Vec<_> = marks
+                    .iter()
+                    .map(|mark| crate::folder_groups::mark(mark, relative))
+                    .collect();
+                ink(&converted)
+            })
+        } else if layer.options.clip {
             let relative = crate::rig::multiply(
                 crate::folder_groups::inverse(folder).unwrap_or(crate::rig::IDENTITY),
                 previous_folder,
@@ -651,6 +720,8 @@ pub fn baked(doc: &Document) -> Document {
                 && l.options.mannequin.is_none()
                 && l.options.opacity == 1.
                 && !l.options.clip
+                && l.options.mask_id.is_none()
+                && l.options.masked_by.is_none()
                 && l.frames.iter().flatten().all(|m| {
                     !m.style.guide && m.style.gradient.is_none() && m.style.instance.is_none()
                 })
@@ -709,6 +780,22 @@ pub fn baked(doc: &Document) -> Document {
 }
 pub fn validate(doc: &Document) -> Result<(), String> {
     crate::reftool::validate(&doc.extras.references)?;
+    crate::dialogue::validate(doc)?;
+    for layer in doc
+        .layers
+        .iter()
+        .chain(doc.extras.scenes.iter().flat_map(|s| s.layers.iter()))
+        .chain(doc.extras.symbols.iter().flat_map(|s| s.layers.iter()))
+    {
+        if let Some(effects) = &layer.options.adjustment
+            && (!crate::post::valid(effects)
+                || layer.options.raster
+                || layer.options.animation_track
+                || layer.frames.iter().any(|frame| !frame.is_empty()))
+        {
+            return Err("Invalid adjustment layer".into());
+        }
+    }
     doc.extras.rig.validate()?;
     doc.extras.library.validate(&doc.extras.symbols)?;
     for symbol in &doc.extras.symbols {
@@ -1107,6 +1194,14 @@ pub fn svg(doc: &Document, frame: usize) -> String {
     out + "</svg>"
 }
 
+pub fn resolve_preview(
+    doc: &Document,
+    frame: usize,
+    camera: bool,
+    clock: usize,
+) -> Vec<(usize, usize, Mark)> {
+    resolve_mode(doc, frame, camera, false, clock)
+}
 pub fn resolve_at(
     doc: &Document,
     frame: usize,

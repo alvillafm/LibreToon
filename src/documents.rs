@@ -43,6 +43,7 @@ impl Session {
         e.feature.exposure_drag = None;
         e.folder_groups.clear();
         e.vector_trim.clear();
+        e.depth.invalidate_preview();
         e.references.reset_document();
         e.clips.reset_document();
         e.frame_clipboard.focus = false;
@@ -67,6 +68,10 @@ pub struct Record {
     pub recovery: PathBuf,
     pub name: String,
     pub dirty: bool,
+    #[serde(default)]
+    pub stamp: Option<crate::project_save::Stamp>,
+    #[serde(skip)]
+    pub revision: u64,
 }
 pub struct Tab {
     pub record: Record,
@@ -158,13 +163,18 @@ pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
         .iter()
         .find(|b| !b.is_ascii_whitespace())
         .is_some_and(|b| *b == b'{');
-    let mut d: Document = if bytes.starts_with(b"PK")
-        || path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
-            && !json
-    {
+    let native_path = crate::native_project::is_native_path(path);
+    let fla_path = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("fla"));
+    let mut d: Document = if fla_path && !json {
         crate::fla::decode(&bytes)?
+    } else if bytes.starts_with(b"PK") || native_path {
+        match crate::native_project::decode_if_native(&bytes)? {
+            Some(doc) => doc,
+            None if native_path => return Err("Missing LibreToon project manifest".into()),
+            None => crate::fla::decode(&bytes)?,
+        }
     } else {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?
     };
@@ -186,7 +196,9 @@ impl Default for Hub {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.extension().is_some_and(|e| {
-                        e.eq_ignore_ascii_case("fla") || e.eq_ignore_ascii_case("trazo")
+                        e.eq_ignore_ascii_case("ltoon")
+                            || e.eq_ignore_ascii_case("fla")
+                            || e.eq_ignore_ascii_case("trazo")
                     }) && !catalogue.recent.contains(&p)
                     {
                         catalogue.recent.push(p);
@@ -232,6 +244,7 @@ impl Hub {
     pub fn dirty(&mut self) {
         if let Some(i) = self.active {
             self.tabs[i].record.dirty = true;
+            self.tabs[i].record.revision = self.tabs[i].record.revision.wrapping_add(1);
             self.metadata_dirty = true;
         }
     }
@@ -270,6 +283,8 @@ impl Editor {
                     recovery: self.recovery.clone(),
                     name: "Sesión recuperada".into(),
                     dirty: true,
+                    stamp: None,
+                    revision: 0,
                 },
                 state: None,
             });
@@ -278,6 +293,7 @@ impl Editor {
         self.hub.home = true;
     }
     fn park_document(&mut self) {
+        self.finish_raster_stroke();
         self.finish_rig_gesture();
         self.finish_pending_pen();
         self.playing = false;
@@ -300,20 +316,34 @@ impl Editor {
         if self.hub.active != Some(i) {
             if self.hub.tabs[i].state.is_none() {
                 let record = &self.hub.tabs[i].record;
-                let doc = read_project(&record.recovery).or_else(|_| {
-                    record
-                        .path
-                        .as_ref()
-                        .ok_or("No se encuentra el proyecto".into())
-                        .and_then(|p| read_project(p))
-                });
+                let path = record.path.clone();
+                let read_saved = || {
+                    let path = path.as_deref().ok_or("No se encuentra el proyecto")?;
+                    let before = crate::project_save::stamp(path);
+                    let doc = read_project(path)?;
+                    if before != crate::project_save::stamp(path) {
+                        return Err(
+                            "The file changed while it was being opened. Try opening it again."
+                                .into(),
+                        );
+                    }
+                    Ok((doc, before))
+                };
+                let read_recovery =
+                    || read_project(&record.recovery).map(|doc| (doc, record.stamp));
+                let doc = if record.dirty {
+                    read_recovery().or_else(|_| read_saved())
+                } else {
+                    read_saved().or_else(|_| read_recovery())
+                };
                 match doc {
-                    Ok(doc) => {
+                    Ok((doc, stamp)) => {
                         self.hub.tabs[i].state = Some(Session::new(
                             doc,
                             record.path.clone(),
                             record.recovery.clone(),
-                        ))
+                        ));
+                        self.hub.tabs[i].record.stamp = stamp;
                     }
                     Err(e) => {
                         self.status = crate::i18n::message(
@@ -344,7 +374,7 @@ impl Editor {
         let recovery = catalogue_path()
             .parent()
             .unwrap()
-            .join(format!("sessions/{}.json", crate::features::id()));
+            .join(format!("sessions/{}.ltoon", crate::features::id()));
         let name = path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -368,6 +398,8 @@ impl Editor {
                 recovery,
                 name,
                 dirty: false,
+                stamp: path.as_deref().and_then(crate::project_save::stamp),
+                revision: 0,
             },
         });
         if let Some(path) = path {
@@ -406,26 +438,65 @@ impl Editor {
             );
         }
     }
-    pub fn saved_document(&mut self) {
-        if let Some(path) = self.path.clone() {
-            let path = path.canonicalize().unwrap_or(path);
-            self.path = Some(path.clone());
-            if let Some(i) = self.hub.active {
-                let r = &mut self.hub.tabs[i].record;
-                r.path = Some(path.clone());
-                r.name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                r.dirty = false;
-            }
-            self.hub.remember(path);
-            self.persist_documents();
+    pub(crate) fn save_snapshot_for(&self, index: usize) -> Option<Document> {
+        if self.hub.active == Some(index) {
+            Some(self.project_document())
+        } else {
+            let session = self.hub.tabs.get(index)?.state.as_ref()?;
+            Some(crate::advanced::assemble_project(
+                &session.doc,
+                &session.feature,
+            ))
         }
     }
+    pub(crate) fn complete_project_save(
+        &mut self,
+        recovery: &std::path::Path,
+        revision: u64,
+        path: PathBuf,
+        stamp: crate::project_save::Stamp,
+        close: bool,
+    ) {
+        let Some(index) = self
+            .hub
+            .tabs
+            .iter()
+            .position(|tab| tab.record.recovery == recovery)
+        else {
+            return;
+        };
+        let tab = &mut self.hub.tabs[index];
+        tab.record.path = Some(path.clone());
+        tab.record.stamp = Some(stamp);
+        tab.record.name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        tab.record.dirty = tab.record.revision != revision;
+        let clean = !tab.record.dirty;
+        if self.hub.active == Some(index) {
+            self.path = Some(path.clone());
+            self.doc.extras.imported = false;
+            for (parent, _, _, _) in &mut self.feature.symbol_stack {
+                parent.extras.imported = false;
+            }
+            self.recover();
+        } else if let Some(session) = &mut tab.state {
+            session.path = Some(path.clone());
+            session.doc.extras.imported = false;
+            for (parent, _, _, _) in &mut session.feature.symbol_stack {
+                parent.extras.imported = false;
+            }
+        }
+        self.hub.remember(path);
+        if clean && close {
+            self.close_document(index);
+        }
+        self.persist_documents();
+    }
     fn close_document(&mut self, i: usize) {
-        if i >= self.hub.tabs.len() {
+        if i >= self.hub.tabs.len() || self.project_save.busy() {
             return;
         }
         let was_active = self.hub.active == Some(i);
@@ -458,7 +529,9 @@ impl Editor {
         egui::Panel::top("document-tabs")
             .exact_size(42.)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().interact_size.y = 30.;
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
                     home = crate::design::button(
                         ui,
                         crate::design::Icon::Home,
@@ -471,54 +544,45 @@ impl Editor {
                     ui.separator();
                     let scroll = egui::ScrollArea::horizontal()
                         .id_salt("open-document-tabs")
-                        .auto_shrink([false, false])
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 for (i, tab) in self.hub.tabs.iter().enumerate() {
                                     let active = self.hub.active == Some(i) && !self.hub.home;
-                                    egui::Frame::new()
-                                        .fill(if active {
-                                            crate::themes::color(Color32::from_rgb(47, 73, 104))
-                                        } else {
-                                            crate::themes::color(Color32::from_rgb(34, 36, 42))
-                                        })
-                                        .corner_radius(5.)
-                                        .inner_margin(egui::Margin::symmetric(4, 1))
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                let label = format!(
-                                                    "{}{}",
-                                                    tab.record.name,
-                                                    if tab.record.dirty { " •" } else { "" }
-                                                );
-                                                let r = crate::design::button(
-                                                    ui,
-                                                    crate::design::Icon::Film,
-                                                    &label,
-                                                    "Cambiar de documento",
-                                                    active,
-                                                    true,
-                                                );
-                                                if r.clicked() {
-                                                    activate = Some(i);
-                                                }
-                                                if active && self.drawing.scroll_to_tab {
-                                                    r.scroll_to_me(Some(egui::Align::Center));
-                                                }
-                                                if crate::design::button(
-                                                    ui,
-                                                    crate::design::Icon::Close,
-                                                    "",
-                                                    "Cerrar documento",
-                                                    false,
-                                                    true,
-                                                )
-                                                .clicked()
-                                                {
-                                                    close = Some(i);
-                                                }
-                                            });
-                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.;
+                                        let label = format!(
+                                            "{}{}",
+                                            tab.record.name,
+                                            if tab.record.dirty { " •" } else { "" }
+                                        );
+                                        let r = crate::design::button(
+                                            ui,
+                                            crate::design::Icon::Film,
+                                            &label,
+                                            "Cambiar de documento",
+                                            active,
+                                            true,
+                                        );
+                                        if r.clicked() {
+                                            activate = Some(i);
+                                        }
+                                        if active && self.drawing.scroll_to_tab {
+                                            r.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                        if crate::design::button(
+                                            ui,
+                                            crate::design::Icon::Close,
+                                            "",
+                                            "Cerrar documento",
+                                            false,
+                                            true,
+                                        )
+                                        .clicked()
+                                        {
+                                            close = Some(i);
+                                        }
+                                    });
                                 }
                                 if crate::design::button(
                                     ui,
@@ -568,6 +632,9 @@ impl Editor {
         }
     }
     pub fn document_close_dialog(&mut self, ctx: &egui::Context) {
+        if self.project_save.busy() || self.project_save.conflicted() {
+            return;
+        }
         if let Some(i) = self.hub.closing {
             let name = self
                 .hub
@@ -591,10 +658,7 @@ impl Editor {
                     }
                     if ui.button(crate::i18n::tr("Guardar y cerrar")).clicked() {
                         self.activate_document(i);
-                        self.save_project(false);
-                        if !self.hub.tabs[i].record.dirty {
-                            self.close_document(i);
-                        }
+                        self.start_project_save(false, true);
                     }
                 });
             });
@@ -641,7 +705,7 @@ impl Editor {
                     if crate::design::button(ui, crate::design::Icon::Folder, "Carpeta", "Añadir carpeta de proyectos", false, true).clicked() {
                         if let Some(p) = rfd::FileDialog::new().pick_folder() {
                             if !self.hub.catalogue.folders.contains(&p) { self.hub.catalogue.folders.push(p.clone()); }
-                            if let Ok(entries) = p.read_dir() { for entry in entries.flatten() { let p = entry.path(); if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fla") || e.eq_ignore_ascii_case("trazo")) { self.hub.remember(p); } } }
+                            if let Ok(entries) = p.read_dir() { for entry in entries.flatten() { let p = entry.path(); if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ltoon") || e.eq_ignore_ascii_case("fla") || e.eq_ignore_ascii_case("trazo")) { self.hub.remember(p); } } }
                             self.persist_documents();
                         }
                     }

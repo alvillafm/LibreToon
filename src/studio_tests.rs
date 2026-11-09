@@ -661,7 +661,7 @@ fn laptop_toolbar_keeps_color_controls_visible_and_preserves_category_order() {
             "SHAPES",
             "TEXT",
             "CANVAS",
-            "Rigging",
+            "RIGGING",
             "COLOR",
         ];
         let mut previous = 0.;

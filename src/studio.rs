@@ -86,6 +86,78 @@ impl Binding {
         )
     }
 }
+#[derive(Clone, Copy)]
+pub(crate) enum LayerColor {
+    Vector,
+    Raster,
+    Camera,
+    Rigging,
+    Video,
+    Audio,
+    Animation,
+    Adjustment,
+    Mannequin,
+}
+
+impl LayerColor {
+    const ALL: [(Self, &'static str, crate::design::Icon, [u8; 3]); 9] = [
+        (
+            Self::Vector,
+            "Vector layer",
+            crate::design::Icon::Pen,
+            [124, 151, 182],
+        ),
+        (
+            Self::Raster,
+            "Raster layer",
+            crate::design::Icon::Brush,
+            [102, 172, 164],
+        ),
+        (
+            Self::Camera,
+            "Cámaras",
+            crate::design::Icon::Camera,
+            [230, 157, 55],
+        ),
+        (
+            Self::Rigging,
+            "Rigging",
+            crate::design::Icon::Bones,
+            [86, 211, 214],
+        ),
+        (
+            Self::Video,
+            "Video",
+            crate::design::Icon::Film,
+            [65, 168, 103],
+        ),
+        (
+            Self::Audio,
+            "Audio",
+            crate::design::Icon::Audio,
+            [199, 78, 89],
+        ),
+        (
+            Self::Animation,
+            "Animation clip",
+            crate::design::Icon::Symbol,
+            [163, 119, 235],
+        ),
+        (
+            Self::Adjustment,
+            "Adjustment layer",
+            crate::design::Icon::Fx,
+            [105, 151, 237],
+        ),
+        (
+            Self::Mannequin,
+            "Mannequin",
+            crate::design::Icon::Mannequin,
+            [180, 128, 224],
+        ),
+    ];
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -96,12 +168,20 @@ pub struct Preferences {
     pub language: Option<crate::i18n::Language>,
     pub theme: crate::themes::Theme,
     pub auto_key_paint: bool,
+    pub saving: crate::project_save::Options,
+    pub raster_brush: crate::raster::Brush,
+    layer_colors: [[u8; 3]; 9],
     pub bindings: Vec<Binding>,
     pub actions: Vec<Binding>,
     pub dpi: f32,
     pub ffmpeg: String,
 }
 impl Preferences {
+    pub(crate) fn layer_color(&self, kind: LayerColor) -> Color32 {
+        let [r, g, b] = self.layer_colors[kind as usize];
+        Color32::from_rgb(r, g, b)
+    }
+
     pub fn locale(&self) -> crate::i18n::Language {
         self.language.unwrap_or(if self.spanish {
             crate::i18n::Language::Spanish
@@ -122,6 +202,9 @@ impl Default for Preferences {
             language: None,
             theme: Default::default(),
             auto_key_paint: false,
+            saving: Default::default(),
+            raster_brush: Default::default(),
+            layer_colors: LayerColor::ALL.map(|(_, _, _, color)| color),
             bindings: TOOLS
                 .iter()
                 .enumerate()
@@ -249,6 +332,25 @@ impl Studio {
 }
 impl Editor {
     pub fn tool_button(&mut self, ui: &mut egui::Ui, slot: Tool) {
+        let raster = self.raster_active();
+        if slot == Tool::Brush && raster {
+            self.raster_toolbar(ui);
+            return;
+        }
+        let vector_only = matches!(
+            slot,
+            Tool::Pen
+                | Tool::VectorBrush
+                | Tool::Node
+                | Tool::Width
+                | Tool::Trim
+                | Tool::Rectangle
+                | Tool::Ellipse
+                | Tool::Line
+                | Tool::Polygon
+                | Tool::Bucket
+                | Tool::Text
+        );
         let tool = if slot == Tool::Brush {
             self.studio.brush
         } else {
@@ -258,11 +360,16 @@ impl Editor {
             ui,
             tool.icon(),
             "",
-            tr(tool.name()),
+            if raster && vector_only {
+                tr("Select a vector layer to use this tool")
+            } else {
+                tr(tool.name())
+            },
             self.tool == tool,
-            true,
+            !raster || !vector_only,
         );
         if slot == Tool::Brush {
+            crate::raster::badge(ui, response.rect, "V");
             if response.is_pointer_button_down_on() {
                 let start = self.studio.held.get_or_insert_with(Instant::now);
                 if start.elapsed() > Duration::from_millis(400) {
@@ -304,6 +411,7 @@ impl Editor {
                     ui.separator();
                     for t in [
                         Tool::Brush,
+                        Tool::VectorBrush,
                         Tool::FillBrush,
                         Tool::ShadeBrush,
                         Tool::LightBrush,
@@ -415,15 +523,18 @@ impl Editor {
             });
         if let Some(tool) = found {
             self.activate_tool(tool);
-            if matches!(
-                tool,
-                Tool::Brush
-                    | Tool::Airbrush
-                    | Tool::SketchBrush
-                    | Tool::FillBrush
-                    | Tool::ShadeBrush
-                    | Tool::LightBrush
-            ) {
+            if !self.raster_active()
+                && matches!(
+                    tool,
+                    Tool::Brush
+                        | Tool::Airbrush
+                        | Tool::VectorBrush
+                        | Tool::SketchBrush
+                        | Tool::FillBrush
+                        | Tool::ShadeBrush
+                        | Tool::LightBrush
+                )
+            {
                 self.studio.brush = tool;
             }
         }
@@ -513,6 +624,10 @@ impl Editor {
             .all(|child| self.clipboard_symbol_matches(*child, checked))
     }
     pub fn paste_selection(&mut self) {
+        if self.raster_active() || self.adjustment_active() {
+            self.status = tr("Select a vector layer to use this tool").into();
+            return;
+        }
         if self.studio.clipboard.is_empty()
             || !self.doc.layers[self.layer].visible
             || self.doc.layers[self.layer].options.locked
@@ -1041,7 +1156,7 @@ impl Editor {
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(Vec2::new(155.,560.),egui::Layout::top_down(egui::Align::Min),|ui|{
                         ui.add_space(8.);
-                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node)] {
+                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node),(2,"Opciones de guardado",crate::design::Icon::Save),(3,"Layer colors",crate::design::Icon::Layers)] {
                             if crate::design::button(ui,icon,label,label,self.studio.preference_category==index,true).clicked(){self.studio.preference_category=index;self.studio.capture=None;}
                         }
                     });
@@ -1055,6 +1170,39 @@ impl Editor {
                                 ui.label(tr("Idioma"));let mut locale=self.studio.prefs.locale();egui::ComboBox::from_id_salt("language").selected_text(locale.name()).show_ui(ui,|ui|{for language in crate::i18n::Language::ALL{if ui.selectable_value(&mut locale,language,language.name()).changed(){self.studio.prefs.language=Some(locale);save=true;}}});ui.end_row();
 
                             });
+                        } else if self.studio.preference_category == 2 {
+                            ui.heading(tr("Opciones de guardado"));
+                            ui.add_space(12.);
+                            let options = &mut self.studio.prefs.saving;
+                            save |= ui.checkbox(&mut options.enabled, tr("Autoguardado")).changed();
+                            save |= ui.checkbox(&mut options.incremental, tr("Autoguardado incremental")).changed();
+                            ui.horizontal(|ui| {
+                                ui.label(tr("Intervalo de autoguardado (minutos)"));
+                                save |= ui.add(egui::DragValue::new(&mut options.minutes).range(1..=1440)).changed();
+                            });
+                            ui.label(tr("El intervalo se aplica al modo de autoguardado seleccionado."));
+                            ui.label(tr("Incremental: guarda una nueva versión numerada y conserva las anteriores."));
+                        } else if self.studio.preference_category == 3 {
+                            ui.heading(tr("Layer colors"));
+                            ui.add_space(12.);
+                            egui::Grid::new("layer-color-preferences").spacing([24., 10.]).show(ui, |ui| {
+                                for (kind, label, icon, _) in LayerColor::ALL {
+                                    let color = self.studio.prefs.layer_color(kind);
+                                    ui.horizontal(|ui| {
+                                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.), Sense::hover());
+                                        crate::design::draw(ui.painter(), rect, icon, color);
+                                        ui.label(tr(label));
+                                    });
+                                    ui.push_id(kind as usize, |ui| {
+                                        save |= ui.color_edit_button_srgb(&mut self.studio.prefs.layer_colors[kind as usize]).changed();
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                            if crate::design::button(ui, crate::design::Icon::ResetColors, "Reset layer colors", "", false, true).clicked() {
+                                self.studio.prefs.layer_colors = LayerColor::ALL.map(|(_, _, _, color)| color);
+                                save = true;
+                            }
                         } else {
                             ui.heading(tr("Atajos de teclado"));ui.add_space(8.);
                             ui.label(tr("Pulsa un atajo y después la combinación nueva. Escape cancela; Supr lo elimina."));ui.add_space(12.);

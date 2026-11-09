@@ -190,6 +190,7 @@ enum Drag {
     Width(WidthDrag),
 }
 pub struct Canvas {
+    pub(crate) raster_stroke: Option<crate::raster::Stroke>,
     pub zoom: f32,
     pub actual_scale: f32,
     pub pan: Vec2,
@@ -210,6 +211,7 @@ pub struct Canvas {
 impl Default for Canvas {
     fn default() -> Self {
         Self {
+            raster_stroke: None,
             zoom: 1.,
             actual_scale: 1.,
             pan: Vec2::ZERO,
@@ -476,10 +478,13 @@ impl Editor {
             state.frame = self.frame;
         }
         state.selected.retain(|&(l, m)| {
-            self.doc
-                .layers
-                .get(l)
-                .is_some_and(|l| l.visible && !l.options.locked && m < l.frames[self.frame].len())
+            self.doc.layers.get(l).is_some_and(|l| {
+                l.visible
+                    && !l.options.locked
+                    && l.frames[self.frame]
+                        .get(m)
+                        .is_some_and(|mark| !mark.style.raster_tile)
+            })
         });
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let ruler_area = response.rect;
@@ -517,7 +522,8 @@ impl Editor {
                 state = std::mem::take(&mut self.canvas);
             }
         }
-        let trim_input = self.vector_trim_input(ui, area, self.camera_view(stage_view));
+        let trim_input =
+            !self.raster_active() && self.vector_trim_input(ui, area, self.camera_view(stage_view));
         let folder_input =
             !trim_input && self.folder_canvas_input(ui, area, self.camera_view(stage_view));
         let video_input =
@@ -602,7 +608,19 @@ impl Editor {
             })
         });
         let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
-        let guide_handled = if trim_input
+        let mut guide_handled = if (self.adjustment_active()
+            && !space
+            && !middle_down
+            && !matches!(
+                tool,
+                Tool::Pan
+                    | Tool::Zoom
+                    | Tool::RotateView
+                    | Tool::Select
+                    | Tool::Object
+                    | Tool::Transform
+            ))
+            || trim_input
             || folder_input
             || self.folder_groups.dialog.is_some()
             || self.document_settings.is_some()
@@ -618,6 +636,37 @@ impl Editor {
                 | self.mannequin_input(ui, area, view)
                 | self.rig_input(ui, area, view)
         };
+        let raster_edit = self.raster_active() && Self::raster_tool(tool);
+        let raster_blocked = self.raster_active()
+            && !matches!(
+                tool,
+                Tool::Select
+                    | Tool::Object
+                    | Tool::Transform
+                    | Tool::Pan
+                    | Tool::Zoom
+                    | Tool::RotateView
+                    | Tool::Ruler
+                    | Tool::Eyedropper
+            );
+        let raster_input = self.raster_input(
+            &mut state,
+            tool,
+            pointer,
+            view,
+            pressed
+                && over
+                && pointer.is_some_and(|p| area.contains(p))
+                && !guide_handled
+                && !space,
+            primary_down && !space && !escape,
+        );
+        if Self::raster_needs_tick(&state) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        if !space && !middle_down && (raster_input || raster_blocked) {
+            guide_handled = true;
+        }
         if over
             && ctx.input(|i| i.pointer.secondary_pressed())
             && state.drag.is_none()
@@ -779,8 +828,10 @@ impl Editor {
                     .enumerate()
                     .filter(|(_, l)| l.visible && !l.options.locked)
                 {
-                    for m in 0..layer.frames[self.frame].len() {
-                        state.selected.push((l, m));
+                    for (m, mark) in layer.frames[self.frame].iter().enumerate() {
+                        if !mark.style.raster_tile {
+                            state.selected.push((l, m));
+                        }
                     }
                 }
                 state.pivot = state.bounds(self).map(|b| b.center());
@@ -877,7 +928,9 @@ impl Editor {
                 }
                 state.selected = self.canvas.selected.clone();
             } else if !self.playing && tool == Tool::Eyedropper {
-                self.sample_apply_at(&state.selected, world, 3. / view.scale);
+                if !self.raster_active() || !self.pick_raster_color(world) {
+                    self.sample_apply_at(&state.selected, world, 3. / view.scale);
+                }
             } else if !self.playing && tool == Tool::Wand {
                 self.wand_select(&mut state, world, shift);
             } else if !self.playing && tool == Tool::Lasso {
@@ -1686,8 +1739,15 @@ impl Editor {
                 if f == self.frame {
                     continue;
                 }
-                for (_, _, m) in crate::features::resolve(&self.doc, f, false) {
-                    paint_mark(&painter, &m, view, true, false, Some(&mut state.cache));
+                for (layer, _, mut mark) in crate::features::resolve(&self.doc, f, false) {
+                    if mark.style.raster_tile {
+                        mark.color[3] = (f32::from(mark.color[3]) * 0.3).round() as u8;
+                        let layer_view =
+                            self.camera_depth_view(self.camera_view(stage_view), layer);
+                        self.paint_media_image(&painter, layer_view, &mark);
+                    } else if mark.style.media_image.is_none() {
+                        paint_mark(&painter, &mark, view, true, false, Some(&mut state.cache));
+                    }
                 }
             }
         }
@@ -1965,7 +2025,21 @@ impl Editor {
         }
         self.paint_folder_gizmo(&painter, self.camera_view(stage_view));
         self.paint_vector_trim(&painter, self.camera_view(stage_view));
-        if over
+        if raster_edit
+            && over
+            && !space
+            && let Some(pos) = pointer
+        {
+            crate::raster::cursor(
+                &painter,
+                pos,
+                view,
+                self.studio.prefs.raster_brush,
+                tool == Tool::Eraser,
+            );
+        }
+        if !raster_edit
+            && over
             && !space
             && matches!(
                 tool,
@@ -2423,6 +2497,7 @@ impl Canvas {
 }
 impl Editor {
     pub fn finish_pending_pen(&mut self) {
+        self.finish_raster_stroke();
         self.canvas.pen_redo.clear();
         if let Some(pen) = self.canvas.pen.take() {
             self.commit_pen(pen);
@@ -2588,7 +2663,7 @@ impl Editor {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked)
+            .filter(|(_, l)| l.visible && !l.options.locked && !l.options.raster)
         {
             let mut marks = Vec::new();
             let mut layer_changed = false;

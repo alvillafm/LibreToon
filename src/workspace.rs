@@ -5,6 +5,15 @@ use crate::design::{Icon, button, draw};
 #[cfg(test)]
 use eframe::egui::Pos2;
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
+fn top_menu(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let label = egui::RichText::new(crate::i18n::tr(label)).size(13.);
+    let trigger = egui::Button::new(label)
+        .frame_when_inactive(false)
+        .corner_radius(6.)
+        .min_size(egui::vec2(46., 28.));
+    egui::containers::menu::MenuButton::from_button(trigger).ui(ui, content);
+}
+
 impl Editor {
     pub fn workspace(&mut self, ui: &mut egui::Ui) {
         self.animation.thumbnail_cache.begin_frame();
@@ -12,22 +21,45 @@ impl Editor {
         egui::Panel::top("application")
             .exact_size(42.)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_centered(|ui| {
                     let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
                     crate::design::logo(ui.painter(), logo_rect);
                     ui.label(egui::RichText::new("LibreToon").strong().size(14.));
                     ui.add_space(8.);
-                    ui.menu_button(crate::i18n::tr("Archivo"), |ui| {
+                    top_menu(ui, "Archivo", |ui| {
                         if button(ui, Icon::New, "Nuevo", "Nuevo documento", false, true).clicked()
                         {
                             self.new_document();
                             ui.close();
                         }
-                        if button(ui, Icon::Open, "Abrir…", "Abrir proyecto", false, true).clicked()
+                        if button(
+                            ui,
+                            Icon::Open,
+                            "Abrir proyecto…",
+                            "Abrir proyecto",
+                            false,
+                            true,
+                        )
+                        .clicked()
                         {
                             self.open();
                             ui.close();
                         }
+                        ui.menu_button(crate::i18n::tr("Importar"), |ui| {
+                            if button(
+                                ui,
+                                Icon::Open,
+                                "Adobe Animate (.fla)…",
+                                "Import Adobe Animate project",
+                                false,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.import_fla();
+                                ui.close();
+                            }
+                        });
                         if button(
                             ui,
                             Icon::Open,
@@ -58,10 +90,42 @@ impl Editor {
                             self.save_project(true);
                             ui.close();
                         }
-                        if !self.doc.extras.import_warnings.is_empty()
-                            && ui
-                                .button(crate::i18n::tr("Informe de importación FLA…"))
-                                .clicked()
+                        if let Some(path) = &self.path {
+                            let backups: Vec<_> = (1..=3)
+                                .filter_map(|version| {
+                                    let file = crate::project_save::backup_path(path, version);
+                                    file.is_file().then_some((version, file))
+                                })
+                                .collect();
+                            if !backups.is_empty() {
+                                ui.menu_button(crate::i18n::tr("Open previous version"), |ui| {
+                                    for (version, file) in backups {
+                                        if ui
+                                            .button(format!(
+                                                "{} {version}",
+                                                crate::i18n::tr("Backup")
+                                            ))
+                                            .clicked()
+                                        {
+                                            self.loader.request_saved_copy(file);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        if !self.hub.home
+                            && (self.doc.extras.imported
+                                || !self.doc.extras.import_warnings.is_empty())
+                            && button(
+                                ui,
+                                Icon::DocumentSettings,
+                                "Informe de importación FLA…",
+                                "Informe de importación FLA…",
+                                false,
+                                true,
+                            )
+                            .clicked()
                         {
                             self.import_report_open = true;
                             ui.close();
@@ -97,6 +161,19 @@ impl Editor {
                         if button(
                             ui,
                             Icon::Export,
+                            "Export Adobe Animate (.fla)…",
+                            "Export Adobe Animate (.fla)…",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.export_fla_copy();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Export,
                             "Exportar vídeo…",
                             "Exportar vídeo…",
                             false,
@@ -121,7 +198,7 @@ impl Editor {
                             ui.close();
                         }
                     });
-                    ui.menu_button(crate::i18n::tr("Edición"), |ui| {
+                    top_menu(ui, "Edición", |ui| {
                         if button(
                             ui,
                             Icon::Copy,
@@ -233,15 +310,15 @@ impl Editor {
                             ui.close();
                         }
                     });
-                    ui.menu_button(crate::i18n::tr("Vista"), |ui| self.view_menu(ui));
-                    ui.menu_button(crate::i18n::tr("Herramientas"), |ui| {
+                    top_menu(ui, "Vista", |ui| self.view_menu(ui));
+                    top_menu(ui, "Herramientas", |ui| {
                         if button(ui, Icon::Reference, "RefTool", "RefTool", false, true).clicked()
                         {
                             self.new_reference_window();
                             ui.close();
                         }
                     });
-                    ui.menu_button(crate::i18n::tr("Ayuda"), |ui| {
+                    top_menu(ui, "Ayuda", |ui| {
                         if button(ui, Icon::Rotate, "Buscar actualizaciones", "", false, true)
                             .clicked()
                         {
@@ -329,10 +406,7 @@ impl Editor {
                         ),
                         ("EDICIÓN", vec![(Transform, Mirror)]),
                         ("PINTURA", vec![(Brush, Eraser), (Bucket, Eyedropper)]),
-                        (
-                            "VECTORIAL",
-                            vec![(VectorBrush, Pen), (Node, Width), (Trim, Trim)],
-                        ),
+                        ("VECTORIAL", vec![(Pen, Node), (Width, Trim)]),
                         ("FORMAS", vec![(Line, Rectangle), (Ellipse, Polygon)]),
                         ("TEXTO", vec![(Text, Text)]),
                         (
@@ -344,7 +418,7 @@ impl Editor {
                                 (Mannequin, Mannequin),
                             ],
                         ),
-                        ("Rigging", vec![(Bones, Puppet)]),
+                        ("RIGGING", vec![(Bones, Puppet)]),
                     ] {
                         ui.add_space(3.);
                         ui.label(
@@ -450,7 +524,7 @@ impl Editor {
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or("Sin título.fla".into()),
+                            .unwrap_or("Sin título.ltoon".into()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if button(
@@ -464,6 +538,20 @@ impl Editor {
                         .clicked()
                         {
                             self.studio.stage_only = !self.studio.stage_only;
+                            ui.ctx().request_repaint();
+                        }
+                        if crate::post::present(&self.doc)
+                            && button(
+                                ui,
+                                Icon::Fx,
+                                "",
+                                "Show / Hide Post-Processing",
+                                !self.post.hidden,
+                                true,
+                            )
+                            .clicked()
+                        {
+                            self.post.hidden = !self.post.hidden;
                             ui.ctx().request_repaint();
                         }
                         if crate::depth::camera(&self.doc, self.frame).is_some_and(|c| {

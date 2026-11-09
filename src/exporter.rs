@@ -26,7 +26,7 @@ pub struct ExportSettings {
     pub dither: bool,
     pub svg_sequence: bool,
 }
-const FORMATS: &[&str] = &["MP4", "SVG", "MKV", "AVI", "MOV", "GIF"];
+const FORMATS: &[&str] = &["MP4", "SVG", "MKV", "AVI", "MOV", "GIF", "PNG sequence"];
 impl ExportSettings {
     fn extension(&self) -> &str {
         match self.format {
@@ -35,6 +35,7 @@ impl ExportSettings {
             2 => "mkv",
             3 => "avi",
             4 => "mov",
+            6 => "png",
             _ => "gif",
         }
     }
@@ -84,12 +85,6 @@ impl Editor {
     pub fn open_export(&mut self, gif: bool) {
         self.leave_symbol_context_for_document_change();
         self.finish_pending_pen();
-        if let Some(path) = crate::ffmpeg_setup::available(&self.studio.prefs.ffmpeg) {
-            self.studio.prefs.ffmpeg = path.to_string_lossy().into_owned();
-        } else {
-            self.studio.ffmpeg_setup.prompt = true;
-            self.studio.ffmpeg_setup.complete = false;
-        }
         let folder = self
             .path
             .as_ref()
@@ -309,10 +304,10 @@ impl Editor {
                         ui.label(crate::i18n::tr("GIF"));
                     } else {
                         egui::ComboBox::from_id_salt("export-format")
-                            .selected_text(FORMATS[s.format])
+                            .selected_text(tr(FORMATS[s.format]))
                             .show_ui(ui, |ui| {
-                                for (i, f) in FORMATS.iter().take(5).enumerate() {
-                                    ui.selectable_value(&mut s.format, i, *f);
+                                for i in [0, 1, 2, 3, 4, 6] {
+                                    ui.selectable_value(&mut s.format, i, tr(FORMATS[i]));
                                 }
                             });
                     }
@@ -339,12 +334,14 @@ impl Editor {
                             }
                         });
                         ui.end_row();
+                        if s.format != 6 {
                         ui.label(crate::i18n::tr("FPS"));
                         ui.add(
                             egui::DragValue::new(&mut s.fps)
                                 .range(1..=if s.format == 5 { 100 } else { 240 }),
                         );
                         ui.end_row();
+                        }
                     }
                     if s.format != 1 || s.svg_sequence {
                         ui.label(tr("Fotogramas"));
@@ -405,7 +402,32 @@ impl Editor {
                     "GIF usa intervalos de centésimas de segundo; los FPS pueden redondearse.",
                 ));
             }
-            if s.format != 1 {
+            if s.format != 5 {
+                ui.horizontal(|ui| {
+                    ui.label(tr("Export presets"));
+                    if ui.small_button(tr("Project size")).clicked() {
+                        s.width = self.doc.width.clamp(2, 4096);
+                        s.height = self.doc.height.clamp(2, 4096);
+                        s.fps = self.doc.fps;
+                    }
+                    if ui.small_button(tr("Preview MP4")).clicked() {
+                        s.format = 0;
+                        let scale = (1280. / self.doc.width as f32).min(720. / self.doc.height as f32).min(1.);
+                        s.width = ((self.doc.width as f32 * scale).round() as u32).max(2);
+                        s.height = ((self.doc.height as f32 * scale).round() as u32).max(2);
+                        s.quality = 75;
+                    }
+                    if ui.small_button(tr("Transparent PNG")).clicked() { s.format = 6; }
+                });
+            }
+            if s.format == 6 {
+                ui.label(tr("One transparent PNG per project frame. Includes visible video; excludes audio."));
+            } else if s.format == 1 {
+                ui.label(tr("SVG exports vector artwork. Raster paint, adjustment effects, audio and video are omitted."));
+            } else {
+                ui.label(tr("Rendered video uses a white background."));
+            }
+            if !matches!(s.format, 1 | 6) {
                 ui.group(|ui| {
                     ui.label(tr("FFmpeg executable"));
                     if ui
@@ -433,7 +455,7 @@ impl Editor {
             }
             ui.separator();
             if ui.button(tr("Exportar")).clicked() {
-                if s.format != 1
+                if !matches!(s.format, 1 | 6)
                     && crate::ffmpeg_setup::available(&self.studio.prefs.ffmpeg).is_none()
                 {
                     self.studio.ffmpeg_setup.prompt = true;
@@ -453,14 +475,9 @@ impl Editor {
             match s.target() {
                 Ok(path) => {
                     let mut targets = vec![path.clone()];
-                    if s.format == 1 && s.svg_sequence {
+                    if s.format == 6 || (s.format == 1 && s.svg_sequence) {
                         targets = (s.first..=s.last)
-                            .map(|f| {
-                                path.with_file_name(format!(
-                                    "{}-{f:05}.svg",
-                                    path.file_stem().unwrap().to_string_lossy()
-                                ))
-                            })
+                            .map(|f| frame_target(&path, f, s.extension()))
                             .collect();
                     }
                     let overwrite = targets.iter().any(|p| p.exists());
@@ -499,7 +516,13 @@ impl Editor {
         }
     }
 }
-fn run_export(
+fn frame_target(path: &std::path::Path, frame: usize, extension: &str) -> PathBuf {
+    path.with_file_name(format!(
+        "{}-{frame:05}.{extension}",
+        path.file_stem().unwrap_or_default().to_string_lossy()
+    ))
+}
+pub(crate) fn run_export(
     doc: &Document,
     s: &ExportSettings,
     current: usize,
@@ -508,7 +531,7 @@ fn run_export(
     progress: Arc<AtomicUsize>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    if s.format > 5
+    if s.format > 6
         || s.first == 0
         || s.first > s.last
         || s.last > crate::animation::movie_count(doc)
@@ -537,6 +560,61 @@ fn run_export(
         } else {
             std::fs::write(path, crate::animation::movie_svg(doc, current))
                 .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    if s.format == 6 {
+        let context = egui::Context::default();
+        let mut cache = crate::paint::RenderCache::default();
+        let mut video = crate::media::VideoExport::default();
+        for frame in s.first..=s.last {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(tr("Exportación cancelada").into());
+            }
+            let frames = video.frames(doc, frame - 1, &ffmpeg)?;
+            let resolved = crate::animation::resolve_movie(doc, frame - 1, true);
+            let mut rgba = raster_composited(
+                doc,
+                frame - 1,
+                s.width,
+                s.height,
+                &context,
+                &mut cache,
+                &frames,
+                resolved,
+                true,
+                true,
+                true,
+            );
+            for pixel in rgba.chunks_exact_mut(4) {
+                let alpha = u32::from(pixel[3]);
+                if alpha != 0 {
+                    for channel in &mut pixel[..3] {
+                        *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+                    }
+                }
+            }
+            let target = frame_target(path, frame, "png");
+            let temporary =
+                target.with_file_name(format!(".libretoon-png-{}.tmp", crate::features::id()));
+            let written = image::save_buffer_with_format(
+                &temporary,
+                &rgba,
+                s.width,
+                s.height,
+                image::ColorType::Rgba8,
+                image::ImageFormat::Png,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|()| std::fs::rename(&temporary, target).map_err(|error| error.to_string()));
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            progress.store(
+                (frame - s.first + 1) * 1000 / (s.last - s.first + 1),
+                Ordering::Relaxed,
+            );
         }
         return Ok(());
     }
@@ -727,7 +805,9 @@ pub(crate) fn raster_with_video(
     video: &[crate::media::ExportVideoFrame],
 ) -> Vec<u8> {
     let resolved = crate::animation::resolve_movie(doc, frame, true);
-    raster_composited(doc, frame, w, h, ctx, cache, video, resolved)
+    raster_composited(
+        doc, frame, w, h, ctx, cache, video, resolved, false, true, true,
+    )
 }
 pub(crate) fn raster_preview(
     doc: &Document,
@@ -738,9 +818,14 @@ pub(crate) fn raster_preview(
     ctx: &egui::Context,
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
+    camera: bool,
+    post: bool,
+    blur: bool,
 ) -> Vec<u8> {
-    let resolved = crate::features::resolve_at(doc, frame, true, clock);
-    raster_composited(doc, frame, w, h, ctx, cache, video, resolved)
+    let resolved = crate::features::resolve_preview(doc, frame, camera, clock);
+    raster_composited(
+        doc, frame, w, h, ctx, cache, video, resolved, false, post, blur,
+    )
 }
 fn raster_composited(
     doc: &Document,
@@ -751,55 +836,186 @@ fn raster_composited(
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
     resolved: Vec<(usize, usize, crate::Mark)>,
+    transparent: bool,
+    post: bool,
+    camera_blur: bool,
 ) -> Vec<u8> {
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
+    let adjust = post && scene.layers.iter().any(crate::post::visible_effects);
+    let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
     if let Some(optics) = crate::depth::camera(&scene, local)
         .map(|c| crate::animation::camera_optics(c, local))
-        .filter(|o| o.strength > 0.)
+        .filter(|o| camera_blur && o.strength > 0.)
     {
-        let mut result = vec![255u8; (w * h * 3) as usize];
-        let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
+        let channels = if transparent || adjust { 4 } else { 3 };
+        let mut result = vec![if channels == 4 { 0 } else { 255 }; (w * h) as usize * channels];
         let mut clips = video.iter().enumerate().peekable();
-        let mut render = |subset, plane: &crate::depth::LayerDepth| {
-            let radius = optics.radius(plane.distance - optics.position) * scale;
-            let pad = if radius >= 0.1 {
-                (radius * 2. + 3.).ceil() as u32
-            } else {
-                0
-            };
-            let (pw, ph) = (w + pad * 2, h + pad * 2);
-            let raw = raster_flat(doc, w, h, ctx, cache, video, Some(subset), &resolved, pad);
-            let blurred = crate::depth::blur(raw, pw, ph, radius, &optics);
-            if pad == 0 {
-                composite(&mut result, &blurred);
-            } else {
-                for y in 0..h as usize {
-                    let start = ((y + pad as usize) * pw as usize + pad as usize) * 4;
-                    composite(
-                        &mut result[y * w as usize * 3..(y + 1) * w as usize * 3],
-                        &blurred[start..start + w as usize * 4],
-                    );
+        let mut render =
+            |result: &mut Vec<u8>, subset: (bool, usize), plane: &crate::depth::LayerDepth| {
+                let radius = optics.radius(plane.distance - optics.position) * scale;
+                let pad = if radius >= 0.1 {
+                    (radius * 2. + 3.).ceil() as u32
+                } else {
+                    0
+                };
+                let (pw, ph) = (w + pad * 2, h + pad * 2);
+                let raw = raster_flat(
+                    doc,
+                    w,
+                    h,
+                    ctx,
+                    cache,
+                    video,
+                    Some(RenderSubset::Single(subset.0, subset.1)),
+                    &resolved,
+                    pad,
+                    true,
+                );
+                let blurred = crate::depth::blur(raw, pw, ph, radius, &optics);
+                if pad == 0 {
+                    composite(result, &blurred, channels);
+                } else {
+                    for y in 0..h as usize {
+                        let start = ((y + pad as usize) * pw as usize + pad as usize) * 4;
+                        composite(
+                            &mut result[y * w as usize * channels..(y + 1) * w as usize * channels],
+                            &blurred[start..start + w as usize * 4],
+                            channels,
+                        );
+                    }
                 }
-            }
-        };
+            };
         for layer in 0..=scene.layers.len() {
             while clips.peek().is_some_and(|(_, c)| c.slot <= layer) {
                 let (i, clip) = clips.next().unwrap();
-                render((true, i), &clip.depth);
+                render(&mut result, (true, i), &clip.depth);
             }
             if let Some(l) = scene.layers.get(layer).filter(|l| l.visible) {
-                render((false, layer), &l.options.depth);
+                if adjust
+                    && crate::post::visible_effects(l)
+                    && crate::folder_groups::layer_active(&scene, l, local)
+                {
+                    apply_adjustment(&mut result, w, h, l, scale);
+                } else if !crate::post::is_adjustment(l)
+                    && resolved.iter().any(|(i, ..)| *i == layer)
+                {
+                    render(&mut result, (false, layer), &l.options.depth);
+                }
             }
         }
-        return result;
+        return if adjust {
+            finish_adjusted(result, transparent)
+        } else {
+            result
+        };
     }
-    raster_flat(doc, w, h, ctx, cache, video, None, &resolved, 0)
+    if adjust {
+        let mut result = vec![0; (w * h * 4) as usize];
+        let mut start = 0;
+        for (index, layer) in scene.layers.iter().enumerate() {
+            if !crate::post::visible_effects(layer)
+                || !crate::folder_groups::layer_active(&scene, layer, local)
+            {
+                continue;
+            }
+            let at = index * 2 + 1;
+            if start < at {
+                let group = raster_flat(
+                    doc,
+                    w,
+                    h,
+                    ctx,
+                    cache,
+                    video,
+                    Some(RenderSubset::Span(start, at)),
+                    &resolved,
+                    0,
+                    true,
+                );
+                composite(&mut result, &group, 4);
+            }
+            apply_adjustment(&mut result, w, h, layer, scale);
+            start = at + 1;
+        }
+        let group = raster_flat(
+            doc,
+            w,
+            h,
+            ctx,
+            cache,
+            video,
+            Some(RenderSubset::Span(start, usize::MAX)),
+            &resolved,
+            0,
+            true,
+        );
+        composite(&mut result, &group, 4);
+        return finish_adjusted(result, transparent);
+    }
+    raster_flat(
+        doc,
+        w,
+        h,
+        ctx,
+        cache,
+        video,
+        None,
+        &resolved,
+        0,
+        transparent,
+    )
 }
-fn composite(rgb: &mut [u8], rgba: &[u8]) {
-    for (out, c) in rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+fn finish_adjusted(rgba: Vec<u8>, transparent: bool) -> Vec<u8> {
+    if transparent {
+        return rgba;
+    }
+    let mut rgb = vec![255; rgba.len() / 4 * 3];
+    composite(&mut rgb, &rgba, 3);
+    rgb
+}
+fn apply_adjustment(
+    result: &mut Vec<u8>,
+    w: u32,
+    h: u32,
+    layer: &crate::document::Layer,
+    scale: f32,
+) {
+    let opacity = layer.options.opacity.clamp(0., 1.);
+    if opacity == 0. {
+        return;
+    }
+    let original = (opacity < 1.).then(|| result.clone());
+    if let Some(effects) = &layer.options.adjustment {
+        crate::post::apply(result, w, h, effects, scale);
+    }
+    if let Some(original) = original {
+        for (p, old) in result.iter_mut().zip(original) {
+            *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RenderSubset {
+    Single(bool, usize),
+    Span(usize, usize),
+}
+impl RenderSubset {
+    fn includes(self, video: bool, index: usize, slot: usize) -> bool {
+        match self {
+            Self::Single(kind, id) => kind == video && id == index,
+            Self::Span(a, b) => {
+                let position = 2 * slot + usize::from(!video);
+                (a..b).contains(&position)
+            }
+        }
+    }
+}
+fn composite(rgb: &mut [u8], rgba: &[u8], channels: usize) {
+    for (out, c) in rgb.chunks_exact_mut(channels).zip(rgba.chunks_exact(4)) {
         let alpha = c[3] as f32 / 255.;
-        for k in 0..3 {
+        for k in 0..channels {
             out[k] = (c[k] as f32 + out[k] as f32 * (1. - alpha))
                 .min(255.)
                 .round() as u8;
@@ -813,9 +1029,10 @@ fn raster_flat(
     ctx: &egui::Context,
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
-    subset: Option<(bool, usize)>,
+    subset: Option<RenderSubset>,
     resolved: &[(usize, usize, crate::Mark)],
     padding: u32,
+    transparent: bool,
 ) -> Vec<u8> {
     let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
     let (w, h) = (w + padding * 2, h + padding * 2);
@@ -838,7 +1055,7 @@ fn raster_flat(
                 .with_clip_rect(Rect::from_min_size(Pos2::ZERO, size));
             let mut clips = video.iter().enumerate().peekable();
             let paint_video = |index, clip: &crate::media::ExportVideoFrame| {
-                if subset.is_some_and(|s| s != (true, index)) {
+                if subset.is_some_and(|s| !s.includes(true, index, clip.slot)) {
                     return;
                 }
                 if let Some(mesh) = crate::media::image_mesh(
@@ -855,7 +1072,7 @@ fn raster_flat(
                     let (index, clip) = clips.next().unwrap();
                     paint_video(index, clip);
                 }
-                if subset.is_some_and(|s| s != (false, layer)) {
+                if subset.is_some_and(|s| !s.includes(false, layer, layer)) {
                     continue;
                 }
                 if let Some(id) = m.style.media_image
@@ -874,7 +1091,7 @@ fn raster_flat(
     );
     output.textures_delta.clear();
     let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
-    let mut pixels = if subset.is_some() {
+    let mut pixels = if transparent {
         vec![0u8; (w * h * 4) as usize]
     } else {
         vec![255u8; (w * h * 3) as usize]
@@ -967,14 +1184,18 @@ fn triangle(
                 let ix = ((u * width as f32) as usize).min(width - 1);
                 let iy = ((v * height as f32) as usize).min(height - 1);
                 let sample = &data[(iy * width + ix) * 4..][..4];
-                let alpha = sample[3] as f32 / 255.;
+                let tint = (0..3)
+                    .map(|i| weights[i] * colors[i][3] as f32)
+                    .sum::<f32>()
+                    / 255.;
+                let alpha = sample[3] as f32 / 255. * tint;
                 for channel in 0..3 {
                     pixels[offset + channel] = (sample[channel] as f32 * alpha
                         + pixels[offset + channel] as f32 * (1. - alpha))
                         .round() as u8;
                 }
                 if channels == 4 {
-                    pixels[offset + 3] = (sample[3] as f32
+                    pixels[offset + 3] = (sample[3] as f32 * tint
                         + pixels[offset + 3] as f32 * (1. - alpha))
                         .min(255.)
                         .round() as u8;

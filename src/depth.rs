@@ -239,9 +239,19 @@ pub struct DepthEditor {
     pub preview: Option<egui::TextureHandle>,
     job: Option<std::sync::mpsc::Receiver<(Vec<usize>, Vec<u8>, [usize; 2])>>,
     requested: Vec<usize>,
-    completed: Vec<usize>,
     owner: Option<Document>,
+    preview_scope: Option<(usize, Option<u64>, u32, u32, bool, bool, bool)>,
+    preview_epoch: usize,
 }
+impl DepthEditor {
+    pub(crate) fn invalidate_preview(&mut self) {
+        self.preview = None;
+        self.requested.clear();
+        self.preview_scope = None;
+        self.preview_epoch = self.preview_epoch.wrapping_add(1);
+    }
+}
+
 impl Editor {
     pub fn depth_window(&mut self, ctx: &egui::Context) {
         if !self.depth.open {
@@ -533,35 +543,49 @@ impl Editor {
         )
     }
     pub fn camera_blur_preview(&mut self, painter: &egui::Painter, stage: View) -> bool {
-        let enabled = self.depth.open || active(self);
+        let use_camera = active(self);
         let optics =
             camera(&self.doc, self.frame).map(|c| crate::animation::camera_optics(c, self.frame));
-        if optics.is_none() {
-            self.depth.preview = None;
-            self.depth.job = None;
-            self.depth.requested.clear();
-            self.depth.completed.clear();
-            self.depth.owner = None;
+        let blur = (use_camera || self.depth.open)
+            && !self.depth.hide_blur
+            && optics.as_ref().is_some_and(|o| o.strength > 0.);
+        let post = !self.post.hidden && self.doc.layers.iter().any(crate::post::visible_effects);
+        if !post && !blur {
+            if self.depth.preview_scope.is_some() {
+                self.depth.invalidate_preview();
+            }
             return false;
         }
-        let Some(optics) = optics.filter(|_| enabled && !self.depth.hide_blur) else {
-            return false;
-        };
-        if optics.strength == 0. && !self.depth.open {
-            return false;
+        let scope = (
+            self.doc.extras.active_scene,
+            self.feature.symbol_stack.last().map(|entry| entry.3),
+            self.doc.width,
+            self.doc.height,
+            use_camera,
+            post,
+            blur,
+        );
+        if self.depth.preview_scope != Some(scope) {
+            self.depth.invalidate_preview();
+            self.depth.preview_scope = Some(scope);
         }
-        let max = match optics.quality {
-            Quality::Low => 480.,
-            Quality::Medium => 800.,
-            Quality::High => 1200.,
+        let max = if post {
+            900.
+        } else {
+            match optics.as_ref().map(|o| o.quality).unwrap_or_default() {
+                Quality::Low => 480.,
+                Quality::Medium => 800.,
+                Quality::High => 1200.,
+            }
         };
         let scale = (max / self.doc.width.max(self.doc.height) as f32).min(1.);
         let size = [
             (self.doc.width as f32 * scale).round().max(1.) as usize,
             (self.doc.height as f32 * scale).round().max(1.) as usize,
         ];
-        let video = self.depth_video_frames();
+        let video = self.depth_video_frames(use_camera || blur);
         let mut key = vec![
+            self.depth.preview_epoch,
             self.doc.layers.identity(),
             self.doc.extras.cameras.identity(),
             self.doc.extras.symbols.identity(),
@@ -581,18 +605,29 @@ impl Editor {
         } else {
             self.frame
         });
+        key.extend([
+            usize::from(use_camera),
+            usize::from(post),
+            usize::from(blur),
+        ]);
         for clip in &video {
             key.push(std::sync::Arc::as_ptr(&clip.pixels) as usize);
         }
         if let Some(job) = &self.depth.job {
             match job.try_recv() {
                 Ok((done, pixels, size)) => {
-                    self.depth.preview = Some(painter.ctx().load_texture(
-                        "camera-depth-preview",
-                        egui::ColorImage::from_rgb(size, &pixels),
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    self.depth.completed = done;
+                    if done.first() == Some(&self.depth.preview_epoch) {
+                        let image = egui::ColorImage::from_rgb(size, &pixels);
+                        if let Some(texture) = &mut self.depth.preview {
+                            texture.set(image, egui::TextureOptions::LINEAR);
+                        } else {
+                            self.depth.preview = Some(painter.ctx().load_texture(
+                                "composited-stage-preview",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
                     self.depth.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -603,7 +638,8 @@ impl Editor {
             }
         }
         if self.depth.job.is_none() && self.depth.requested != key {
-            let doc = crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene);
+            let mut doc = crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene);
+            doc.extras.scenes.clear();
             self.depth.owner = Some(doc.clone());
             self.depth.requested = key.clone();
             let frame = self.frame;
@@ -615,6 +651,7 @@ impl Editor {
             let (tx, rx) = std::sync::mpsc::channel();
             self.depth.job = Some(rx);
             let ctx = painter.ctx().clone();
+            let submitted = key.clone();
             std::thread::spawn(move || {
                 let render = egui::Context::default();
                 let mut cache = crate::paint::RenderCache::default();
@@ -627,15 +664,15 @@ impl Editor {
                     &render,
                     &mut cache,
                     &video,
+                    use_camera || blur,
+                    post,
+                    blur,
                 );
-                let _ = tx.send((key, pixels, size));
+                let _ = tx.send((submitted, pixels, size));
                 ctx.request_repaint();
             });
         }
-        let ready = self.depth.completed == self.depth.requested;
-        let compatible = self.depth.completed.get(..9) == self.depth.requested.get(..9)
-            && self.depth.completed.get(10..12) == self.depth.requested.get(10..12);
-        if !active(self) || optics.strength == 0. || (!ready && !(self.playing && compatible)) {
+        if !use_camera && !post {
             return false;
         }
         let Some(texture) = &self.depth.preview else {
@@ -692,6 +729,9 @@ impl Editor {
         result
     }
     pub(crate) fn depth_hit(&self, layer: usize, mark: &Mark, point: Pos2, tolerance: f32) -> bool {
+        if mark.style.raster_tile {
+            return false;
+        }
         crate::folder_groups::layer_active(&self.doc, &self.doc.layers[layer], self.frame)
             && self.selection_hit(mark, self.depth_point(point, self.layer, layer), tolerance)
     }
@@ -882,6 +922,41 @@ mod tests {
             assert!(!svg.contains("dof-1"));
         }
     }
+    #[test]
+    fn post_preview_retains_the_last_texture_while_the_next_frame_is_pending() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = doc();
+        let mut layer = e.doc.layers[0].clone();
+        layer.options.adjustment =
+            Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        e.doc.layers.push(layer);
+        let view = View {
+            center: Pos2::ZERO,
+            scale: 1.,
+            stage_center: Pos2::ZERO,
+            angle: 0.,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            e.camera_blur_preview(ui.painter(), view);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            e.depth.job = Some(receiver);
+            sender
+                .send((e.depth.requested.clone(), vec![0, 0, 0], [1, 1]))
+                .unwrap();
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            let texture = e.depth.preview.as_ref().unwrap().id();
+            let (_pending, receiver) = std::sync::mpsc::channel();
+            e.depth.job = Some(receiver);
+            e.frame = 1;
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.preview.as_ref().unwrap().id(), texture);
+            e.post.hidden = true;
+            assert!(!e.camera_blur_preview(ui.painter(), view));
+        });
+        output.textures_delta.clear();
+    }
+
     #[test]
     fn hidden_editor_blur_does_not_schedule_rendering_or_change_export() {
         let ctx = egui::Context::default();

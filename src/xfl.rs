@@ -112,6 +112,7 @@ struct Importer<'a> {
     kinds: HashMap<u64, String>,
     warnings: BTreeSet<String>,
     next_track: u64,
+    context: String,
     total: usize,
 }
 impl Importer<'_> {
@@ -125,6 +126,9 @@ impl Importer<'_> {
                 }
                 s.truncate(end);
                 s.push('…');
+            }
+            if !self.context.is_empty() {
+                s = format!("{}: {s}", self.context);
             }
             self.warnings.insert(s);
         }
@@ -246,7 +250,7 @@ impl Importer<'_> {
                 vec![base]
             }
             "ActionScript" | "script" | "DOMFrameSound" => {
-                self.warn("ActionScript, JavaScript y audio se omiten; no se ejecuta código");
+                self.warn("ActionScript y JavaScript se omiten; no se ejecuta código");
                 vec![]
             }
             _ => {
@@ -506,7 +510,14 @@ impl Importer<'_> {
         let Some(list) = n.child("layers") else {
             return Err("Línea de tiempo sin capas".into());
         };
-        for node in &list.children {
+        let mask_ids: HashMap<_, _> = list
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| layer.a("layerType") == Some("mask"))
+            .map(|(index, _)| (index, features::id()))
+            .collect();
+        for (layer_index, node) in list.children.iter().enumerate() {
             if node.name != "DOMLayer" {
                 continue;
             }
@@ -519,18 +530,28 @@ impl Importer<'_> {
             }
             let mut layer = Layer {
                 name: node.a("name").unwrap_or("Layer").into(),
-                visible: node.a("visible") != Some("false") && kind != "guide" && kind != "mask",
+                visible: node.a("visible") != Some("false"),
                 frames: vec![SharedVec::default()].into(),
                 options: Default::default(),
             };
             layer.options.locked = node.a("locked") == Some("true");
-            if kind != "normal" {
+            layer.options.mask_id = mask_ids.get(&layer_index).copied();
+            let parent = node
+                .a("parentLayerIndex")
+                .and_then(|value| value.parse::<usize>().ok());
+            if kind == "masked" {
+                layer.options.masked_by = parent.and_then(|index| mask_ids.get(&index).copied());
+                if layer.options.masked_by.is_none() {
+                    self.warn(format!("Capa {}: no se encuentra su máscara", layer.name));
+                }
+            } else if parent.is_some() && kind != "guide" {
                 self.warn(format!(
-                    "Capa {kind}: máscara/guía aproximada; no se importa su comportamiento"
+                    "Capa {}: relación de carpeta o guía no importada",
+                    layer.name
                 ));
             }
-            if node.a("parentLayerIndex").is_some() {
-                self.warn("Carpetas y relaciones de máscaras aplanadas a capas");
+            if kind == "guide" || kind == "guided" {
+                self.warn(format!("Capa {}: las guías se conservan como dibujo de referencia; no se reconstruye el vínculo de movimiento", layer.name));
             }
             let mut tweens = vec![];
             if let Some(frames) = node.child("frames") {
@@ -550,12 +571,21 @@ impl Importer<'_> {
                             marks.extend(self.best_element(e, index));
                         }
                     }
+                    if kind == "guide" {
+                        for mark in &mut marks {
+                            mark.style.guide = true;
+                        }
+                    }
+                    if self.context.starts_with("Símbolo ") && f.a("soundName").is_some() {
+                        self.warn(format!(
+                            "Capa {}: audio interno del símbolo omitido",
+                            layer.name
+                        ));
+                    }
                     let mut scripts = vec![];
                     f.descendants("ActionScript", &mut scripts);
-                    if !scripts.is_empty() || f.a("soundName").is_some() {
-                        self.warn(
-                            "ActionScript, JavaScript y audio se omiten; no se ejecuta código",
-                        );
+                    if !scripts.is_empty() {
+                        self.warn("ActionScript y JavaScript se omiten; no se ejecuta código");
                     }
                     if f.a("tweenType").is_some_and(|s| s != "none") {
                         tweens.push((
@@ -757,6 +787,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         kinds: HashMap::new(),
         warnings: BTreeSet::new(),
         next_track: 1,
+        context: String::new(),
         total: 0,
     };
     if imp.archive.directory_size_recovered() {
@@ -765,10 +796,38 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
     if fps.fract() != 0. {
         imp.warn(format!("FPS fraccionarios {fps} redondeados a {}", doc.fps));
     }
+    let mut sounds = HashMap::new();
     if let Some(media) = root.child("media") {
         let mut used = 0usize;
         for item in &media.children {
             let name = item.a("name").unwrap_or("").trim();
+            if item.name == "DOMSoundItem" && !name.is_empty() {
+                if sounds.contains_key(name) {
+                    continue;
+                }
+                let candidates = [
+                    item.a("href").map(|href| format!("LIBRARY/{href}")),
+                    item.a("href").map(str::to_owned),
+                    item.a("soundDataHRef").map(|href| format!("bin/{href}")),
+                ];
+                let sound = candidates.into_iter().flatten().find_map(|path| {
+                    let bytes = imp.archive.entry(path.as_bytes()).ok().flatten()?;
+                    if used.saturating_add(bytes.len()) > 256 * 1024 * 1024 {
+                        return None;
+                    }
+                    crate::media::imported_audio(bytes, name.into())
+                });
+                if let Some(asset) = sound {
+                    used += asset.data.len();
+                    sounds.insert(name.to_owned(), doc.extras.media.assets.len());
+                    doc.extras.media.assets.push(asset);
+                } else {
+                    imp.warn(format!(
+                        "Audio ausente, no compatible o demasiado grande: {name}"
+                    ));
+                }
+                continue;
+            }
             if item.name != "DOMBitmapItem" {
                 imp.warn(format!("Recurso {} omitido: {name}", item.name));
                 continue;
@@ -845,6 +904,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         }
     }
     for (id, name, n) in &definitions {
+        imp.context = format!("Símbolo {name}");
         let layers = match n.path("timeline/DOMTimeline") {
             Some(t) => match imp.timeline(t) {
                 Ok(l) => l,
@@ -962,7 +1022,61 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         if doc.extras.scenes.len() >= 100 {
             return Err("Demasiadas escenas".into());
         }
+        imp.context = format!("Escena {}", t.a("name").unwrap_or("Escena"));
         doc.layers = imp.timeline(t)?;
+        doc.extras.media.tracks.clear();
+        let count = doc.layers[0].frames.len();
+        for layer in t
+            .child("layers")
+            .into_iter()
+            .flat_map(|layers| &layers.children)
+        {
+            let layer_name = layer.a("name").unwrap_or("Audio");
+            let mut entries = Vec::new();
+            for frame in layer
+                .child("frames")
+                .into_iter()
+                .flat_map(|frames| &frames.children)
+            {
+                let Some(name) = frame.a("soundName").filter(|name| !name.is_empty()) else {
+                    continue;
+                };
+                let Some(&asset) = sounds.get(name) else {
+                    imp.warn(format!("Capa {layer_name}: audio omitido: {name}"));
+                    continue;
+                };
+                let start = integer(frame, "index", 0, 9999)?;
+                let duration = integer(frame, "duration", 1, 10000)?;
+                let sync = frame.a("soundSync").unwrap_or("event");
+                if sync == "stop" {
+                    imp.warn(format!(
+                        "Capa {layer_name}: evento de parada de audio omitido"
+                    ));
+                    continue;
+                }
+                let limit = if sync == "stream" { duration } else { count };
+                let offset = frame.n("inPoint44", 0.).unwrap_or(0.).max(0.);
+                let offset = (offset * doc.fps as f32 / 44100.).round() as usize;
+                if frame.a("soundLoop").is_some_and(|n| n != "1")
+                    || frame.child("soundEnvelope").is_some()
+                {
+                    imp.warn(format!(
+                        "Capa {layer_name}: bucles o envolvente de audio no importados"
+                    ));
+                }
+                entries.push((
+                    &doc.extras.media.assets[asset],
+                    start,
+                    offset,
+                    count.saturating_sub(start).min(limit),
+                ));
+            }
+            if let Some(track) =
+                crate::media::imported_sound_track(layer_name.into(), entries, doc.fps)
+            {
+                doc.extras.media.tracks.push(track);
+            }
+        }
         if let Some(color) = background.filter(|c| *c != [255, 255, 255, 255]) {
             if doc.layers.len() < 100 {
                 let mark = Mark {
@@ -1004,6 +1118,8 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         return Err("Documento XFL sin línea de tiempo".into());
     }
     doc.layers = doc.extras.scenes[0].layers.clone();
+    doc.extras.media.tracks = doc.extras.scenes[0].media_tracks.clone();
+    imp.context.clear();
     if doc.extras.scenes.len() == 1 {
         doc.extras.scenes.clear();
     }
@@ -1069,8 +1185,93 @@ impl crate::Editor {
         if !self.import_report_open {
             return;
         }
+        use crate::{
+            design::{Icon, button},
+            i18n::tr,
+        };
+        let title = tr("Importación de Animate · Compatibilidad");
+        let summary = tr(
+            "Se ha abierto la animación compatible. El código ActionScript/JavaScript no se ejecuta.",
+        );
+        let no_issues = tr("No se han detectado elementos omitidos en el contenido compatible.");
+        let original = tr("Guardar creará un proyecto .ltoon y conservará el FLA original.");
         let mut open = true;
-        eframe::egui::Window::new(crate::i18n::tr("Importación de Animate · Compatibilidad")).open(&mut open).default_width(520.).show(ctx,|ui|{ui.label(crate::i18n::tr("Se ha abierto la animación compatible. El código ActionScript/JavaScript no se ejecuta."));ui.label(crate::i18n::tr("Guardar creará una copia de LibreToon para conservar el FLA original."));ui.separator();eframe::egui::ScrollArea::vertical().max_height(350.).show(ui,|ui|{if self.doc.extras.import_warnings.is_empty(){ui.label(crate::i18n::tr("No se han detectado elementos omitidos en el contenido compatible."));}for message in &self.doc.extras.import_warnings{ui.label(format!("• {message}"));}});});
+        let mut export = false;
+        eframe::egui::Window::new(title)
+            .id(eframe::egui::Id::unique("fla-import-report"))
+            .open(&mut open)
+            .default_width(520.)
+            .show(ctx, |ui| {
+                ui.label(summary);
+                if self.doc.extras.imported {
+                    ui.label(original);
+                }
+                ui.separator();
+                eframe::egui::ScrollArea::vertical()
+                    .max_height(350.)
+                    .show(ui, |ui| {
+                        if self.doc.extras.import_warnings.is_empty() {
+                            ui.label(no_issues);
+                        }
+                        for message in &self.doc.extras.import_warnings {
+                            ui.label(format!("• {message}"));
+                        }
+                    });
+                ui.separator();
+                export = button(
+                    ui,
+                    Icon::Save,
+                    "Save report…",
+                    "Save report as plain text",
+                    false,
+                    true,
+                )
+                .clicked();
+            });
+        if export {
+            let source = self.path.as_deref();
+            let stem = source
+                .and_then(std::path::Path::file_stem)
+                .map_or_else(|| "LibreToon".into(), |name| name.to_string_lossy());
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter(tr("Text file"), &["txt"])
+                .set_file_name(format!("{stem}-import-report.txt"));
+            if let Some(folder) = source.and_then(std::path::Path::parent) {
+                dialog = dialog.set_directory(folder);
+            }
+            if let Some(mut destination) = dialog.save_file() {
+                if destination.extension().is_none() {
+                    destination.set_extension("txt");
+                }
+                if !destination
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+                {
+                    self.status = tr("Choose a .txt file for the report.").into();
+                    self.import_report_open = open;
+                    return;
+                }
+                let mut report = format!("{title}\n{summary}\n");
+                if self.doc.extras.imported {
+                    report.push_str(original);
+                    report.push('\n');
+                }
+                report.push('\n');
+                if self.doc.extras.import_warnings.is_empty() {
+                    report.push_str(no_issues);
+                    report.push('\n');
+                }
+                for warning in &self.doc.extras.import_warnings {
+                    report.push_str("- ");
+                    report.push_str(warning);
+                    report.push('\n');
+                }
+                self.status = match std::fs::write(&destination, report) {
+                    Ok(()) => format!("{} {}", tr("Import report saved"), destination.display()),
+                    Err(error) => format!("{} {error}", tr("Could not save import report")),
+                };
+            }
+        }
         self.import_report_open = open;
     }
 }

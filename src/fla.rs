@@ -30,49 +30,16 @@ pub(crate) fn number(a: &[OwnedAttribute], name: &str, default: f32) -> Result<f
 pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
     doc.validate()?;
     let xml = document_xml(doc);
-    let mut metadata = doc.clone();
-    for asset in &mut metadata.extras.media.assets {
-        asset.data = Default::default();
-    }
-    for reference in &mut metadata.extras.references {
-        reference.data = Default::default();
-    }
-    let native = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
-    if xml.len() > 64 * 1024 * 1024 || native.len() > 64 * 1024 * 1024 {
+    if xml.len() > 64 * 1024 * 1024 {
         return Err("Proyecto demasiado grande para el contenedor FLA actual".into());
     }
-    let names: Vec<_> = doc
-        .extras
-        .media
-        .assets
-        .iter()
-        .map(|asset| media_entry(asset.id))
-        .collect();
-    let mut entries: Vec<(&str, &[u8])> = vec![
-        ("mimetype", b"application/vnd.adobe.xfl"),
-        ("DOMDocument.xml", xml.as_bytes()),
-        ("LIBRETOON/document.json", &native),
-    ];
-    entries.extend(
-        names
-            .iter()
-            .zip(doc.extras.media.assets.iter())
-            .map(|(name, asset)| (name.as_str(), asset.data.as_slice())),
-    );
-    let reference_names: Vec<_> = doc
-        .extras
-        .references
-        .iter()
-        .filter(|r| !r.data.is_empty())
-        .map(|r| format!("LIBRETOON/references/{}.image", r.id))
-        .collect();
-    entries.extend(
-        reference_names
-            .iter()
-            .zip(doc.extras.references.iter().filter(|r| !r.data.is_empty()))
-            .map(|(name, r)| (name.as_str(), r.data.as_slice())),
-    );
-    Ok(crate::fla_zip::pack_slices(&entries))
+    crate::native_project::pack(
+        doc,
+        vec![
+            ("mimetype", b"application/vnd.adobe.xfl"),
+            ("DOMDocument.xml", xml.as_bytes()),
+        ],
+    )
 }
 fn solid(color: [u8; 4]) -> String {
     format!(
@@ -211,9 +178,6 @@ fn paths(edges: &str) -> Result<Vec<Vec<[f32; 2]>>, String> {
                 .collect()
         })
         .collect())
-}
-fn media_entry(id: u64) -> String {
-    format!("LIBRETOON/media/{id}")
 }
 
 // Older exports can differ by a few floating-point ULPs after geometry fixes.
@@ -385,32 +349,9 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
     let native = crate::fla_zip::entry(bytes, b"LIBRETOON/document.json");
     let mut stale = false;
     if let Ok(Some(native)) = &native {
-        if let Ok(mut doc) = serde_json::from_slice::<Document>(native) {
-            if !doc.extras.media.assets.is_empty() {
-                let archive = crate::fla_zip::Archive::new(bytes)?;
-                for asset in &mut doc.extras.media.assets {
-                    if asset.data.is_empty() {
-                        asset.data = archive
-                            .entry(media_entry(asset.id).as_bytes())?
-                            .ok_or("Missing embedded media data")?
-                            .into();
-                    }
-                }
-            }
-            if !doc.extras.references.is_empty() {
-                let archive = crate::fla_zip::Archive::new(bytes)?;
-                for reference in &mut doc.extras.references {
-                    if reference.data.is_empty() && reference.dimensions != [0, 0] {
-                        reference.data = archive
-                            .entry(
-                                format!("LIBRETOON/references/{}.image", reference.id).as_bytes(),
-                            )?
-                            .ok_or("Missing reference image")?
-                            .into();
-                    }
-                }
-            }
-            if doc.validate().is_ok() && same_native_preview(&document_xml(&doc), &xml) {
+        let archive = crate::fla_zip::Archive::new(bytes)?;
+        if let Ok(doc) = crate::native_project::restore(&archive, native) {
+            if same_native_preview(&document_xml(&doc), &xml) {
                 return Ok(doc);
             }
         }

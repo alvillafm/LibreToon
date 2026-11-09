@@ -180,7 +180,9 @@ impl Editor {
             return;
         }
         if action == 1
-            && ((self.doc.layers.len() == 1 && !self.doc.layers[layer].options.animation_track)
+            && ((self.doc.layers.len() == 1
+                && !self.doc.layers[layer].options.animation_track
+                && self.doc.layers[layer].options.adjustment.is_none())
                 || self.doc.layers[layer].options.locked)
         {
             return;
@@ -223,7 +225,7 @@ impl Editor {
         self.timeline_layer_edit(action);
     }
     fn timeline_layer_edit(&mut self, action: usize) {
-        if self.doc.layers[self.layer].options.animation_track {
+        if self.doc.layers[self.layer].options.animation_track || self.adjustment_active() {
             return;
         }
         if self.doc.layers[self.layer].options.locked
@@ -359,7 +361,8 @@ impl Editor {
             _ => self.timeline_layer_edit(action),
         }
     }
-    fn add_layer_advanced(&mut self) {
+    fn add_layer_advanced(&mut self, raster: bool) {
+        self.finish_raster_stroke();
         self.finish_pending_pen();
         if self.doc.layers.len() >= 100 {
             return;
@@ -370,10 +373,15 @@ impl Editor {
         keys[0] = true;
         let number = self.doc.layers.len() + 1;
         self.doc.layers.push(Layer {
-            name: format!("Layer {number}"),
+            name: if raster {
+                format!("{} {number}", tr("Raster layer"))
+            } else {
+                format!("Layer {number}")
+            },
             visible: true,
             frames: vec![Default::default(); count].into(),
             options: LayerOptions {
+                raster,
                 folder: self.feature.selected_folder,
                 keys: keys.into(),
                 ..Default::default()
@@ -414,7 +422,7 @@ impl Editor {
         self.folder_dialog(ui.ctx());
         let previous_frame = self.frame;
         egui::Panel::bottom("timeline")
-            .default_size(245.)
+            .default_size(300.)
             .min_size(150.)
             .max_size(700.)
             .resizable(true)
@@ -466,12 +474,7 @@ impl Editor {
                     )
                     .clicked()
                     {
-                        self.animation.play_all = false;
-                        self.playing = !self.playing;
-                        if self.playing {
-                            self.animation.clock = self.frame;
-                        }
-                        self.tick = std::time::Instant::now();
+                        self.toggle_timeline_play();
                     }
                     if button(
                         ui,
@@ -550,6 +553,14 @@ impl Editor {
                             .range(0..=24)
                             .suffix(crate::i18n::tr(" >")),
                     );
+                    ui.separator();
+                    if button(ui,Icon::Loop,"","Loop animation tag",self.animation.loop_tag,!self.doc.extras.tags.is_empty() && self.feature.symbol_stack.is_empty()).clicked(){
+                        self.animation.loop_tag = !self.animation.loop_tag;
+                        if self.playing && let Some((start,end))=self.loop_range() && !(start..=end).contains(&self.frame) {
+                            self.frame=start;
+                            self.restart_media_audio();
+                        }
+                    }
                 });
                 ui.separator();
                 ui.horizontal_top(|ui| {
@@ -559,34 +570,28 @@ impl Editor {
                         ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if button(
-                                ui,
-                                Icon::LayerAdd,
-                                "",
-                                "Añadir capa",
-                                false,
-                                self.doc.layers.len() < 100,
-                            )
-                            .clicked()
-                            {
-                                self.add_layer_advanced();
-                            }
+                            let add = button(ui, Icon::LayerAdd, "", "Añadir capa", false, self.doc.layers.len() < 100);
+                            egui::Popup::menu(&add).show(|ui| {
+                                if button(ui, Icon::LayerAdd, "New vector layer", "New vector layer", false, true).clicked() {
+                                    self.add_layer_advanced(false);
+                                    ui.close();
+                                }
+                                if button(ui, Icon::LayerAdd, "New raster layer", "New raster layer", false, true).clicked() {
+                                    self.add_layer_advanced(true);
+                                    ui.close();
+                                }
+                            });
                             if button(
                                 ui,
                                 Icon::LayerRemove,
                                 "",
                                 "Eliminar capa",
                                 false,
-                                self.doc.layers.len() > 1,
+                                (self.doc.layers.len() > 1 || self.adjustment_active()) && !self.doc.layers[self.layer].options.locked,
                             )
                             .clicked()
                             {
-                                self.checkpoint();
-                                self.finish_pending_pen();
-                                self.doc.layers.remove(self.layer);
-                                self.layer = self.layer.min(self.doc.layers.len() - 1);
-                                self.renaming_layer = None;
-                                self.recover();
+                                self.timeline_layer_action(self.layer,1);
                             }
                             if button(
                                 ui,
@@ -594,7 +599,7 @@ impl Editor {
                                 "",
                                 "Máscara de recorte",
                                 self.doc.layers[self.layer].options.clip,
-                                self.layer > 0 || self.doc.layers[self.layer].options.clip,
+                                !self.adjustment_active() && (self.layer > 0 || self.doc.layers[self.layer].options.clip),
                             )
                             .clicked()
                             {
@@ -690,18 +695,32 @@ impl Editor {
                                     "",
                                     tip,
                                     false,
-                                    !self.doc.layers[self.layer].options.locked && !self.doc.layers[self.layer].options.animation_track,
+                                    !self.doc.layers[self.layer].options.locked && !self.doc.layers[self.layer].options.animation_track && !self.adjustment_active(),
                                 )
                                 .clicked()
                                 {
                                     self.timeline_edit(action);
                                 }
                             }
-                            if button(ui, Icon::Tween, "", "Motion tween", false, !self.doc.layers[self.layer].options.animation_track).clicked() {
+                            if button(ui, Icon::Tween, "", "Motion tween", false, !self.doc.layers[self.layer].options.animation_track && !self.doc.layers[self.layer].options.raster).clicked() {
                                 self.create_motion();
                             }
                             if button(ui,Icon::Film,"","Create Animation Clip…",false,true).clicked(){self.begin_animation_clip();}
                         });
+                    });
+                    let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 49.), Sense::hover());
+                    ui.painter().line_segment([divider.left_top(),divider.left_bottom()],Stroke::new(1.,crate::themes::line()));
+                    ui.vertical(|ui| {
+                        ui.set_min_width(140.);
+                        ui.label(egui::RichText::new(tr("POST-PROCESSING")).small().color(crate::themes::muted()));
+                        ui.separator();
+                        if button(ui,Icon::Fx,"","New adjustment layer",false,self.doc.layers.len()<100 && self.feature.symbol_stack.is_empty()).clicked(){
+                            self.add_layer_advanced(false);
+                            let layer=&mut self.doc.layers[self.layer];
+                            layer.name=tr("Adjustment layer").into();
+                            layer.options.adjustment=Some(Default::default());
+                            self.recover();
+                        }
                     });
                 });
                 ui.separator();
@@ -770,10 +789,12 @@ impl Editor {
                         ui.set_style(original_style);
                         let count = self.doc.layers[0].frames.len();
                         let row_h = 28.;
+                        let tag_height = if self.doc.extras.tags.is_empty() || !self.feature.symbol_stack.is_empty() { 0. } else { 20. };
+                        let header_height = 24. + tag_height;
                         let (r, _) = ui.allocate_exact_size(
                             Vec2::new(
                                 label_w + (count + self.feature.frame_drag.map_or(0, |d| d.end-d.start+1)).max(self.feature.exposure_drag.map_or(count,|d|d.target)).max(self.folder_groups.timeline_end()).min(10000) as f32 * cell,
-                                24. + (all.len()+1) as f32 * row_h,
+                                header_height + (all.len()+1) as f32 * row_h,
                             ),
                             Sense::hover(),
                         );
@@ -790,13 +811,13 @@ impl Editor {
                             grid_clip.right(),
                         );
                         let visible = crate::workspace::visible_range(
-                            r.top() + 24.,
+                            r.top() + header_height,
                             row_h,
                             all.len(),
                             clip.top(),
                             clip.bottom(),
                         );
-                        let header = Rect::from_min_size(r.min, Vec2::new(r.width(), 24.));
+                        let header = Rect::from_min_size(r.min, Vec2::new(r.width(), header_height));
                         painter.rect_filled(
                             header,
                             0.,
@@ -816,7 +837,7 @@ impl Editor {
                         }
                         ui.set_clip_rect(grid_clip);
                         let scrub = ui.interact(
-                            Rect::from_min_max(Pos2::new(grid_clip.left(), r.top()), header.max),
+                            Rect::from_min_max(Pos2::new(grid_clip.left(), r.top()), Pos2::new(header.right(), r.top()+24.)),
                             ui.scope_id().with("scrub"),
                             Sense::click_and_drag(),
                         );
@@ -826,6 +847,24 @@ impl Editor {
                                     as usize)
                                     .min(count - 1);
                                 self.playing = false;
+                            }
+                        }
+                        self.timeline_marker_menu(ui, &scrub, r.left() + label_w, cell, count);
+                        if tag_height > 0. {
+                            self.draw_animation_tags(ui,r.left()+label_w,r.top()+24.,cell,grid_clip,count);
+                        }
+                        for marker in self.doc.extras.markers.iter().filter(|marker| frames.contains(&marker.frame)) {
+                            let x = r.left() + label_w + (marker.frame as f32 + 0.5) * cell;
+                            let y = r.top();
+                            let [red,green,blue] = marker.color;
+                            let color = Color32::from_rgb(red,green,blue);
+                            painter.with_clip_rect(grid_clip).add(egui::Shape::convex_polygon(
+                                vec![Pos2::new(x - 4., y + 1.), Pos2::new(x + 4., y + 1.), Pos2::new(x, y + 7.)],
+                                color, Stroke::NONE,
+                            ));
+                            if cell >= 20. {
+                                painter.with_clip_rect(grid_clip).text(Pos2::new(x + 5., y + 1.), egui::Align2::LEFT_TOP,
+                                    &marker.name, egui::FontId::proportional(9.), color);
                             }
                         }
                         for f in frames.clone() {
@@ -845,7 +884,7 @@ impl Editor {
                         for row in visible {
                             ui.set_clip_rect(labels_clip);
                             let painter = ui.painter().with_clip_rect(labels_clip);
-                            let y = r.top() + 24. + row as f32 * row_h;
+                            let y = r.top() + header_height + row as f32 * row_h;
                             let label = Rect::from_min_size(
                                 Pos2::new(label_left, y),
                                 Vec2::new(label_w, row_h),
@@ -915,10 +954,10 @@ impl Editor {
                                 Row::Media(index) => {
                                     let track_at = |pos: Pos2| {
                                         if pos.x < grid_clip.left() || !clip.contains(pos) { return None; }
-                                        let index = ((pos.y - r.top() - 24.) / row_h).floor();
+                                        let index = ((pos.y - r.top() - header_height) / row_h).floor();
                                         if index < 0. { return None; }
                                         match all.get(index as usize) {
-                                            Some(Row::Media(track)) => Some((*track, r.top() + 24. + index * row_h)),
+                                            Some(Row::Media(track)) => Some((*track, r.top() + header_height + index * row_h)),
                                             _ => None,
                                         }
                                     };
@@ -1024,10 +1063,24 @@ impl Editor {
                                             self.renaming_layer = None;
                                         }
                                     } else {
-                                        painter.text(
+                                        let masked = self.doc.layers[l].options.clip || self.doc.layers[l].options.masked_by.is_some();
+                                        let special = self.doc.layers[l].options.animation_track || self.doc.layers[l].options.adjustment.is_some();
+                                        use crate::studio::LayerColor;
+                                        let color = self.studio.prefs.layer_color(if self.doc.layers[l].options.animation_track {
+                                            LayerColor::Animation
+                                        } else if self.doc.layers[l].options.adjustment.is_some() {
+                                            LayerColor::Adjustment
+                                        } else if self.doc.layers[l].options.raster {
+                                            LayerColor::Raster
+                                        } else {
+                                            LayerColor::Vector
+                                        });
+                                        let drawing = !special && self.doc.layers[l].options.mannequin.is_none();
+                                        let reserved = if drawing { if masked { 34. } else { 17. } } else { 0. };
+                                        painter.with_clip_rect(Rect::from_min_max(name_rect.min, name_rect.max - Vec2::new(reserved, 0.)).intersect(labels_clip)).text(
                                             name_rect.left_center(),
                                             egui::Align2::LEFT_CENTER,
-                                            if self.doc.layers[l].options.animation_track {format!("▶ {}",self.doc.layers[l].name)} else {self.doc.layers[l].name.clone()},
+                                            self.doc.layers[l].name.clone(),
                                             egui::FontId::proportional(11.),
                                             if self.doc.layers[l].options.mannequin.is_some()
                                                 && crate::themes::current()
@@ -1043,6 +1096,21 @@ impl Editor {
                                             ui.scope_id().with(("layer-row", l)),
                                             Sense::click_and_drag(),
                                         );
+                                        let response = if self.doc.layers[l].options.animation_track { response } else {
+                                            response.on_hover_text(tr(if self.doc.layers[l].options.raster { "Raster layer" } else { "Vector layer" }))
+                                        };
+                                        if drawing {
+                                            let center = name_rect.right_center() - Vec2::new(if masked { 25. } else { 8. }, 0.);
+                                            painter.rect_filled(Rect::from_center_size(center, Vec2::splat(14.)), 3., crate::themes::palette().raised);
+                                            painter.text(center, egui::Align2::CENTER_CENTER, if self.doc.layers[l].options.raster { "R" } else { "V" }, egui::FontId::monospace(10.), color);
+                                        }
+                                        if special {
+                                            let icon=if self.doc.layers[l].options.animation_track {Icon::Symbol} else {Icon::Fx};
+                                            draw(&painter,Rect::from_center_size(name_rect.right_center()-Vec2::new(8.,0.),Vec2::splat(16.)),icon,color);
+                                        }
+                                        if masked {
+                                            draw(&painter, Rect::from_center_size(name_rect.right_center() - Vec2::new(8., 0.), Vec2::splat(15.)), Icon::Mask, crate::themes::accent());
+                                        }
                                         if response.clicked() {
                                             self.folder_groups.selected=None;
                                             self.layer = l;
@@ -1064,8 +1132,8 @@ impl Editor {
                                                 (0, Icon::Rename, "Rename layer", true),
                                                 (2, Icon::Eye, if self.doc.layers[l].visible { "Hide layer" } else { "Show layer" }, true),
                                                 (3, Icon::Lock, if self.doc.layers[l].options.locked { "Unlock layer" } else { "Lock layer" }, true),
-                                                (4, Icon::Film, "Select all frames", true),
-                                                (1, Icon::Trash, if self.doc.layers[l].options.animation_track {"Delete animation track"}else{"Delete layer"}, (self.doc.layers.len() > 1 || self.doc.layers[l].options.animation_track) && !self.doc.layers[l].options.locked),
+                                                (4, Icon::Film, "Select all frames", !special),
+                                                (1, Icon::Trash, if self.doc.layers[l].options.animation_track {"Delete animation track"}else{"Delete layer"}, (self.doc.layers.len() > 1 || special) && !self.doc.layers[l].options.locked),
                                             ] {
                                                 if button(ui, icon, label, label, false, enabled).clicked() {
                                                     layer_menu_action = Some((l, action));
@@ -1103,11 +1171,25 @@ impl Editor {
                                     ui.set_clip_rect(grid_clip);
                                     let painter = ui.painter().with_clip_rect(grid_clip);
                                     let animation_row = Rect::from_min_max(Pos2::new(r.left()+label_w,y),Pos2::new(r.right(),y+row_h));
+                                    if self.doc.layers[l].options.adjustment.is_some() {
+                                        let band=animation_row.shrink2(Vec2::new(1.,4.));
+                                        painter.rect_filled(band,4.,self.studio.prefs.layer_color(crate::studio::LayerColor::Adjustment).gamma_multiply(if l == self.layer { 0.42 } else { 0.24 }));
+                                        let click=ui.interact(band,ui.scope_id().with(("adjustment-track",l)),Sense::click());
+                                        if click.clicked(){self.layer=l;self.playing=false;}
+                                        continue;
+                                    }
                                     self.animation_drop_target(ui,animation_row,r.left()+label_w,cell,Some(l));
                                     if self.doc.layers[l].options.animation_track {
                                         self.animation_track_ui(ui,l,animation_row,r.left()+label_w,cell);
                                         continue;
                                     }
+                                    let layer_color = self.studio.prefs.layer_color(if self.doc.layers[l].options.mannequin.is_some() {
+                                        crate::studio::LayerColor::Mannequin
+                                    } else if self.doc.layers[l].options.raster {
+                                        crate::studio::LayerColor::Raster
+                                    } else {
+                                        crate::studio::LayerColor::Vector
+                                    });
                                     for f in frames.clone() {
                                         let rect = Rect::from_min_size(
                                             Pos2::new(r.left() + label_w + f as f32 * cell, y),
@@ -1116,7 +1198,7 @@ impl Editor {
                                         let key = self.doc.layers[l].key(f);
                                         let color =
                                             if self.doc.layers[l].options.mannequin.is_some() {
-                                                crate::themes::color(Color32::from_rgb(71, 49, 94))
+                                                layer_color.gamma_multiply(0.36)
                                             } else if crate::animation::span(&self.doc.layers[l], f)
                                                 .is_some()
                                                 && f != self.frame
@@ -1125,9 +1207,9 @@ impl Editor {
                                             } else if f == self.frame {
                                                 crate::themes::color(Color32::from_rgb(50, 88, 130))
                                             } else if key {
-                                                crate::themes::color(Color32::from_gray(54))
+                                                layer_color.gamma_multiply(0.26)
                                             } else {
-                                                crate::themes::color(Color32::from_gray(45))
+                                                layer_color.gamma_multiply(0.14)
                                             };
                                         painter.rect_filled(rect, 0., color);
                                         painter.rect_stroke(
@@ -1338,11 +1420,11 @@ impl Editor {
                                     let delete=ui.interact(trash,ui.scope_id().with("delete-rigging-track"),Sense::click()).on_hover_text(tr("Delete rigging track"));
                                     if delete.clicked(){delete_rigging=true;}
                                     let color =
-                                        crate::themes::color(Color32::from_rgb(86, 211, 214));
+                                        self.studio.prefs.layer_color(crate::studio::LayerColor::Rigging);
                                     painter.rect_filled(
                                         label,
                                         0.,
-                                        crate::themes::color(Color32::from_rgb(29, 63, 68)),
+                                        color.gamma_multiply(0.27),
                                     );
                                     draw(
                                         &painter,
@@ -1459,11 +1541,11 @@ impl Editor {
                                 }
                                 Row::Cameras => {
                                     let orange =
-                                        crate::themes::color(Color32::from_rgb(230, 157, 55));
+                                        self.studio.prefs.layer_color(crate::studio::LayerColor::Camera);
                                     painter.rect_filled(
                                         label,
                                         0.,
-                                        crate::themes::color(Color32::from_rgb(80, 56, 32)),
+                                        orange.gamma_multiply(0.3),
                                     );
                                     draw(
                                         &painter,
@@ -1500,11 +1582,9 @@ impl Editor {
                                             rect,
                                             3.,
                                             if self.feature.selected_camera == Some(c.id) {
-                                                crate::themes::color(Color32::from_rgb(
-                                                    159, 101, 36,
-                                                ))
+                                                orange.gamma_multiply(0.68)
                                             } else {
-                                                crate::themes::color(Color32::from_rgb(105, 73, 39))
+                                                orange.gamma_multiply(0.45)
                                             },
                                         );
                                         painter.rect_stroke(
@@ -1691,9 +1771,9 @@ impl Editor {
                         if let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                             && clip.contains(pos) && r.contains(pos)
                         {
-                            let local_row = ((pos.y - r.top() - 24.) / row_h).floor();
+                            let local_row = ((pos.y - r.top() - header_height) / row_h).floor();
                             let row = (local_row >= 0.).then(|| all.get(local_row as usize)).flatten();
-                            let top = r.top() + 24. + local_row * row_h;
+                            let top = r.top() + header_height + local_row * row_h;
                             let x = grid_clip.left();
                             if let Some(Row::Layer(layer, _)) = row
                                 && pos.x >= x
@@ -1733,7 +1813,7 @@ impl Editor {
                                 }
                             }
                         }
-                        let empty_top=r.top()+24.+all.len() as f32*row_h;
+                        let empty_top=r.top()+header_height+all.len() as f32*row_h;
                         self.animation_drop_target(ui,Rect::from_min_max(Pos2::new(r.left()+label_w,empty_top),r.max),r.left()+label_w,cell,None);
                         let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell;
                         painter.with_clip_rect(grid_clip).line_segment(

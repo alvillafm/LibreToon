@@ -306,33 +306,60 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     );
 }
 pub fn selector(ui: &mut egui::Ui, selected: &mut Theme) -> bool {
-    let mut changed = false;
+    let before = *selected;
     ui.vertical(|ui| {
-        for theme in Theme::ALL {
-            let p = theme.palette();
-            let response = ui
-                .horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 4., p.panel);
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(r.min + egui::vec2(4., 4.), egui::vec2(7., 16.)),
-                        2.,
-                        p.accent,
-                    );
-                    ui.painter().line_segment(
-                        [r.min + egui::vec2(16., 8.), r.min + egui::vec2(38., 8.)],
-                        Stroke::new(2., p.text),
-                    );
-                    ui.painter().line_segment(
-                        [r.min + egui::vec2(16., 15.), r.min + egui::vec2(32., 15.)],
-                        Stroke::new(2., p.muted),
-                    );
-                    ui.selectable_value(selected, theme, crate::i18n::tr(theme.name()))
-                })
-                .inner;
-            changed |= response.changed();
-        }
+        ui.horizontal_top(|ui| {
+            for (light, heading) in [(true, "Light themes"), (false, "Dark themes")] {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(175., 0.),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        crate::design::category(ui, heading);
+                        for theme in Theme::ALL
+                            .into_iter()
+                            .filter(|theme| theme.palette().light == light)
+                        {
+                            let p = theme.palette();
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(42., 24.),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(r, 4., p.panel);
+                                ui.painter().rect_stroke(
+                                    r,
+                                    4.,
+                                    Stroke::new(1., p.border),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        r.min + egui::vec2(4., 4.),
+                                        egui::vec2(7., 16.),
+                                    ),
+                                    2.,
+                                    p.accent,
+                                );
+                                for (y, width, color) in [(8., 22., p.text), (15., 16., p.muted)] {
+                                    ui.painter().line_segment(
+                                        [
+                                            r.min + egui::vec2(16., y),
+                                            r.min + egui::vec2(16. + width, y),
+                                        ],
+                                        Stroke::new(2., color),
+                                    );
+                                }
+                                ui.selectable_value(selected, theme, crate::i18n::tr(theme.name()));
+                            });
+                        }
+                    },
+                );
+                if light {
+                    ui.add_space(10.);
+                }
+            }
+        });
         ui.small(crate::i18n::tr(selected.description()));
     });
-    changed
+    *selected != before
 }

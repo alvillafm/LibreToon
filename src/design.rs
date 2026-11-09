@@ -5,6 +5,12 @@ pub const PANEL: Color32 = Color32::from_rgb(39, 40, 44);
 pub const LINE: Color32 = Color32::from_rgb(61, 63, 69);
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Adjust,
+    Fx,
+    Minus,
+    Pin,
+    Tag,
+    Audio,
     LayerAdd,
     LayerRemove,
     FolderRemove,
@@ -179,6 +185,41 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
         );
     };
     match icon {
+        Icon::Fx => {
+            path(&[(3., 16.), (3., 4.), (11., 4.)]);
+            line((3., 9.), (9., 9.));
+            line((12., 10.), (18., 16.));
+            line((18., 10.), (12., 16.));
+        }
+        Icon::Adjust => {
+            for (y, x) in [(5., 7.), (10., 13.), (15., 9.)] {
+                line((2., y), (x - 2., y));
+                line((x + 2., y), (18., y));
+                circle(x, y, 2.);
+            }
+        }
+        Icon::Minus => line((4., 10.), (16., 10.)),
+        Icon::Pin => {
+            circle(10., 6., 4.);
+            path(&[(7., 9.), (10., 18.), (13., 9.)]);
+            circle(10., 6., 1.);
+        }
+        Icon::Tag => {
+            path(&[
+                (2., 4.),
+                (12., 4.),
+                (18., 10.),
+                (12., 16.),
+                (2., 16.),
+                (2., 4.),
+            ]);
+            circle(6., 10., 1.4);
+        }
+        Icon::Audio => {
+            for (x, h) in [(2., 2.), (6., 5.), (10., 8.), (14., 5.), (18., 2.)] {
+                line((x, 10. - h), (x, 10. + h));
+            }
+        }
         Icon::LayerAdd | Icon::LayerRemove => {
             path(&[(1., 6.), (7., 3.), (13., 6.), (7., 9.), (1., 6.)]);
             path(&[(1., 10.), (7., 13.), (12., 10.)]);

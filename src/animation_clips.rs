@@ -1220,7 +1220,10 @@ impl Editor {
         grid_left: f32,
         cell: f32,
     ) {
-        let color = Color32::from_rgb(163, 119, 235);
+        let color = self
+            .studio
+            .prefs
+            .layer_color(crate::studio::LayerColor::Animation);
         let frames_id = self.doc.layers[layer].frames.identity();
         let keys_id = self.doc.layers[layer].options.keys.identity();
         if self.clips.cache.get(&layer).is_none_or(|cache| {
@@ -2137,6 +2140,96 @@ mod tests {
             .unwrap()
             .rate = f64::NAN;
         assert!(bad.validate().is_err());
+    }
+    #[test]
+    fn complete_short_round_trips_native_scenes_clips_audio_references_and_png_export() {
+        let mut editor = fixture();
+        editor.doc.width = 64;
+        editor.doc.height = 64;
+        let clip = create(&mut editor);
+        assert!(editor.place_animation_clip(clip, 0, None, Some(Pos2::new(24., 24.))));
+        let sound = crate::media::imported_audio(crate::media::test_wav(), "Voice".into()).unwrap();
+        let track =
+            crate::media::imported_sound_track("Dialogue".into(), vec![(&sound, 0, 0, 12)], 24)
+                .unwrap();
+        editor.doc.extras.media.assets.push(sound);
+        editor.doc.extras.media.tracks.push(track);
+        editor.doc.extras.markers.push(crate::dialogue::Marker {
+            frame: 0,
+            name: "Opening".into(),
+            color: [91, 158, 255],
+        });
+        let mut reference = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+            .write_to(&mut reference, image::ImageFormat::Png)
+            .unwrap();
+        editor
+            .doc
+            .extras
+            .references
+            .push(crate::reftool::Reference {
+                id: crate::features::id(),
+                name: "Reference".into(),
+                dimensions: [2, 2],
+                data: reference.into_inner().into(),
+                position: [140., 120.],
+                size: [350., 350.],
+                zoom: 0.,
+            });
+        let first =
+            crate::animation::scene_from(&editor.doc, crate::features::id(), "Opening".into());
+        let second = crate::animation::scene_from(
+            &crate::fresh_document(),
+            crate::features::id(),
+            "End".into(),
+        );
+        editor.doc.extras.scenes = vec![first, second].into();
+        let dir = std::env::temp_dir().join(format!("libretoon-short-{}", crate::features::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let project = dir.join("short.ltoon");
+        crate::write_document(&project, &editor.project_document()).unwrap();
+        let restored = crate::documents::read_project(&project).unwrap();
+        assert_eq!(restored.extras.scenes.len(), 2);
+        assert_eq!(restored.extras.animation_clips.len(), 1);
+        assert_eq!(restored.extras.media.tracks.len(), 1);
+        assert_eq!(restored.extras.markers[0].name, "Opening");
+        assert_eq!(restored.extras.references[0].dimensions, [2, 2]);
+        let settings = crate::exporter::ExportSettings {
+            name: "short".into(),
+            folder: dir.to_string_lossy().into_owned(),
+            format: 6,
+            first: 1,
+            last: 25,
+            width: 64,
+            height: 64,
+            fps: 24,
+            quality: 95,
+            loops: 0,
+            colors: 256,
+            dither: false,
+            svg_sequence: false,
+        };
+        crate::exporter::run_export(
+            &restored,
+            &settings,
+            0,
+            &dir.join("short.png"),
+            dir.join("no-ffmpeg"),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let art = image::open(dir.join("short-00001.png"))
+            .unwrap()
+            .into_rgba8();
+        let blank = image::open(dir.join("short-00025.png"))
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(art.dimensions(), (64, 64));
+        assert!(art.pixels().any(|pixel| pixel[3] == 255));
+        assert_eq!(art.get_pixel(63, 63)[3], 0);
+        assert!(blank.pixels().all(|pixel| pixel[3] == 0));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     fn button_at(pos: Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {

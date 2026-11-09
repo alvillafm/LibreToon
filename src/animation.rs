@@ -221,6 +221,10 @@ pub struct CameraAnimation {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Scene {
     #[serde(default)]
+    pub markers: SharedVec<crate::dialogue::Marker>,
+    #[serde(default)]
+    pub tags: SharedVec<crate::dialogue::Tag>,
+    #[serde(default)]
     pub(crate) media_tracks: SharedVec<crate::media::Track>,
     #[serde(default)]
     pub rig: crate::rig::Rig,
@@ -242,6 +246,11 @@ pub struct MotionBend {
 #[derive(Default)]
 pub struct State {
     pub clock: usize,
+    pub(crate) annotation: Option<crate::dialogue::Draft>,
+    pub(crate) loop_tag: bool,
+    pub(crate) selected_tag: Option<u64>,
+    pub(crate) tag_drag: Option<crate::dialogue::TagDrag>,
+    pub(crate) space_press: Option<(f64, bool)>,
     pub scenes_open: bool,
     pub scene_rename: Option<u64>,
     pub scene_delete: Option<u64>,
@@ -259,6 +268,8 @@ pub struct State {
 }
 pub fn scene_from(doc: &Document, id: u64, name: String) -> Scene {
     Scene {
+        markers: doc.extras.markers.clone(),
+        tags: doc.extras.tags.clone(),
         rig: doc.extras.rig.clone(),
         media_tracks: doc.extras.media.tracks.clone(),
         id,
@@ -282,6 +293,8 @@ pub fn scene_doc(doc: &Document, index: usize) -> Document {
     if !doc.extras.scenes.is_empty() && index != doc.extras.active_scene {
         let s = &doc.extras.scenes[index];
         result.layers = s.layers.clone();
+        result.extras.markers = s.markers.clone();
+        result.extras.tags = s.tags.clone();
         result.extras.rig = s.rig.clone();
         result.extras.media.tracks = s.media_tracks.clone();
         result.extras.folders = s.folders.clone();
@@ -611,6 +624,9 @@ impl Editor {
     }
     pub fn create_motion(&mut self) {
         let l = self.layer;
+        if self.doc.layers[l].options.raster || self.adjustment_active() {
+            return;
+        }
         if self.doc.layers[l].options.animation_track {
             return;
         }
@@ -674,7 +690,15 @@ impl Editor {
     }
     pub fn advance_animation(&mut self, steps: usize) {
         self.animation.clock = self.animation.clock.saturating_add(steps);
-        if self.animation.play_all && !self.doc.extras.scenes.is_empty() {
+        if let Some((start, end)) = self.loop_range() {
+            let offset = self.frame.clamp(start, end) - start;
+            let length = end - start + 1;
+            self.frame = start + (offset + steps) % length;
+            if offset + steps >= length {
+                self.animation.clock = self.frame;
+                self.restart_media_audio();
+            }
+        } else if self.animation.play_all && !self.doc.extras.scenes.is_empty() {
             let global = (movie_offset(&self.doc, self.frame) + steps) % movie_count(&self.doc);
             let (index, local) = locate(&self.doc, global);
             if index != self.doc.extras.active_scene {

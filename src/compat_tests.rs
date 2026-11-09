@@ -673,8 +673,11 @@ fn external_student_fla_import() {
                     rendered.windows(2).any(|w| w[0].1 != w[1].1),
                     "animation samples must change"
                 );
-                let saved = crate::fla::encode(&d).expect("import should save as a native copy");
-                let restored = crate::fla::decode(&saved).expect("native copy should reopen");
+                let saved =
+                    crate::native_project::encode(&d).expect("import should save as a native copy");
+                let restored = crate::native_project::decode_if_native(&saved)
+                    .expect("native copy should reopen")
+                    .unwrap();
                 assert_eq!(restored.layers.len(), d.layers.len());
                 assert_eq!(restored.layers[0].frames.len(), d.layers[0].frames.len());
                 assert_eq!(restored.extras.symbols.len(), d.extras.symbols.len());
@@ -731,4 +734,53 @@ fn animate_directory_size_quirk_recovers_art_and_reports_it_without_relaxing_int
     let size = u32::from_le_bytes(without_marker[end + 12..end + 16].try_into().unwrap());
     without_marker[end + 12..end + 16].copy_from_slice(&(size + 54).to_le_bytes());
     assert!(crate::fla::decode(&without_marker).is_err());
+}
+
+#[test]
+fn animate_import_keeps_wav_on_its_scene_and_masked_art_and_guides() {
+    let mask = shape("#FFFFFF");
+    let art = shape("#FF0000").replace("200", "400");
+    let guide = shape("#0000FF");
+    let timeline = format!(
+        r#"<DOMTimeline name="Shot"><layers>
+        <DOMLayer name="Mask" layerType="mask"><frames>{}</frames></DOMLayer>
+        <DOMLayer name="Art" layerType="masked" parentLayerIndex="0"><frames>{}</frames></DOMLayer>
+        <DOMLayer name="Guide" layerType="guide"><frames>{}</frames></DOMLayer>
+        </layers></DOMTimeline>"#,
+        frame(0, 3, "", &mask),
+        frame(0, 3, r#"soundName="voice.wav" soundSync="stream""#, &art),
+        frame(0, 3, "", &guide)
+    );
+    let xml = format!(
+        r#"<DOMDocument width="64" height="64" frameRate="24">
+        <media><DOMSoundItem name="voice.wav" href="voice.wav"/></media>
+        <timelines>{timeline}</timelines></DOMDocument>"#
+    );
+    let wav = crate::media::test_wav();
+    let imported = decode(crate::fla_zip::pack(&[
+        ("DOMDocument.xml", xml.into_bytes()),
+        ("LIBRARY/voice.wav", wav),
+    ]));
+    assert_eq!(imported.extras.media.assets.len(), 1);
+    assert_eq!(imported.extras.media.tracks.len(), 1);
+    assert!(
+        imported
+            .layers
+            .iter()
+            .any(|layer| layer.frames[0].iter().any(|mark| mark.style.guide))
+    );
+    let marks = features::resolve_export(&imported, 0, false);
+    assert!(!marks.is_empty());
+    assert!(
+        marks
+            .iter()
+            .all(|(_, _, mark)| mark.fill == Some([255, 0, 0, 255])
+                && crate::vector::control_bounds(mark).max.x <= 10.01)
+    );
+    let reopened = crate::fla::decode(&crate::fla::encode(&imported).unwrap()).unwrap();
+    assert_eq!(reopened.extras.media.tracks.len(), 1);
+    assert_eq!(
+        features::resolve_export(&reopened, 0, false).len(),
+        marks.len()
+    );
 }

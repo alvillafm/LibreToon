@@ -7,9 +7,35 @@ use crate::{
     i18n::tr,
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+pub(crate) fn assemble_project(
+    doc: &Document,
+    feature: &crate::features::FeatureState,
+) -> Document {
+    let mut child = doc.clone();
+    for (parent, _, _, id) in feature.symbol_stack.iter().rev() {
+        let mut next = parent.clone();
+        next.extras.symbols = child.extras.symbols.clone();
+        next.extras.animation_clips = child.extras.animation_clips.clone();
+        next.extras.animation_library = child.extras.animation_library.clone();
+        next.extras.library = child.extras.library.clone();
+        next.extras.media.assets = child.extras.media.assets.clone();
+        next.extras.references = child.extras.references.clone();
+        if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
+            s.layers = child.layers.clone();
+            s.rig = child.extras.rig.clone();
+            s.folders = child.extras.folders.clone();
+            s.perspective = child.extras.perspective.clone();
+        }
+        crate::animation_clips::normalize_asset_ranges(&mut next, *id);
+        child = next;
+    }
+    crate::animation::store_scene(&mut child);
+    child
+}
 impl Editor {
     pub fn leave_symbol_context_for_document_change(&mut self) {
         if !self.feature.symbol_stack.is_empty() {
+            self.finish_raster_stroke();
             self.finish_pending_pen();
             self.doc = self.project_document();
             self.feature.symbol_stack.clear();
@@ -57,26 +83,7 @@ impl Editor {
         }
     }
     pub fn project_document(&self) -> Document {
-        let mut child = self.doc.clone();
-        for (parent, _, _, id) in self.feature.symbol_stack.iter().rev() {
-            let mut next = parent.clone();
-            next.extras.symbols = child.extras.symbols.clone();
-            next.extras.animation_clips = child.extras.animation_clips.clone();
-            next.extras.animation_library = child.extras.animation_library.clone();
-            next.extras.library = child.extras.library.clone();
-            next.extras.media.assets = child.extras.media.assets.clone();
-            next.extras.references = child.extras.references.clone();
-            if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
-                s.layers = child.layers.clone();
-                s.rig = child.extras.rig.clone();
-                s.folders = child.extras.folders.clone();
-                s.perspective = child.extras.perspective.clone();
-            }
-            crate::animation_clips::normalize_asset_ranges(&mut next, *id);
-            child = next;
-        }
-        crate::animation::store_scene(&mut child);
-        child
+        crate::advanced::assemble_project(&self.doc, &self.feature)
     }
     pub fn convert_symbol(&mut self) {
         if self.canvas.selected.is_empty()
@@ -261,6 +268,10 @@ impl Editor {
     }
 
     pub(crate) fn insert_symbol_at(&mut self, id: u64, at: Option<Pos2>) {
+        if self.raster_active() || self.adjustment_active() {
+            self.status = tr("Select a vector layer to place a symbol or image").into();
+            return;
+        }
         if !self.symbol_insert_allowed(id)
             || self.doc.layers[self.layer].options.locked
             || !self.doc.layers[self.layer].visible

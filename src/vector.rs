@@ -528,6 +528,9 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
 }
 pub fn transform(mark: &Mark, mut f: impl FnMut(Pos2) -> Pos2) -> Mark {
     let mut out = mark.clone();
+    if let Some(basis) = out.style.texture_basis.as_mut() {
+        *basis = basis.map(|p| xy(f(pos(p))));
+    }
     if let Some(g) = out.style.gradient.as_mut() {
         g.start = xy(f(pos(g.start)));
         g.end = xy(f(pos(g.end)));

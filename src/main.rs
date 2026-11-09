@@ -13,6 +13,7 @@ mod canvas;
 mod compat_tests;
 mod depth;
 mod design;
+mod dialogue;
 mod document;
 mod documents;
 mod drawing;
@@ -33,8 +34,12 @@ mod library;
 mod loading;
 mod mannequin;
 mod media;
+mod native_project;
 mod ordering;
 mod paint;
+mod post;
+mod project_save;
+mod raster;
 mod recovery;
 mod reftool;
 mod rig;
@@ -73,6 +78,8 @@ use std::{
 struct Editor {
     updater: updater::Updater,
     references: reftool::State,
+    raster_cleanup: usize,
+    post: post::State,
     vector_trim: vector_trim::State,
     media: media::MediaEditor,
     loader: loading::Loader,
@@ -130,6 +137,7 @@ struct Editor {
     status: String,
     recovery: PathBuf,
     recovery_writer: recovery::RecoveryWriter,
+    project_save: project_save::State,
 }
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -165,6 +173,8 @@ impl Editor {
         let mut editor = Self {
             updater: Default::default(),
             references: Default::default(),
+            raster_cleanup: 0,
+            post: Default::default(),
             vector_trim: Default::default(),
             media: Default::default(),
             loader: Default::default(),
@@ -222,6 +232,7 @@ impl Editor {
             status,
             recovery,
             recovery_writer: recovery::RecoveryWriter::default(),
+            project_save: Default::default(),
         };
         editor.initialize_documents(had_recovered);
         i18n::set_locale(editor.studio.prefs.locale());
@@ -239,55 +250,36 @@ impl Editor {
         self.redo.clear();
     }
     fn recover(&mut self) {
+        if let Some(index) = self.hub.active
+            && self.hub.tabs[index].record.dirty
+        {
+            let record = &mut self.hub.tabs[index].record;
+            record.revision = record.revision.wrapping_add(1);
+        }
         self.sync_text_styles();
         self.sync_exposures();
         self.recovery_writer
             .submit(self.recovery.clone(), self.project_document());
     }
-    fn save_project(&mut self, save_as: bool) {
-        if self.references.importing() {
-            self.status = crate::i18n::tr(
-                "Wait for the reference image to finish loading before saving or closing.",
-            )
-            .into();
-            return;
-        }
-        self.finish_pending_pen();
-        let target = if save_as || self.path.is_none() || self.doc.extras.imported {
-            rfd::FileDialog::new()
-                .add_filter("Adobe Animate / LibreToon", &["fla"])
-                .set_file_name("animacion.fla")
-                .save_file()
-        } else {
-            self.path.clone()
-        };
-        if let Some(path) = target {
-            let mut saved = self.project_document();
-            saved.extras.imported = false;
-            match write_document(&path, &saved) {
-                Ok(()) => {
-                    self.doc.extras.imported = false;
-                    for (parent, _, _, _) in &mut self.feature.symbol_stack {
-                        parent.extras.imported = false;
-                    }
-                    self.status = "Proyecto guardado".into();
-                    self.path = Some(path);
-                    self.saved_document();
-                }
-                Err(e) => self.status = e,
-            }
-        }
-    }
     fn open(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Adobe Animate / LibreToon", &["fla"])
+            .add_filter("LibreToon", &["ltoon"])
             .add_filter("Proyectos anteriores", &["trazo"])
             .pick_file()
         {
             self.open_document_path(path);
         }
     }
+    fn import_fla(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Adobe Animate", &["fla"])
+            .pick_file()
+        {
+            self.open_document_path(path);
+        }
+    }
     fn history(&mut self, redo: bool) {
+        self.finish_raster_stroke();
         self.feature.exposure_drag = None;
         self.folder_groups.clear();
         self.vector_trim.clear();
@@ -339,7 +331,10 @@ fn write_document(path: &std::path::Path, doc: &Document) -> Result<(), String> 
     let temporary = path.with_extension("libretoon.tmp");
     let file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
     let mut writer = std::io::BufWriter::new(file);
-    if path
+    if native_project::is_native_path(path) {
+        std::io::Write::write_all(&mut writer, &native_project::encode(doc)?)
+            .map_err(|e| e.to_string())?;
+    } else if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
     {
@@ -369,12 +364,18 @@ impl eframe::App for Editor {
             self.save_project(false);
         }
         self.action_shortcuts(&ctx);
+        self.space_playback(&ctx);
         if self.profile_transaction && !ctx.input(|i| i.pointer.primary_down()) {
             self.profile_transaction = false;
             self.recover();
         }
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.references.importing() {
+            if self.project_save.busy() {
+                self.project_save.quit_after_save = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if self.project_save.conflicted() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if self.references.importing() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.status = crate::i18n::tr(
                     "Wait for the reference image to finish loading before saving or closing.",
@@ -439,6 +440,8 @@ impl eframe::App for Editor {
                 });
         }
         self.reference_windows(&ctx);
+        self.annotation_dialog(&ctx);
+        self.project_save_ui(&ctx);
         if self.studio.credits_open {
             egui::Window::new(crate::i18n::tr("Credits"))
                 .id(egui::Id::unique("libretoon-credits"))

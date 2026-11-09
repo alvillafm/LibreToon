@@ -425,6 +425,8 @@ impl Editor {
                 l.visible
                     && !l.options.locked
                     && !l.options.animation_track
+                    && !l.options.raster
+                    && l.options.adjustment.is_none()
                     && l.options.mannequin.is_none()
             })
     }

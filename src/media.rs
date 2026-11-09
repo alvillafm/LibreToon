@@ -26,6 +26,8 @@ pub(crate) struct Asset {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) folder: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) raster_tile: bool,
     kind: Kind,
     pub(crate) data: SharedVec<u8>,
     size: [u32; 2],
@@ -42,6 +44,25 @@ struct Clip {
     length: usize,
     #[serde(default)]
     transform: VideoTransform,
+    #[serde(default)]
+    audio: AudioMix,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct AudioMix {
+    gain: f32,
+    fade_in: usize,
+    fade_out: usize,
+}
+impl Default for AudioMix {
+    fn default() -> Self {
+        Self {
+            gain: 1.,
+            fade_in: 0,
+            fade_out: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -117,12 +138,109 @@ pub(crate) fn bitmap(data: Vec<u8>, width: u32, height: u32, name: String) -> As
         id: id(),
         name,
         folder: None,
+        raster_tile: false,
         kind: Kind::Image,
         data: data.into(),
         size: [width, height],
         seconds: 0.,
         peaks: Default::default(),
     }
+}
+
+pub(crate) fn imported_audio(data: Vec<u8>, name: String) -> Option<Asset> {
+    if data.is_empty() || data.len() > ASSET_LIMIT {
+        return None;
+    }
+    let mut seconds = None;
+    if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WAVE") {
+        let mut at = 12usize;
+        let mut rate = 0u32;
+        let mut length = 0usize;
+        while let Some(header) = data.get(at..at.saturating_add(8)) {
+            let size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+            let end = (at + 8).checked_add(size)?;
+            let chunk = data.get(at + 8..end)?;
+            if &header[..4] == b"fmt " && chunk.len() >= 16 {
+                rate = u32::from_le_bytes(chunk[8..12].try_into().ok()?);
+            } else if &header[..4] == b"data" {
+                length = size;
+            }
+            at = end + size % 2;
+        }
+        if rate != 0 && length != 0 {
+            seconds = Some(length as f64 / f64::from(rate));
+        }
+    }
+    let seconds = match seconds {
+        Some(seconds) => seconds,
+        None => {
+            let file = MediaFile::new(&data).ok()?;
+            let mut command = Command::new(crate::exporter::ffmpeg_path(""));
+            crate::exporter::hidden(&mut command);
+            let result = command
+                .args([
+                    "-hide_banner",
+                    "-nostdin",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-format_whitelist",
+                    DEMUXERS,
+                    "-i",
+                ])
+                .arg(&file.0)
+                .args(["-t", "0", "-f", "null", "-"])
+                .output()
+                .ok()?;
+            let details = String::from_utf8_lossy(&result.stderr);
+            duration(&details)
+                .filter(|_| details.contains("Audio:") && !details.contains("Video:"))?
+        }
+    };
+    Some(Asset {
+        id: id(),
+        name,
+        folder: None,
+        raster_tile: false,
+        kind: Kind::Audio,
+        data: data.into(),
+        size: [0; 2],
+        seconds,
+        peaks: Default::default(),
+    })
+}
+
+pub(crate) fn imported_sound_track(
+    name: String,
+    entries: Vec<(&Asset, usize, usize, usize)>,
+    fps: u32,
+) -> Option<Track> {
+    let clips: SharedVec<_> = entries
+        .into_iter()
+        .filter_map(|(asset, start, offset, limit)| {
+            let length = ((asset.seconds * f64::from(fps)).ceil() as usize)
+                .saturating_sub(offset)
+                .min(limit)
+                .min(10000usize.saturating_sub(offset));
+            (length > 0).then(|| Clip {
+                asset: asset.id,
+                start,
+                offset,
+                length,
+                transform: Default::default(),
+                audio: Default::default(),
+            })
+        })
+        .collect();
+    (!clips.is_empty()).then(|| Track {
+        id: id(),
+        name,
+        kind: Kind::Audio,
+        clips,
+        slot: 0,
+        depth: Default::default(),
+        hidden: false,
+        locked: false,
+    })
 }
 
 fn duration(text: &str) -> Option<f64> {
@@ -205,6 +323,7 @@ impl Editor {
                 id: id(),
                 name,
                 folder: None,
+                raster_tile: false,
                 kind,
                 data: std::fs::read(path).map_err(|e| e.to_string())?.into(),
                 size: [0; 2],
@@ -452,6 +571,10 @@ impl Editor {
         else {
             return false;
         };
+        if self.raster_active() || self.adjustment_active() {
+            self.status = tr("Select a vector layer to place a symbol or image").into();
+            return true;
+        }
         if image.width == 0 || image.height == 0 || image.width > 4096 || image.height > 4096 {
             self.status = "Clipboard image exceeds supported dimensions".into();
             return true;
@@ -474,6 +597,10 @@ impl Editor {
     }
 
     fn insert_image(&mut self, asset: &Asset, frame: usize, position: Option<Pos2>) {
+        if self.raster_active() || self.adjustment_active() {
+            self.status = tr("Select a vector layer to place a symbol or image").into();
+            return;
+        }
         let size = Vec2::new(asset.size[0] as f32, asset.size[1] as f32);
         let center = position
             .unwrap_or_else(|| Pos2::new(self.doc.width as f32 / 2., self.doc.height as f32 / 2.));
@@ -867,6 +994,17 @@ impl Editor {
         Some((t, c))
     }
 
+    pub(crate) fn update_raster_texture(&mut self, id: u64, rgba: &[u8], side: usize) {
+        if let Some(texture) = self.media.textures.get_mut(&id) {
+            texture.set(
+                egui::ColorImage::from_rgba_unmultiplied([side; 2], rgba),
+                egui::TextureOptions::LINEAR,
+            );
+        }
+    }
+    pub(crate) fn invalidate_raster_texture(&mut self, id: u64) {
+        self.media.textures.remove(&id);
+    }
     pub fn paint_media_image(
         &mut self,
         painter: &egui::Painter,
@@ -932,6 +1070,10 @@ impl Editor {
         };
         match asset.kind {
             Kind::Image => {
+                if self.raster_active() || self.adjustment_active() {
+                    self.status = tr("Select a vector layer to place a symbol or image").into();
+                    return;
+                }
                 if self.doc.layers[self.layer].options.locked
                     || frame >= self.doc.layers[self.layer].frames.len()
                 {
@@ -1012,6 +1154,7 @@ impl Editor {
             offset: 0,
             length,
             transform: Default::default(),
+            audio: Default::default(),
         });
         self.recover();
     }
@@ -1214,11 +1357,11 @@ impl Editor {
             self.move_media_track(source.0, track.slot, Some(t));
             return;
         }
-        let color = if track.kind == Kind::Video {
-            Color32::from_rgb(35, 116, 67)
+        let color = self.studio.prefs.layer_color(if track.kind == Kind::Video {
+            crate::studio::LayerColor::Video
         } else {
-            Color32::from_rgb(150, 52, 56)
-        };
+            crate::studio::LayerColor::Audio
+        });
         ui.painter()
             .rect_filled(row, 3., color.gamma_multiply(0.45));
         ui.painter().text(
@@ -1228,16 +1371,14 @@ impl Editor {
             egui::FontId::proportional(12.),
             Color32::WHITE,
         );
-        let icon = if track.kind == Kind::Video {
-            "▶"
-        } else {
-            "♪"
-        };
-        ui.painter().text(
-            label.left_center() + Vec2::new(8., 0.),
-            egui::Align2::LEFT_CENTER,
-            icon,
-            egui::FontId::proportional(13.),
+        crate::design::draw(
+            ui.painter(),
+            Rect::from_center_size(label.left_center() + Vec2::new(16., 0.), Vec2::splat(17.)),
+            if track.kind == Kind::Video {
+                crate::design::Icon::Film
+            } else {
+                crate::design::Icon::Audio
+            },
             Color32::WHITE,
         );
         for (column, glyph, active) in [
@@ -1511,6 +1652,63 @@ impl Editor {
                     Color32::WHITE,
                 );
             response.context_menu(|ui| {
+                if !track.locked {
+                    let split = self.frame > clip.start && self.frame < clip.start + clip.length;
+                    if ui
+                        .add_enabled(split, egui::Button::new(tr("Split clip at playhead")))
+                        .clicked()
+                    {
+                        let mut left = clip.clone();
+                        let mut right = clip.clone();
+                        left.length = self.frame - clip.start;
+                        left.audio.fade_out = 0;
+                        right.start = self.frame;
+                        right.offset += left.length;
+                        right.length -= left.length;
+                        right.audio.fade_in = 0;
+                        self.checkpoint();
+                        let clips = &mut self.doc.extras.media.tracks[t].clips;
+                        clips[c] = left;
+                        clips.insert(c + 1, right);
+                        self.restart_media_audio();
+                        self.recover();
+                        ui.close();
+                        return;
+                    }
+                    if track.kind == Kind::Audio {
+                        let mut mix = clip.audio;
+                        let mut percent = mix.gain * 100.;
+                        ui.horizontal(|ui| {
+                            ui.label(tr("Clip volume"));
+                            ui.add(
+                                egui::DragValue::new(&mut percent)
+                                    .range(0. ..=200.)
+                                    .suffix(" %")
+                                    .update_while_editing(false),
+                            );
+                        });
+                        mix.gain = percent / 100.;
+                        for (label, duration) in [
+                            ("Fade in (frames)", &mut mix.fade_in),
+                            ("Fade out (frames)", &mut mix.fade_out),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(tr(label));
+                                ui.add(
+                                    egui::DragValue::new(duration)
+                                        .range(0..=clip.length)
+                                        .update_while_editing(false),
+                                );
+                            });
+                        }
+                        if mix != clip.audio {
+                            self.checkpoint();
+                            self.doc.extras.media.tracks[t].clips[c].audio = mix;
+                            self.restart_media_audio();
+                            self.recover();
+                        }
+                    }
+                }
                 if track.kind == Kind::Video && !track.locked {
                     if ui.button(tr("Transformar vídeo")).clicked() {
                         self.frame = clip.start.min(total - 1);
@@ -1669,7 +1867,7 @@ impl MediaLibrary {
     pub(crate) fn remove_empty_tracks(&mut self) {
         self.tracks.retain(|track| !track.clips.is_empty());
     }
-    fn can_add(&self, asset: &Asset) -> bool {
+    pub(crate) fn can_add(&self, asset: &Asset) -> bool {
         asset.data.len() <= ASSET_LIMIT
             && self
                 .assets
@@ -1705,6 +1903,10 @@ impl MediaLibrary {
                     || track.kind == Kind::Image
                     || track.clips.iter().any(|clip| {
                         assets.get(&clip.asset) != Some(&track.kind)
+                            || !clip.audio.gain.is_finite()
+                            || !(0. ..=2.).contains(&clip.audio.gain)
+                            || clip.audio.fade_in > 10000
+                            || clip.audio.fade_out > 10000
                             || clip.length == 0
                             || clip.start.saturating_add(clip.length) > 10000
                             || clip.offset.saturating_add(clip.length) > 10000
@@ -1736,6 +1938,9 @@ pub(crate) fn image_mesh(
     texture: egui::TextureId,
 ) -> Option<egui::Mesh> {
     let points = crate::canvas::vertices(mark);
+    if let Some(basis) = mark.style.texture_basis {
+        return crate::raster::clipped_mesh(mark, view, texture, basis);
+    }
     if points.len() < 4 {
         return None;
     }
@@ -1749,7 +1954,7 @@ pub(crate) fn image_mesh(
         mesh.vertices.push(egui::epaint::Vertex {
             pos: view.screen(point),
             uv,
-            color: Color32::WHITE,
+            color: Color32::from_white_alpha(mark.color[3]),
         });
     }
     mesh.indices.extend([0, 1, 2, 0, 2, 3]);
@@ -1874,8 +2079,21 @@ pub(crate) fn audio_export(
                     .arg(&file.0);
                 files.push(file);
                 let input = files.len();
+                let elapsed = (from - start) as f64 / fps;
+                let length = clip.length as f64 / fps;
+                let fade_in = clip.audio.fade_in.min(clip.length) as f64 / fps;
+                let fade_out = clip.audio.fade_out.min(clip.length) as f64 / fps;
+                let mut gain = format!("{:.6}", clip.audio.gain);
+                if fade_in > 0. {
+                    gain.push_str(&format!("*clip((t+{elapsed:.6})/{fade_in:.6},0,1)"));
+                }
+                if fade_out > 0. {
+                    gain.push_str(&format!(
+                        "*clip(({length:.6}-t-{elapsed:.6})/{fade_out:.6},0,1)"
+                    ));
+                }
                 filters.push(format!(
-                    "[{input}:a:0]asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{input}]"
+                    "[{input}:a:0]asetpts=PTS-STARTPTS,volume='{gain}':eval=frame,adelay={delay}:all=1[a{input}]"
                 ));
             }
         }
@@ -2201,6 +2419,9 @@ impl Editor {
                         clip.start as u64,
                         clip.offset as u64,
                         clip.length as u64,
+                        u64::from(clip.audio.gain.to_bits()),
+                        clip.audio.fade_in as u64,
+                        clip.audio.fade_out as u64,
                     ]);
                 }
             }
@@ -2447,6 +2668,24 @@ fn prepare_audio(
 }
 
 #[cfg(test)]
+pub(crate) fn test_wav() -> Vec<u8> {
+    let size = 16000u32;
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(size + 36).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8000u32.to_le_bytes());
+    bytes.extend_from_slice(&16000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&size.to_le_bytes());
+    bytes.resize(44 + size as usize, 0);
+    bytes
+}
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2468,6 +2707,7 @@ mod tests {
                 offset: 0,
                 length: 3,
                 transform: Default::default(),
+                audio: Default::default(),
             }]
             .into(),
         });
@@ -2549,6 +2789,7 @@ mod tests {
                     offset: 0,
                     length: 3,
                     transform: Default::default(),
+                    audio: Default::default(),
                 }]
                 .into(),
             });
@@ -2582,6 +2823,7 @@ mod tests {
                         offset: 0,
                         length: 3,
                         transform: Default::default(),
+                        audio: Default::default(),
                     },
                     Clip {
                         asset: 9,
@@ -2589,6 +2831,7 @@ mod tests {
                         offset: 0,
                         length: 3,
                         transform: Default::default(),
+                        audio: Default::default(),
                     },
                 ]
                 .into(),
@@ -2696,6 +2939,7 @@ mod tests {
             id: 1,
             name: "test.wav".into(),
             folder: None,
+            raster_tile: false,
             kind: Kind::Audio,
             data: audio.stdout.into(),
             size: [0; 2],
@@ -2706,6 +2950,7 @@ mod tests {
             id: 2,
             name: "test.mkv".into(),
             folder: None,
+            raster_tile: false,
             kind: Kind::Video,
             data: video.stdout.into(),
             size: [0; 2],
@@ -2727,12 +2972,33 @@ mod tests {
                     offset: 2,
                     length: 6,
                     transform: Default::default(),
+                    audio: Default::default(),
                 }]
                 .into(),
             });
         }
         let mix = prepare_audio(&doc, 0, 6, &ffmpeg).unwrap().unwrap();
         assert!(std::fs::metadata(&mix.0).unwrap().len() > 1024);
+        let peak = |bytes: &[u8]| {
+            bytes
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        let original = std::fs::read(&mix.0).unwrap();
+        doc.extras.media.tracks[0].clips[0].audio = AudioMix {
+            gain: 0.5,
+            fade_in: 2,
+            fade_out: 2,
+        };
+        let quieter = prepare_audio(&doc, 0, 6, &ffmpeg).unwrap().unwrap();
+        let quieter = std::fs::read(&quieter.0).unwrap();
+        let frame_bytes = 48000 / 24 * 2 * 4;
+        assert!(peak(&quieter[..frame_bytes]) < peak(&quieter[2 * frame_bytes..4 * frame_bytes]));
+        assert!(peak(&quieter) < peak(&original) * 0.55);
+        assert!(
+            peak(&quieter[5 * frame_bytes..]) < peak(&quieter[2 * frame_bytes..4 * frame_bytes])
+        );
         let mut decoder = VideoExport::default();
         let frames = decoder.frames(&doc, 1, &ffmpeg).unwrap();
         let frame = &frames[0].pixels;
@@ -2796,7 +3062,7 @@ fn show_preview(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
 }
 
 impl Editor {
-    pub(crate) fn depth_video_frames(&self) -> Vec<ExportVideoFrame> {
+    pub(crate) fn depth_video_frames(&self, use_camera: bool) -> Vec<ExportVideoFrame> {
         let mut result = vec![];
         for (track, clip) in self
             .doc
@@ -2815,7 +3081,7 @@ impl Editor {
                     Vec2::new(pixels.width() as f32, pixels.height() as f32),
                     clip.transform,
                 );
-                if let Some(camera) = crate::depth::camera(&self.doc, self.frame) {
+                if use_camera && let Some(camera) = crate::depth::camera(&self.doc, self.frame) {
                     let pose = crate::animation::camera_at(camera, self.frame);
                     mark = crate::depth::project_mark(
                         &self.doc,
@@ -2924,6 +3190,7 @@ mod view_snap_regressions {
             id: 42,
             name: "Video".into(),
             folder: None,
+            raster_tile: false,
             kind: Kind::Video,
             data: vec![1, 2].into(),
             size: [400, 300],
@@ -2943,6 +3210,7 @@ mod view_snap_regressions {
                 start: 0,
                 offset: 0,
                 length: 24,
+                audio: Default::default(),
                 transform: VideoTransform {
                     scale_log2: -1.,
                     ..Default::default()

@@ -658,6 +658,9 @@ impl crate::Editor {
             );
             return;
         }
+        if self.project_save.busy() || self.project_save.conflicted() {
+            return;
+        }
         self.finish_pending_pen();
         let dirty = self.hub.tabs.iter().any(|t| t.record.dirty);
         if dirty {
@@ -690,25 +693,29 @@ impl crate::Editor {
                 });
             });
             if cancel {
+                self.project_save.update_save = None;
                 self.updater.install_pending = false;
                 return;
             }
-            if !save {
+            if save && self.project_save.update_save.is_none() {
+                self.project_save.update_save = Some(self.hub.active);
+            }
+            if self.project_save.update_save.is_none() {
                 return;
             }
-            let active = self.hub.active;
-            for index in 0..self.hub.tabs.len() {
-                if self.hub.tabs[index].record.dirty {
-                    self.activate_document(index);
+            if let Some(index) = self.hub.tabs.iter().position(|tab| tab.record.dirty) {
+                self.activate_document(index);
+                if self.hub.active == Some(index) {
                     self.save_project(false);
-                    if self.hub.tabs[index].record.dirty {
-                        return;
-                    }
                 }
+                if !self.project_save.busy() {
+                    self.project_save.update_save = None;
+                }
+                return;
             }
-            if let Some(active) = active {
-                self.activate_document(active);
-            }
+        }
+        if let Some(Some(active)) = self.project_save.update_save.take() {
+            self.activate_document(active);
         }
         let Some(plan) = self.updater.prepared.as_ref() else {
             return;

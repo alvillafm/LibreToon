@@ -39,17 +39,19 @@ impl PenInput {
         #[cfg(windows)]
         {
             let wintab = self.native.poll();
+            let ink = native::take_ink_force();
             self.eraser =
                 native::ink_eraser().unwrap_or(self.native.eraser && wintab.is_some()) && contact;
-            if contact && touch_sample.is_none() && self.pressure.is_none() {
-                self.pressure = wintab;
+            if contact {
+                self.pressure = ink.or(touch_sample).or(self.pressure).or(wintab);
             }
         }
         #[cfg(target_os = "macos")]
         {
-            self.eraser = mac::eraser() && contact;
+            let (pressure, eraser) = mac::sample();
+            self.eraser = eraser && contact;
             if contact && touch_sample.is_none() {
-                self.pressure = mac::pressure().or(self.pressure);
+                self.pressure = pressure.or(self.pressure);
             }
         }
         #[cfg(target_os = "linux")]
@@ -97,6 +99,10 @@ mod native {
     use std::ffi::{c_char, c_void};
     type Handle = *mut c_void;
     std::thread_local! { static INK_ERASER: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+    std::thread_local! { static INK_FORCE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) }; }
+    pub(super) fn take_ink_force() -> Option<f32> {
+        INK_FORCE.take()
+    }
     pub(super) fn ink_eraser() -> Option<bool> {
         INK_ERASER.get()
     }
@@ -159,10 +165,17 @@ mod native {
                 if unsafe { GetPointerPenInfo((message.wparam & 0xffff) as u32, info.as_mut_ptr()) }
                     != 0
                 {
-                    INK_ERASER.set(Some(unsafe { info.assume_init() }.flags & 6 != 0));
+                    let info = unsafe { info.assume_init() };
+                    INK_ERASER.set(Some(info.flags & 6 != 0));
+                    if info.pointer.flags & 4 != 0 && info.mask & 1 != 0 {
+                        INK_FORCE.set(Some(info.pressure.min(1024) as f32 / 1024.));
+                    }
                 }
             }
-            0x24a | 0x215 | 0x8 => INK_ERASER.set(None),
+            0x24a | 0x215 | 0x8 => {
+                INK_ERASER.set(None);
+                INK_FORCE.set(None);
+            }
             // A real mouse must never inherit the previous pen's eraser state.
             0x200 | 0x201
                 if (unsafe { GetMessageExtraInfo() } as usize & 0xffffff00) != 0xff515700 =>
@@ -243,7 +256,6 @@ mod native {
         close: Option<Close>,
         min: i32,
         max: i32,
-        last: Option<f32>,
     }
     // Virtual devices (UINT_MAX) do not identify a physical device category.
     fn device_category(device: u32) -> Option<u32> {
@@ -330,14 +342,10 @@ mod native {
                     self.eraser = status & 0x10 != 0;
                     let value = (pressure as f32 - self.min as f32)
                         / (self.max as f64 - self.min as f64) as f32;
-                    self.last = if value > 0. {
-                        Some(value.clamp(0., 1.))
-                    } else {
-                        None
-                    };
+                    return (value > 0.).then(|| value.clamp(0., 1.));
                 }
             }
-            self.last
+            None
         }
     }
     #[cfg(test)]
@@ -374,6 +382,8 @@ mod mac {
     use std::ffi::{c_char, c_void};
     type Object = *mut c_void;
     std::thread_local! {
+        static PEN_CONTACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static FORCE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
         static ERASER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static MONITOR: std::cell::Cell<Object> = const { std::cell::Cell::new(std::ptr::null_mut()) };
     }
@@ -405,36 +415,72 @@ mod mac {
         isa: &raw const _NSConcreteGlobalBlock,
         flags: 1 << 28,
         reserved: 0,
-        invoke: proximity,
+        invoke: observe,
         descriptor: &DESCRIPTOR,
     };
-    unsafe extern "C" fn proximity(_: *const Block, event: Object) -> Object {
+    unsafe extern "C" fn observe(_: *const Block, event: Object) -> Object {
         unsafe {
             let integer: unsafe extern "C" fn(Object, Object) -> usize =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
             let boolean: unsafe extern "C" fn(Object, Object) -> bool =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            ERASER.set(
-                boolean(event, sel_registerName(c"isEnteringProximity".as_ptr()))
-                    && integer(event, sel_registerName(c"pointingDeviceType".as_ptr())) == 3,
-            );
+            let subtype: unsafe extern "C" fn(Object, Object) -> i16 =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let float: unsafe extern "C" fn(Object, Object) -> f32 =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let kind = integer(event, sel_registerName(c"type".as_ptr()));
+            let mouse_subtype = if matches!(kind, 1 | 2 | 5 | 6) {
+                subtype(event, sel_registerName(c"subtype".as_ptr()))
+            } else {
+                0
+            };
+            match kind {
+                _ if kind == 24 || mouse_subtype == 2 => {
+                    let entering =
+                        boolean(event, sel_registerName(c"isEnteringProximity".as_ptr()));
+                    ERASER.set(
+                        entering
+                            && integer(event, sel_registerName(c"pointingDeviceType".as_ptr()))
+                                == 3,
+                    );
+                    if !entering {
+                        PEN_CONTACT.set(false);
+                        FORCE.set(None);
+                    }
+                }
+                23 | 1 | 6 if kind == 23 || mouse_subtype == 1 => {
+                    let force = float(event, sel_registerName(c"pressure".as_ptr()));
+                    if force.is_finite() {
+                        FORCE.set(Some(force.clamp(0., 1.)));
+                        PEN_CONTACT.set(kind != 23 || force > 0.);
+                    }
+                }
+                1 | 2 => {
+                    // Mouse clicks and pen-up must never reuse pressure or the eraser.
+                    PEN_CONTACT.set(false);
+                    FORCE.set(None);
+                }
+                _ => (),
+            }
         }
         event
     }
-    pub(super) fn eraser() -> bool {
+
+    pub(super) fn sample() -> (Option<f32>, bool) {
         if MONITOR.get().is_null() {
             unsafe {
                 let install: unsafe extern "C" fn(Object, Object, u64, *const Block) -> Object =
                     std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                let mask = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 23) | (1 << 24);
                 MONITOR.set(install(
                     objc_getClass(c"NSEvent".as_ptr()),
                     sel_registerName(c"addLocalMonitorForEventsMatchingMask:handler:".as_ptr()),
-                    1 << 24,
+                    mask,
                     &BLOCK,
                 ));
             }
         }
-        ERASER.get()
+        (FORCE.take(), PEN_CONTACT.get() && ERASER.get())
     }
 
     #[link(name = "objc")]
@@ -442,38 +488,6 @@ mod mac {
         fn objc_getClass(name: *const c_char) -> Object;
         fn sel_registerName(name: *const c_char) -> Object;
         fn objc_msgSend();
-    }
-
-    pub(super) fn pressure() -> Option<f32> {
-        // Called on the AppKit thread. Each signature matches the selector's
-        // return type, and pressure is only valid on the event types below.
-        unsafe {
-            let object: unsafe extern "C" fn(Object, Object) -> Object =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let integer: unsafe extern "C" fn(Object, Object) -> usize =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let subtype: unsafe extern "C" fn(Object, Object) -> i16 =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let float: unsafe extern "C" fn(Object, Object) -> f32 =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let app = object(
-                objc_getClass(c"NSApplication".as_ptr()),
-                sel_registerName(c"sharedApplication".as_ptr()),
-            );
-            let event = object(app, sel_registerName(c"currentEvent".as_ptr()));
-            if event.is_null() {
-                return None;
-            }
-            let kind = integer(event, sel_registerName(c"type".as_ptr()));
-            let tablet_point = kind == 23
-                || (matches!(kind, 1 | 6)
-                    && subtype(event, sel_registerName(c"subtype".as_ptr())) == 1);
-            if tablet_point {
-                let force = float(event, sel_registerName(c"pressure".as_ptr()));
-                return force.is_finite().then(|| force.clamp(0., 1.));
-            }
-            None
-        }
     }
 }
 
@@ -776,9 +790,8 @@ mod x11 {
 
         pub(super) fn release(&mut self) {
             self.eraser = false;
-            if self.last.take().is_some() {
-                self.next_sample = None;
-            }
+            self.last = None;
+            self.next_sample = None;
         }
     }
 }
