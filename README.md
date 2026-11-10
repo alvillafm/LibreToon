@@ -7,7 +7,7 @@
 
 **LibreToon** is a free, open-source, cross-platform 2D animation application built from scratch in **Rust**. Inspired by Adobe Animate's workflow, it brings traditional animation tools and modern features together.
 
-<p align="center"><img src="https://i.imgur.com/N5REuDb.jpeg" width="1000" alt="LibreToon interface"></p>
+<p align="center"><img src="https://i.imgur.com/O5nKLBy.png" width="1050" alt="LibreToon interface"></p>
 
 **Built with AI. Driven by an animator.** LibreToon is an AI-assisted (vibe-coded) project created by an animator to build the tools they always wanted to use.
 
