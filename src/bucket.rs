@@ -43,6 +43,11 @@ fn line(points: impl IntoIterator<Item = Pos2>) -> LineString<f64> {
     )
 }
 pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec<Mark>, String> {
+    if gap != Gap::None
+        && let Ok(shapes) = fill(marks, click, Gap::None, color)
+    {
+        return Ok(shapes);
+    }
     let mut paths: Vec<(Vec<Pos2>, f32, bool)> = vec![];
     let mut obstacles: Vec<MultiPolygon<f64>> = vec![];
     let mut bounds = Rect::from_min_max(click, click);
@@ -96,6 +101,12 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
             }
             let (lengths, total) = width::lengths(path);
             for (endpoint, at_end) in [(path[0], false), (*path.last().unwrap(), true)] {
+                let adjacent = if at_end {
+                    path[path.len() - 2]
+                } else {
+                    path[1]
+                };
+                let outward = (endpoint - adjacent).normalized();
                 let mut nearest: Option<(Pos2, f32)> = None;
                 for (other, (other_path, _, _)) in paths.iter().enumerate() {
                     for (segment, pair) in other_path.windows(2).enumerate() {
@@ -116,6 +127,7 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
                         let distance = endpoint.distance(target);
                         if distance > 0.001
                             && distance <= threshold
+                            && (target - endpoint).dot(outward) > distance * 0.12
                             && nearest.as_ref().is_none_or(|(_, best)| distance < *best)
                         {
                             nearest = Some((target, distance));
@@ -123,7 +135,8 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
                     }
                 }
                 if let Some((target, _)) = nearest {
-                    obstacles.push(line([endpoint, target]).buffer(*thickness as f64 / 2.));
+                    obstacles
+                        .push(line([endpoint, target]).buffer(f64::from(*thickness).min(1.) / 2.));
                 }
             }
         }
@@ -141,7 +154,11 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         vec![],
     );
     let mut ink = geo::algorithm::bool_ops::unary_union(&obstacles);
-    if gap != Gap::None {
+    if gap != Gap::None
+        && marks
+            .iter()
+            .any(|mark| !mark.bucket && !mark.stroke && mark.fill.is_some())
+    {
         let radius = gap.distance() as f64 / 2.;
         let closed = ink.buffer(radius).buffer(-radius);
         ink = ink.union(&closed);
@@ -258,6 +275,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn large_gap_does_not_create_a_face_from_open_parallel_strokes() {
+        let make = |x| Mark {
+            points: vec![[x, 0.], [x, 140.]].into(),
+            width: 3.,
+            ..Default::default()
+        };
+        let marks = [make(0.), make(24.)];
+        // Both ends line up across the channel; neither stroke points into a gap.
+        assert!(fill(&marks, Pos2::new(12., 70.), Gap::Large, [0, 0, 0, 255]).is_err());
     }
 
     #[test]

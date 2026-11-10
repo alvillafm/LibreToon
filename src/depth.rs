@@ -232,6 +232,34 @@ pub fn optics_ui(ui: &mut egui::Ui, optics: &mut Optics) -> bool {
     ));
     changed
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ViewportQuality {
+    #[default]
+    Full,
+    Half,
+    Quarter,
+    Eighth,
+}
+impl ViewportQuality {
+    pub const ALL: [Self; 4] = [Self::Eighth, Self::Quarter, Self::Half, Self::Full];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full quality",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+        }
+    }
+    fn factor(self) -> f32 {
+        match self {
+            Self::Full => 1.,
+            Self::Half => 0.5,
+            Self::Quarter => 0.25,
+            Self::Eighth => 0.125,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DepthEditor {
     pub open: bool,
@@ -250,12 +278,15 @@ pub struct DepthEditor {
         bool,
         bool,
         Option<usize>,
+        ViewportQuality,
     )>,
     preview_epoch: usize,
+    render_cache: std::sync::Arc<std::sync::Mutex<crate::paint::RenderCache>>,
 }
 impl DepthEditor {
     pub(crate) fn invalidate_preview(&mut self) {
         self.preview = None;
+        self.render_cache = Default::default();
         self.requested.clear();
         self.preview_scope = None;
         self.preview_epoch = self.preview_epoch.wrapping_add(1);
@@ -572,7 +603,9 @@ impl Editor {
         let solo = (self.post.solo_light && self.doc.layers[self.layer].options.light.is_some())
             .then_some(self.layer);
         let post = fx || lights;
-        if !post && !blur {
+        let quality = self.studio.prefs.viewport_quality;
+        let reduced = quality != ViewportQuality::Full;
+        if !post && !blur && !reduced {
             if self.depth.preview_scope.is_some() {
                 self.depth.invalidate_preview();
             }
@@ -588,13 +621,17 @@ impl Editor {
             lights,
             blur,
             solo,
+            quality,
         );
         if self.depth.preview_scope != Some(scope) {
             self.depth.invalidate_preview();
             self.depth.preview_scope = Some(scope);
         }
         let longest = self.doc.width.max(self.doc.height) as f32;
-        let max = if post {
+        let max = if lights {
+            // Keep the light sampling grid fixed while the user zooms the canvas.
+            longest.min(2048.)
+        } else if post || reduced {
             let physical_zoom = stage.scale * painter.ctx().pixels_per_point();
             let cap = if self.playing { 1920. } else { 3072. };
             ((longest * physical_zoom * 1.5 / 128.).ceil() * 128.).clamp(900., cap)
@@ -605,11 +642,12 @@ impl Editor {
                 Quality::High => 1200.,
             }
         };
-        let scale = if post {
+        let scale = if post || reduced {
             max / longest
         } else {
             (max / longest).min(1.)
         };
+        let scale = scale * quality.factor();
         let size = [
             (self.doc.width as f32 * scale).round().max(1.) as usize,
             (self.doc.height as f32 * scale).round().max(1.) as usize,
@@ -704,9 +742,12 @@ impl Editor {
             self.depth.job = Some(rx);
             let ctx = painter.ctx().clone();
             let submitted = key.clone();
+            let render_cache = self.depth.render_cache.clone();
             std::thread::spawn(move || {
                 let render = egui::Context::default();
-                let mut cache = crate::paint::RenderCache::default();
+                let mut cache = render_cache
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let pixels = crate::exporter::raster_preview(
                     &doc,
                     frame,
@@ -724,7 +765,7 @@ impl Editor {
                 ctx.request_repaint();
             });
         }
-        if !use_camera && !post {
+        if !use_camera && !post && !reduced {
             return false;
         }
         let Some(texture) = &self.depth.preview else {

@@ -197,7 +197,14 @@ pub struct Light {
     keys: SharedVec<(usize, Settings)>,
 }
 
+#[derive(PartialEq)]
+pub(crate) struct ShadingKey(Kind, Settings, MaskMode, f32);
+
 impl Light {
+    pub(crate) fn shading_key(&self, frame: usize) -> ShadingKey {
+        ShadingKey(self.kind, self.at(frame), self.mask_mode, self.mask_feather)
+    }
+
     pub fn new(w: u32, h: u32, kind: Kind) -> Self {
         Self {
             kind,
@@ -486,26 +493,40 @@ impl Surface {
         let w = width.div_ceil(step);
         let h = height.div_ceil(step);
         let limit = (bevel / step as f32).max(1.);
-        let distance = silhouette_distances(pixels, width, w, h, step);
-        let mut values: Vec<_> = (0..w * h)
-            .map(|i| {
+        let mut coverage = Vec::with_capacity(w * h);
+        let mut details = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let mut sums = [0u32; 4];
+                let mut height_sum = 0.;
+                let mut count = 0.;
+                for py in y * step..((y + 1) * step).min(height) {
+                    for px in x * step..((x + 1) * step).min(width) {
+                        let p = (py * width + px) * 4;
+                        for (sum, &sample) in sums.iter_mut().zip(&pixels[p..p + 4]) {
+                            *sum += u32::from(sample);
+                        }
+                        if let Some(map) = height_map {
+                            height_sum += f32::from(map[p]) - f32::from(map[p + 2]);
+                        }
+                        count += 1.;
+                    }
+                }
+                let [r, g, b, alpha] = sums.map(|sum| sum as f32);
+                coverage.push(alpha / (255. * count));
+                let luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / alpha.max(1.);
+                details.push(luma * texture * 8. + height_sum / (255. * count) * 22.);
+            }
+        }
+        let distance = silhouette_distances(&coverage, w, h);
+        let mut values: Vec<_> = details
+            .into_iter()
+            .enumerate()
+            .map(|(i, detail)| {
                 let (x, y) = (i % w, i / w);
-                let p = (y * step * width + x * step) * 4;
-                let alpha = f32::from(pixels[p + 3]);
-                let coverage = alpha / 255.;
-                let luma = (0.2126 * f32::from(pixels[p])
-                    + 0.7152 * f32::from(pixels[p + 1])
-                    + 0.0722 * f32::from(pixels[p + 2]))
-                    / alpha.max(1.);
-                let distance = distance[(y + 1) * (w + 2) + x + 1];
-                let edge = (distance.sqrt() - 0.5).max(0.);
-                // A partially covered sample locates the edge within its grid cell.
-                let edge_weight = (1. - edge / 1.5).max(0.);
-                let depth = (edge - (1. - coverage) * edge_weight).max(0.);
-                let t = (depth / limit).min(1.);
-                let painted =
-                    height_map.map_or(0., |map| (f32::from(map[p]) - f32::from(map[p + 2])) / 255.);
-                t * (2. - t) * limit.min(48.) + luma * texture * 8. + painted * 22.
+                let edge = (distance[(y + 1) * (w + 2) + x + 1].sqrt() - 0.5).max(0.);
+                let t = (edge / limit).min(1.);
+                (t * (2. - t) * limit.min(48.) + detail) * coverage[i]
             })
             .collect();
         drop(distance);
@@ -554,19 +575,26 @@ impl Surface {
     }
 }
 
-fn silhouette_distances(pixels: &[u8], width: usize, w: usize, h: usize, step: usize) -> Vec<f32> {
-    // The transparent one-cell border also handles fully opaque and clipped artwork.
+fn silhouette_distances(coverage: &[f32], w: usize, h: usize) -> Vec<f32> {
+    // Keep fractional coverage in the distance transform. As an edge moves
+    // through a cell its cost increases continuously instead of switching
+    // between an exterior site and an opaque cell at 50% coverage.
     let (stride, rows) = (w + 2, h + 2);
     let far = (stride * stride + rows * rows) as f32;
     let mut field = vec![0.; stride * rows];
-    for y in 0..h {
-        let row = &mut field[(y + 1) * stride + 1..(y + 1) * stride + 1 + w];
-        for (x, distance) in row.iter_mut().enumerate() {
-            if pixels[(y * step * width + x * step) * 4 + 3] >= 128 {
-                *distance = far;
-            }
+    for (y, samples) in coverage.chunks_exact(w).enumerate() {
+        for (x, &alpha) in samples.iter().enumerate() {
+            let edge = alpha / (1. - alpha).max(f32::EPSILON);
+            field[(y + 1) * stride + x + 1] = edge.powi(2).min(far);
         }
     }
+    // Extend the edge cells so the camera crop does not create relief.
+    for row in field.chunks_exact_mut(stride) {
+        row[0] = row[1];
+        row[w + 1] = row[w];
+    }
+    field.copy_within(stride..stride * 2, 0);
+    field.copy_within(h * stride..(h + 1) * stride, (h + 1) * stride);
     let size = stride.max(rows);
     let mut sites = vec![0; size];
     let mut boundaries = vec![0.; size + 1];
@@ -1761,6 +1789,40 @@ mod tests {
                 largest < 4.,
                 "Abrupt rim-light changes {largest:.2} at {distance}px"
             );
+        }
+    }
+
+    #[test]
+    fn crossing_half_coverage_does_not_make_the_bevel_jump() {
+        let (width, height) = (96, 64);
+        let surface = |coverage: u8| {
+            let mut rgba = vec![0; width * height * 4];
+            for y in 0..height {
+                for x in 16..width {
+                    rgba[(y * width + x) * 4 + 3] = if x == 16 { coverage } else { 255 };
+                }
+            }
+            Surface::new(&rgba, width, height, 18., 0., None)
+        };
+        for alpha in [31, 63, 95, 127, 159, 191, 223, 254] {
+            let before = surface(alpha);
+            let after = surface(alpha + 1);
+            for x in 16..42 {
+                let delta = before.slope(x, 32) - after.slope(x, 32);
+                assert!(delta.length() < 0.035, "{alpha} at {x}: {delta:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fully_opaque_artwork_has_no_bevel_at_camera_crop() {
+        let (width, height) = (32, 32);
+        let pixels = vec![255; width * height * 4];
+        let surface = Surface::new(&pixels, width, height, 12., 0., None);
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(surface.slope(x, y), Vec2::ZERO);
+            }
         }
     }
 

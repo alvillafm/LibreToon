@@ -720,6 +720,29 @@ impl Editor {
                                 .color(crate::themes::muted()),
                         );
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let quality = &mut self.studio.prefs.viewport_quality;
+                        let before = *quality;
+                        egui::ComboBox::from_id_salt("viewport-quality")
+                            .selected_text(crate::i18n::tr(quality.label()))
+                            .show_ui(ui, |ui| {
+                                for option in crate::depth::ViewportQuality::ALL {
+                                    ui.selectable_value(
+                                        quality,
+                                        option,
+                                        crate::i18n::tr(option.label()),
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text(crate::i18n::tr("Viewport quality"));
+                        if *quality != before {
+                            if let Err(error) = self.studio.save() {
+                                self.status = error;
+                            }
+                            ui.ctx().request_repaint();
+                        }
+                    });
                 });
             });
         if !ctx.egui_wants_keyboard_input()

@@ -100,6 +100,13 @@ impl Editor {
             return;
         }
         self.finish_pending_pen();
+        let partial = !self.canvas.partial.is_empty();
+        if partial {
+            let mut state = std::mem::take(&mut self.canvas);
+            self.checkpoint();
+            self.materialize_fragments(&mut state);
+            self.canvas = state;
+        }
         let mut ids = self.canvas.selected.clone();
         ids.sort_unstable();
         ids.dedup();
@@ -134,7 +141,9 @@ impl Editor {
         let count = mouth_poses.len().max(1);
         let id = id();
         let number = self.doc.extras.symbols.len() + 1;
-        self.checkpoint();
+        if !partial {
+            self.checkpoint();
+        }
         let mut frames = vec![Default::default(); count];
         frames[0] = marks.into();
         let layer = Layer {

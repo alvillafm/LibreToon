@@ -1,7 +1,7 @@
 use crate::shared::SharedVec;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mark {
     #[serde(default, skip_serializing_if = "crate::features::default_style")]
     pub style: crate::features::MarkStyle,

@@ -168,6 +168,7 @@ pub struct Preferences {
     pub language: Option<crate::i18n::Language>,
     pub theme: crate::themes::Theme,
     pub auto_key_paint: bool,
+    pub(crate) viewport_quality: crate::depth::ViewportQuality,
     pub saving: crate::project_save::Options,
     pub raster_brush: crate::raster::Brush,
     pub(crate) light_presets: Vec<crate::light::Preset>,
@@ -203,6 +204,7 @@ impl Default for Preferences {
             language: None,
             theme: Default::default(),
             auto_key_paint: false,
+            viewport_quality: Default::default(),
             saving: Default::default(),
             raster_brush: Default::default(),
             light_presets: Vec::new(),
@@ -579,23 +581,31 @@ impl Editor {
         }
         self.frame_clipboard.clear();
         self.studio.clipboard_symbols = self.doc.extras.symbols.clone();
-        self.studio.clipboard = ids
-            .iter()
-            .filter_map(|&(l, m)| {
-                self.doc
-                    .layers
-                    .get(l)?
-                    .frames
-                    .get(self.frame)?
-                    .get(m)
-                    .cloned()
-            })
-            .collect();
+        self.studio.clipboard.clear();
+        for &(l, m) in &ids {
+            if let Some((_, inside)) = self.canvas.partial.get(&(l, m)) {
+                self.studio.clipboard.extend(inside.iter().cloned());
+            } else if let Some(mark) = self
+                .doc
+                .layers
+                .get(l)
+                .and_then(|layer| layer.frames.get(self.frame))
+                .and_then(|marks| marks.get(m))
+            {
+                self.studio.clipboard.push(mark.clone());
+            }
+        }
         if cut {
+            let mut state = std::mem::take(&mut self.canvas);
             self.checkpoint();
+            self.materialize_fragments(&mut state);
+            ids = state.selected.clone();
+            ids.sort_unstable();
             for (l, m) in ids.into_iter().rev() {
                 self.doc.layers[l].frames[self.frame].remove(m);
             }
+            state.clear_selection();
+            self.canvas = state;
             self.recover();
         }
     }

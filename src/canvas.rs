@@ -196,6 +196,7 @@ pub struct Canvas {
     pub pan: Vec2,
     pub angle: f32,
     pub selected: Vec<(usize, usize)>,
+    pub(crate) partial: std::collections::HashMap<(usize, usize), (Vec<Mark>, Vec<Mark>)>,
     pub pivot: Option<Pos2>,
     orientation: f32,
     frame: usize,
@@ -217,6 +218,7 @@ impl Default for Canvas {
             pan: Vec2::ZERO,
             angle: 0.,
             selected: vec![],
+            partial: Default::default(),
             pivot: None,
             orientation: 0.,
             frame: 0,
@@ -243,6 +245,7 @@ impl Canvas {
     pub fn clear_selection(&mut self) {
         self.polygon_selection.clear();
         self.selected.clear();
+        self.partial.clear();
         self.node_selection = None;
         self.pivot = None;
         self.orientation = 0.;
@@ -260,6 +263,13 @@ impl Canvas {
             let marks = evaluated
                 .entry(l)
                 .or_insert_with(|| crate::animation::marks(&e.doc.layers[l], e.frame));
+            if let Some((_, inside)) = self.partial.get(&(l, m)) {
+                for point in inside.iter().flat_map(vertices) {
+                    let point = e.depth_point(point, l, e.layer);
+                    r.extend_with(Pos2::ZERO + rotate(point.to_vec2(), -self.orientation));
+                }
+                continue;
+            }
             let mark = &marks[m];
             let points = mark
                 .style
@@ -311,7 +321,7 @@ fn paint_selection_outline(painter: &egui::Painter, corners: [Pos2; 4], dashed: 
         if dashed {
             SELECTION_BLUE
         } else {
-            Color32::from_rgb(43, 166, 101)
+            crate::themes::accent()
         },
     );
     let clip = painter.clip_rect().expand(2.);
@@ -533,6 +543,7 @@ impl Editor {
                         .is_some_and(|mark| !mark.style.raster_tile)
             })
         });
+        state.partial.retain(|id, _| state.selected.contains(id));
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let ruler_area = response.rect;
         let area = if self.studio.rulers {
@@ -901,6 +912,7 @@ impl Editor {
                 && matches!(tool, Tool::Select | Tool::Transform | Tool::Object)
             {
                 state.selected.clear();
+                state.partial.clear();
                 for (l, layer) in self
                     .doc
                     .layers
@@ -920,13 +932,15 @@ impl Editor {
                 && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                 && !state.selected.is_empty()
             {
-                let mut ids = state.selected.clone();
-                if ids
+                if state
+                    .selected
                     .iter()
                     .any(|(l, _)| !self.doc.layers[*l].options.animation_track)
                 {
                     self.checkpoint();
                 }
+                self.materialize_fragments(&mut state);
+                let mut ids = state.selected.clone();
                 ids.sort_unstable();
                 for (l, m) in ids.into_iter().rev() {
                     if !self.queue_animation_clip_delete(l) {
@@ -951,17 +965,21 @@ impl Editor {
                     if self.queue_animation_clip_duplicate(l) {
                         continue;
                     }
-                    let mark = transformed(
-                        &self.doc.layers[l].frames[self.frame][m],
-                        Pos2::ZERO,
-                        Vec2::splat(1.),
-                        0.,
-                        Vec2::splat(15.),
+                    let source = state.partial.get(&(l, m)).map_or_else(
+                        || std::slice::from_ref(&self.doc.layers[l].frames[self.frame][m]),
+                        |(_, inside)| inside.as_slice(),
                     );
+                    let copies: Vec<_> = source
+                        .iter()
+                        .map(|mark| {
+                            transformed(mark, Pos2::ZERO, Vec2::splat(1.), 0., Vec2::splat(15.))
+                        })
+                        .collect();
                     let index = self.doc.layers[l].frames[self.frame].len();
-                    self.doc.layers[l].frames[self.frame].push(mark);
-                    selected.push((l, index));
+                    selected.extend((index..index + copies.len()).map(|m| (l, m)));
+                    self.doc.layers[l].frames[self.frame].extend(copies);
                 }
+                state.partial.clear();
                 state.selected = selected;
                 state.pivot = state.pivot.map(|p| p + Vec2::splat(15.));
                 self.recover();
@@ -1246,10 +1264,12 @@ impl Editor {
                         }
                         if shift && state.selected.contains(&id) {
                             state.selected.retain(|x| *x != id);
+                            state.partial.remove(&id);
                             state.pivot = state.bounds(self).map(|b| b.center());
                         } else {
                             if !shift && !state.selected.contains(&id) {
                                 state.selected.clear();
+                                state.partial.clear();
                             }
                             if !state.selected.contains(&id) {
                                 state.selected.push(id);
@@ -1660,6 +1680,22 @@ impl Editor {
                         d.last_input = Some((world, shift));
                         if !d.changed && !matches!(d.operation, Operation::Pivot) {
                             self.checkpoint();
+                            if !state.partial.is_empty() {
+                                let mut selection = Canvas {
+                                    selected: std::mem::take(&mut state.selected),
+                                    partial: std::mem::take(&mut state.partial),
+                                    ..Default::default()
+                                };
+                                self.materialize_fragments(&mut selection);
+                                state.selected = selection.selected;
+                                d.originals = state
+                                    .selected
+                                    .iter()
+                                    .map(|&(l, m)| {
+                                        ((l, m), self.doc.layers[l].frames[self.frame][m].clone())
+                                    })
+                                    .collect();
+                            }
                             self.autokey_motion(&state.selected);
                         }
                         d.changed = true;
@@ -1873,7 +1909,7 @@ impl Editor {
                 self.paint_mannequin_layer(&painter, layer_view, l);
             }
             while marks.peek().is_some_and(|(layer, _, _)| *layer == l) {
-                let (layer, m, mark) = marks.next().unwrap();
+                let (_, _, mark) = marks.next().unwrap();
                 if self.paint_media_image(&painter, layer_view, &mark) {
                     continue;
                 }
@@ -1882,7 +1918,7 @@ impl Editor {
                     &mark,
                     layer_view,
                     false,
-                    state.selected.contains(&(layer, m)),
+                    false,
                     Some(&mut state.cache),
                 );
             }
@@ -2011,14 +2047,34 @@ impl Editor {
         }
         if tool != Tool::Transform {
             let mut evaluated = std::collections::HashMap::new();
-            for &(layer, mark) in &state.selected {
+            for &(layer, mark_index) in &state.selected {
                 let marks = evaluated.entry(layer).or_insert_with(|| {
                     crate::animation::marks(&self.doc.layers[layer], self.frame)
                 });
-                let Some(mark) = marks.get(mark) else {
+                let Some(mark) = marks.get(mark_index) else {
                     continue;
                 };
                 let local_view = self.camera_depth_view(self.camera_view(stage_view), layer);
+                if mark.style.instance.is_none() && mark.style.media_image.is_none() {
+                    if let Some((_, inside)) = state.partial.get(&(layer, mark_index)) {
+                        for part in inside {
+                            crate::paint::selection_pattern(
+                                &painter,
+                                part,
+                                local_view,
+                                &mut state.cache,
+                            );
+                        }
+                    } else {
+                        crate::paint::selection_pattern(
+                            &painter,
+                            mark,
+                            local_view,
+                            &mut state.cache,
+                        );
+                    }
+                    continue;
+                }
                 let mut bounds = crate::vector::control_bounds(mark);
                 let mut matrix = crate::rig::IDENTITY;
                 if let Some(instance) = &mark.style.instance
@@ -2792,60 +2848,36 @@ impl Editor {
         if rect.width() < 0.001 || rect.height() < 0.001 {
             return;
         }
-        let mut edits = vec![];
-        let mut selected = vec![];
-        let mut changed = false;
-        for (l, layer) in self
-            .doc
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked && !l.options.raster)
-        {
-            let mut marks = Vec::new();
-            let mut layer_changed = false;
-            for (m, mark) in layer.frames[self.frame].iter().enumerate() {
-                let (outside, inside) = crate::vector::split_rect(mark, rect);
-                let partial = !outside.is_empty() && !inside.is_empty();
-                let previous = add && state.selected.contains(&(l, m));
-                if inside.is_empty() {
-                    if previous {
-                        selected.push((l, marks.len()));
-                    }
-                    marks.push(mark.clone());
-                } else if outside.is_empty() {
-                    selected.push((l, marks.len()));
-                    marks.push(mark.clone());
-                } else {
-                    layer_changed |= partial;
-                    changed |= partial;
-                    for part in outside {
-                        if previous {
-                            selected.push((l, marks.len()));
-                        }
-                        marks.push(part);
-                    }
-                    for part in inside {
-                        selected.push((l, marks.len()));
-                        marks.push(part);
-                    }
-                }
-            }
-            if layer_changed {
-                edits.push((l, marks));
-            }
-        }
-        if changed {
-            self.checkpoint();
-            for (l, marks) in edits {
-                self.doc.layers[l].frames[self.frame] = marks.into();
-            }
-            self.recover();
-            self.status = "Fragmento separado: puedes moverlo, transformarlo o borrarlo".into();
-        }
-        state.selected = selected;
+        self.select_fragments(state, add, |mark| crate::vector::split_rect(mark, rect));
         state.orientation = 0.;
         state.pivot = state.bounds(self).map(|b| b.center());
+    }
+    pub(crate) fn materialize_fragments(&mut self, state: &mut Canvas) {
+        if state.partial.is_empty() {
+            return;
+        }
+        let mut partial = std::mem::take(&mut state.partial);
+        let mut selected = std::mem::take(&mut state.selected);
+        selected.sort_unstable();
+        let mut shift = 0;
+        let mut layer = None;
+        for (l, m) in selected {
+            if layer != Some(l) {
+                shift = 0;
+                layer = Some(l);
+            }
+            let index = m + shift;
+            if let Some((outside, inside)) = partial.remove(&(l, m)) {
+                let start = index + outside.len();
+                let end = start + inside.len();
+                self.doc.layers[l].frames[self.frame]
+                    .splice(index..index + 1, outside.into_iter().chain(inside));
+                state.selected.extend((start..end).map(|m| (l, m)));
+                shift += end - index - 1;
+            } else {
+                state.selected.push((l, index));
+            }
+        }
     }
     pub(crate) fn separate_component(
         &mut self,
@@ -3171,11 +3203,26 @@ mod vector_gesture_tests {
             let b = view.screen(Pos2::new(350., 250.));
             tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
             tick(ctx, e, vec![egui::Event::PointerMoved(b), button(b, false)]);
-            assert!(e.doc.layers[0].frames[0].len() >= 2);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
             assert!(!e.canvas.selected.is_empty());
             let (l, m) = e.canvas.selected[0];
-            let selected = &e.doc.layers[l].frames[0][m];
+            let selected = &e.canvas.partial[&(l, m)].1[0];
             assert!(crate::vector::control_bounds(selected).max.x < 400.);
+            let inside = view.screen(Pos2::new(275., 175.));
+            let moved = view.screen(Pos2::new(325., 175.));
+            tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(inside), button(inside, true)],
+            );
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(moved), button(moved, false)],
+            );
+            assert!(e.doc.layers[0].frames[0].len() >= 2);
+            assert!(e.canvas.partial.is_empty());
         });
     }
 }
@@ -3263,42 +3310,43 @@ impl Editor {
             self.status = "Activa un color de relleno".into();
             return;
         }
-        match crate::bucket::fill(
-            &self.doc.layers[self.layer].frames[self.frame],
-            world,
-            self.gap,
-            self.fill_color.to_array(),
-        ) {
-            Ok(shapes) => {
-                let shapes = self.prepare_style(shapes);
-                // Recolor an existing bucket face when its geometry is unchanged.
-                let old = self.doc.layers[self.layer].frames[self.frame]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, m)| m.bucket && crate::vector::contains_fill(m, world))
-                    .map(|(i, _)| i);
-                self.checkpoint();
-                self.prepare_paint_key(self.layer, self.frame);
-                state.clear_selection();
-                if let Some(index) = old.filter(|&i| {
-                    let previous = &self.doc.layers[self.layer].frames[self.frame][i];
-                    shapes.len() == 1
-                        && previous.points == shapes[0].points
-                        && previous.holes == shapes[0].holes
-                }) {
-                    self.doc.layers[self.layer].frames[self.frame][index].fill =
-                        Some(self.fill_color.to_array());
-                    self.doc.layers[self.layer].frames[self.frame][index].style =
-                        shapes[0].style.clone();
-                } else {
-                    self.doc.layers[self.layer].frames[self.frame].splice(0..0, shapes);
-                }
-                self.recover();
-                self.status = "Relleno aplicado".into();
-            }
-            Err(error) => self.status = error,
+        let marks = &self.doc.layers[self.layer].frames[self.frame];
+        let existing = marks.iter().rposition(|mark| {
+            mark.style.instance.is_none()
+                && mark.style.media_image.is_none()
+                && !mark.style.raster_tile
+                && !mark.style.guide
+                && crate::vector::contains_fill(mark, world)
+        });
+        if let Some(index) = existing {
+            let mut mark = marks[index].clone();
+            mark.fill = Some(self.fill_color.to_array());
+            mark.style.gradient = self.feature.gradient_on.then(|| {
+                let mut gradient = self.feature.gradient.clone();
+                gradient.fit(crate::vector::control_bounds(&mark));
+                gradient
+            });
+            mark.style.shade = 0;
+            mark.style.light = 0;
+            self.checkpoint();
+            self.prepare_paint_key(self.layer, self.frame);
+            self.doc.layers[self.layer].frames[self.frame][index] = mark;
+        } else {
+            let shapes =
+                match crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array()) {
+                    Ok(shapes) => self.prepare_style(shapes),
+                    Err(error) => {
+                        self.status = error;
+                        return;
+                    }
+                };
+            self.checkpoint();
+            self.prepare_paint_key(self.layer, self.frame);
+            self.doc.layers[self.layer].frames[self.frame].splice(0..0, shapes);
         }
+        state.clear_selection();
+        self.recover();
+        self.status = "Relleno aplicado".into();
     }
 }
 fn paint_width_handles(p: &egui::Painter, mark: &Mark, view: View) {
@@ -3671,7 +3719,7 @@ mod new_tool_regressions {
         });
     }
     #[test]
-    fn lasso_and_polygon_select_cut_real_areas_with_undo() {
+    fn lasso_and_polygon_defer_cut_until_edit_and_undo_it() {
         run(|ctx, e| {
             for tool in [Tool::Lasso, Tool::PolygonSelect] {
                 e.doc = crate::Document::default();
@@ -3724,9 +3772,8 @@ mod new_tool_regressions {
                     .canvas
                     .selected
                     .iter()
-                    .map(|&(l, m)| {
-                        crate::vector::polygon(&e.doc.layers[l].frames[0][m]).unsigned_area()
-                    })
+                    .flat_map(|id| &e.canvas.partial[id].1)
+                    .map(|mark| crate::vector::polygon(mark).unsigned_area())
                     .sum();
                 assert!((selected - 20000.).abs() < 2., "{} {selected}", tool.name());
                 let total: f64 = e.doc.layers[0].frames[0]
@@ -3734,6 +3781,13 @@ mod new_tool_regressions {
                     .map(|m| crate::vector::polygon(m).unsigned_area())
                     .sum();
                 assert!((total - 90000.).abs() < 2.);
+                assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+                e.copy_selection(true);
+                let remainder: f64 = e.doc.layers[0].frames[0]
+                    .iter()
+                    .map(|mark| crate::vector::polygon(mark).unsigned_area())
+                    .sum();
+                assert!((remainder - 70000.).abs() < 2.);
                 e.history(false);
                 assert_eq!(e.doc.layers[0].frames[0].len(), 1);
             }

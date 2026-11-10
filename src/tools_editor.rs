@@ -45,15 +45,17 @@ impl Editor {
         }
     }
     pub fn change_selected_style(&mut self, fill: bool, stroke: bool, width: bool, profile: bool) {
-        let ids = self.canvas.selected.clone();
-        if ids.is_empty() {
+        if self.canvas.selected.is_empty() {
             return;
         }
         if !self.style_transaction {
+            let mut state = std::mem::take(&mut self.canvas);
             self.checkpoint();
+            self.materialize_fragments(&mut state);
+            self.canvas = state;
             self.style_transaction = true;
         }
-        for &(l, m) in &ids {
+        for &(l, m) in &self.canvas.selected {
             let mark = &mut self.doc.layers[l].frames[self.frame][m];
             if fill && mark.fill.is_some() {
                 mark.fill = Some(self.fill_color.to_array());
@@ -72,7 +74,6 @@ impl Editor {
                 mark.width_profile = self.width_profile.clone();
             }
         }
-        self.canvas.selected = ids;
         self.recover();
     }
     pub fn selection_properties_ui(&mut self, ui: &mut egui::Ui) {
@@ -128,56 +129,37 @@ impl Editor {
             return;
         }
         let cutter = crate::editing::area(points);
-        let mut selected = vec![];
-        let mut edits = vec![];
-        let mut changed = false;
-        for (l, layer) in self
-            .doc
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked && !l.options.raster)
+        self.select_fragments(state, add, |mark| crate::editing::split_area(mark, &cutter));
+    }
+
+    pub(crate) fn select_fragments(
+        &self,
+        state: &mut Canvas,
+        add: bool,
+        split: impl Fn(&Mark) -> (Vec<Mark>, Vec<Mark>),
+    ) {
+        if !add {
+            state.clear_selection();
+        }
+        for (l, layer) in
+            self.doc.layers.iter().enumerate().filter(|(_, layer)| {
+                layer.visible && !layer.options.locked && !layer.options.raster
+            })
         {
-            let mut marks = vec![];
-            let mut layer_changed = false;
             for (m, mark) in layer.frames[self.frame].iter().enumerate() {
-                let (outside, inside) = crate::editing::split_area(mark, &cutter);
-                let previous = add && state.selected.contains(&(l, m));
-                if inside.is_empty() {
-                    if previous {
-                        selected.push((l, marks.len()));
-                    }
-                    marks.push(mark.clone());
-                } else if outside.is_empty() {
-                    selected.push((l, marks.len()));
-                    marks.push(mark.clone());
-                } else {
-                    layer_changed = true;
-                    changed = true;
-                    for part in outside {
-                        if previous {
-                            selected.push((l, marks.len()));
-                        }
-                        marks.push(part);
-                    }
-                    for part in inside {
-                        selected.push((l, marks.len()));
-                        marks.push(part);
+                let id = (l, m);
+                if state.selected.contains(&id) {
+                    continue;
+                }
+                let (outside, inside) = split(mark);
+                if !inside.is_empty() {
+                    state.selected.push(id);
+                    if !outside.is_empty() {
+                        state.partial.insert(id, (outside, inside));
                     }
                 }
             }
-            if layer_changed {
-                edits.push((l, marks));
-            }
         }
-        if changed {
-            self.checkpoint();
-            for (l, marks) in edits {
-                self.doc.layers[l].frames[self.frame] = marks.into();
-            }
-            self.recover();
-        }
-        state.selected = selected;
         state.pivot = None;
     }
     pub fn erase_segment(&mut self, a: Pos2, b: Pos2) -> bool {

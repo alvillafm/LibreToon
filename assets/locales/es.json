@@ -1454,5 +1454,8 @@
   "Invalid sprite sheet grid.": "Cuadrícula de sprites no válida.",
   "The grid needs at least one cell per frame.": "La cuadrícula necesita al menos una celda por fotograma.",
   "Sprite sheet is too large. Reduce the frame size, range or spacing.": "La hoja de sprites es demasiado grande. Reduce el tamaño, el intervalo o la separación.",
-  "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Los fotogramas se colocan de izquierda a derecha y de arriba abajo. Las celdas vacías son transparentes."
+  "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Los fotogramas se colocan de izquierda a derecha y de arriba abajo. Las celdas vacías son transparentes.",
+  "Full quality": "Calidad completa",
+  "Viewport quality": "Calidad del lienzo",
+  "Installer log:": "Registro del instalador:"
 }

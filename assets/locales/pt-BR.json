@@ -1454,5 +1454,8 @@
   "Invalid sprite sheet grid.": "Invalid sprite sheet grid.",
   "The grid needs at least one cell per frame.": "The grid needs at least one cell per frame.",
   "Sprite sheet is too large. Reduce the frame size, range or spacing.": "Sprite sheet is too large. Reduce the frame size, range or spacing.",
-  "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Frames fill the grid left to right, then top to bottom. Empty cells are transparent."
+  "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.",
+  "Full quality": "Full quality",
+  "Viewport quality": "Viewport quality",
+  "Installer log:": "Installer log:"
 }
