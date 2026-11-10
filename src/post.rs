@@ -114,18 +114,19 @@ pub fn valid(effects: &[Effect]) -> bool {
 }
 
 pub fn is_adjustment(layer: &crate::document::Layer) -> bool {
-    layer.options.adjustment.is_some()
+    layer.options.adjustment.is_some() || layer.options.light.is_some()
 }
 pub fn present(doc: &Document) -> bool {
     doc.layers.iter().any(is_adjustment)
 }
 pub fn visible_effects(layer: &crate::document::Layer) -> bool {
     layer.visible
-        && layer
-            .options
-            .adjustment
-            .as_ref()
-            .is_some_and(|effects| effects.iter().any(|e| e.enabled))
+        && (layer.options.light.is_some()
+            || layer
+                .options
+                .adjustment
+                .as_ref()
+                .is_some_and(|effects| effects.iter().any(|e| e.enabled)))
 }
 
 fn luma(c: [f32; 3]) -> f32 {

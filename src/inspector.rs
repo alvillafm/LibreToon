@@ -269,6 +269,11 @@ impl Editor {
     pub fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);
+            if self.doc.layers[self.layer].options.light.is_some() {
+                self.light_properties(ui);
+                return;
+            }
+            self.lip_pose_properties(ui);
             if self.adjustment_active() {
                 self.adjustment_properties(ui);
                 return;

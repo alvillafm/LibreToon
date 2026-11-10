@@ -128,6 +128,8 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    #[serde(skip_serializing_if = "SharedVec::is_empty")]
+    pub mouth_keys: SharedVec<crate::lip::Key>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_clip: Option<crate::animation_clips::Timing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +156,8 @@ pub struct LayerOptions {
     pub raster: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adjustment: Option<SharedVec<crate::post::Effect>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light: Option<crate::light::Light>,
     pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
@@ -174,6 +178,7 @@ impl Default for LayerOptions {
             animation_track: false,
             raster: false,
             adjustment: None,
+            light: None,
             depth: Default::default(),
             mannequin: None,
             locked: false,
@@ -227,6 +232,8 @@ pub struct Folder {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Symbol {
+    #[serde(default, skip_serializing_if = "SharedVec::is_empty")]
+    pub mouth_poses: SharedVec<crate::lip::Pose>,
     #[serde(default)]
     pub rig: crate::rig::Rig,
     #[serde(default)]
@@ -320,6 +327,7 @@ pub struct FeatureState {
     pub frame_drag: Option<FrameDrag>,
     pub exposure_drag: Option<crate::exposure_resize::Drag>,
     pub row_drag: Option<(bool, usize)>,
+    pub(crate) layer_selection: crate::sequencer::LayerSelection,
     pub camera_drag: Option<usize>,
     pub camera_trim: Option<CameraTrim>,
     pub guide_drag: Option<usize>,
@@ -342,6 +350,7 @@ impl Default for FeatureState {
             frame_drag: None,
             exposure_drag: None,
             row_drag: None,
+            layer_selection: Default::default(),
             camera_drag: None,
             camera_trim: None,
             guide_drag: None,
@@ -478,7 +487,16 @@ fn expand(
             .and_then(|timing| {
                 crate::animation_clips::source_frame(doc, timing, instance.born, frame)
             })
-            .unwrap_or_else(|| symbol_frame(instance, count, frame, clock));
+            .or_else(|| {
+                crate::lip::pose_at(&mark.style.mouth_keys, frame).filter(|&pose| pose < count)
+            })
+            .unwrap_or_else(|| {
+                if symbol.mouth_poses.is_empty() {
+                    symbol_frame(instance, count, frame, clock)
+                } else {
+                    instance.first.min(count - 1)
+                }
+            });
         let mut sub = doc.clone();
         sub.layers = symbol.layers.clone();
         sub.extras.cameras = Default::default();
@@ -554,7 +572,7 @@ fn resolve_internal(
     for (l, layer) in doc.layers.iter().enumerate() {
         if layer.options.mannequin.is_some()
             || layer.options.mask_id.is_some()
-            || layer.options.adjustment.is_some()
+            || crate::post::is_adjustment(layer)
         {
             continue;
         }
@@ -787,19 +805,31 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         .chain(doc.extras.scenes.iter().flat_map(|s| s.layers.iter()))
         .chain(doc.extras.symbols.iter().flat_map(|s| s.layers.iter()))
     {
-        if let Some(effects) = &layer.options.adjustment
-            && (!crate::post::valid(effects)
+        if crate::post::is_adjustment(layer)
+            && (layer
+                .options
+                .adjustment
+                .as_ref()
+                .is_some_and(|effects| !crate::post::valid(effects))
+                || layer
+                    .options
+                    .light
+                    .as_ref()
+                    .is_some_and(|light| !light.valid())
                 || layer.options.raster
                 || layer.options.animation_track
                 || layer.frames.iter().any(|frame| !frame.is_empty()))
         {
-            return Err("Invalid adjustment layer".into());
+            return Err("Invalid effect or light layer".into());
         }
     }
     doc.extras.rig.validate()?;
     doc.extras.library.validate(&doc.extras.symbols)?;
     for symbol in &doc.extras.symbols {
         symbol.rig.validate()?;
+        if symbol.mouth_poses.len() > 128 || symbol.mouth_poses.iter().any(|name| !name.valid()) {
+            return Err("Invalid Lip Sync poses".into());
+        }
     }
     if doc.extras.folders.len() > 200
         || doc.extras.symbols.len() > 500
@@ -982,6 +1012,16 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
                     .is_some_and(|c| c.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
                 {
                     return Err("Invalid instance color transform".into());
+                }
+                let keys = &mark.style.mouth_keys;
+                if keys.len() > 10_000
+                    || keys
+                        .iter()
+                        .any(|key| key.frame >= 10_000 || key.pose >= 128)
+                    || !keys.windows(2).all(|pair| pair[0].frame < pair[1].frame)
+                    || !keys.is_empty() && mark.style.instance.is_none()
+                {
+                    return Err("Invalid Lip Sync keys".into());
                 }
                 if mark.style.text.as_ref().is_some_and(|t| !t.valid()) {
                     return Err("Invalid text".into());

@@ -335,6 +335,7 @@ impl Editor {
                 layers,
                 rig,
                 library_folder: None,
+                mouth_poses: Default::default(),
                 folders: Default::default(),
                 perspective: source.extras.perspective.clone(),
             });
@@ -659,6 +660,7 @@ mod tests {
             rig: Default::default(),
             folders: Default::default(),
             library_folder: None,
+            mouth_poses: Default::default(),
             perspective: Default::default(),
         }
     }

@@ -86,6 +86,13 @@ impl Editor {
         crate::advanced::assemble_project(&self.doc, &self.feature)
     }
     pub fn convert_symbol(&mut self) {
+        self.convert_symbol_kind(false);
+    }
+
+    pub(crate) fn convert_symbol_kind(&mut self, lip: bool) {
+        if lip && self.enable_lip_symbol_on_selection() {
+            return;
+        }
         if self.canvas.selected.is_empty()
             || self.doc.extras.symbols.len() >= 500
             || self.doc.layers[self.layer].options.locked
@@ -137,10 +144,19 @@ impl Editor {
         self.doc.extras.symbols.push(Symbol {
             rig,
             library_folder: None,
+            mouth_poses: if lip {
+                vec!["Rest".into()].into()
+            } else {
+                Default::default()
+            },
             folders: Default::default(),
             perspective: Default::default(),
             id,
-            name: format!("Symbol {}", number),
+            name: if lip {
+                format!("{} {number}", tr("Lip Sync symbol"))
+            } else {
+                format!("Symbol {number}")
+            },
             layers: vec![layer].into(),
         });
         let mut sorted = ids;
@@ -160,7 +176,11 @@ impl Editor {
             clock: Default::default(),
             symbol: id,
             matrix: [1., 0., 0., 1., 0., 0.],
-            mode: Playback::Loop,
+            mode: if lip {
+                Playback::Single
+            } else {
+                Playback::Loop
+            },
             first: 0,
             born: self.frame,
         });
@@ -396,6 +416,9 @@ impl Editor {
                 .instance
                 .clone()
             {
+                if self.lip_instance_properties(ui, l, m, instance.symbol) {
+                    return;
+                }
                 design::category(ui, "SÍMBOLO");
                 let mut settings = instance.clone();
                 egui::ComboBox::from_id_salt("symbol-clock")
@@ -1338,6 +1361,7 @@ mod tests {
         e.doc.extras.symbols.push(Symbol {
             rig: Default::default(),
             library_folder: None,
+            mouth_poses: Default::default(),
             folders: Default::default(),
             perspective: Default::default(),
             id: 1,

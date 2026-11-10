@@ -14,6 +14,73 @@ enum Row {
     Cameras,
     Rigging,
 }
+#[derive(Default)]
+pub(crate) struct LayerSelection {
+    indices: Vec<usize>,
+    anchor: Option<usize>,
+    context: Option<(usize, usize, usize, Option<u64>)>,
+}
+
+impl LayerSelection {
+    fn click(
+        &mut self,
+        rows: &[Row],
+        active: usize,
+        clicked: usize,
+        extend: bool,
+        toggle: bool,
+    ) -> usize {
+        if extend {
+            let position = |index| {
+                rows.iter()
+                    .position(|row| matches!(row, Row::Layer(l, _) if *l == index))
+            };
+            let anchor = self
+                .anchor
+                .filter(|&l| position(l).is_some())
+                .or_else(|| position(active).map(|_| active))
+                .unwrap_or(clicked);
+            self.anchor = Some(anchor);
+            let a = position(anchor).unwrap();
+            let b = position(clicked).unwrap();
+            self.indices = rows[a.min(b)..=a.max(b)]
+                .iter()
+                .filter_map(|row| {
+                    if let Row::Layer(l, _) = row {
+                        Some(*l)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        } else if toggle {
+            if self.indices.is_empty() {
+                self.indices.push(active);
+            }
+            if let Some(index) = self.indices.iter().position(|&l| l == clicked) {
+                if self.indices.len() == 1 {
+                    return active;
+                }
+                self.indices.remove(index);
+                let active = if clicked == active {
+                    self.indices[self.indices.len() - 1]
+                } else {
+                    active
+                };
+                self.anchor = Some(active);
+                return active;
+            }
+            self.indices.push(clicked);
+            self.anchor = Some(clicked);
+        } else {
+            self.indices.clear();
+            self.indices.push(clicked);
+            self.anchor = Some(clicked);
+        }
+        clicked
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TimelineViewport {
     cell: f32,
@@ -714,6 +781,7 @@ impl Editor {
                         ui.set_min_width(140.);
                         ui.label(egui::RichText::new(tr("POST-PROCESSING")).small().color(crate::themes::muted()));
                         ui.separator();
+                        ui.horizontal(|ui| {
                         if button(ui,Icon::Fx,"","New adjustment layer",false,self.doc.layers.len()<100 && self.feature.symbol_stack.is_empty()).clicked(){
                             self.add_layer_advanced(false);
                             let layer=&mut self.doc.layers[self.layer];
@@ -721,9 +789,30 @@ impl Editor {
                             layer.options.adjustment=Some(Default::default());
                             self.recover();
                         }
+                        let lights = button(ui, Icon::Bulb, "", "Add light", false, self.doc.layers.len() < 100 && self.feature.symbol_stack.is_empty());
+                        egui::Popup::menu(&lights).show(|ui| {
+                            if button(ui, Icon::Bulb, "Point light", "", false, true).clicked() {
+                                self.add_layer_advanced(false);
+                                let light = crate::light::Light::new(self.doc.width, self.doc.height);
+                                let layer = &mut self.doc.layers[self.layer];
+                                layer.name = tr("Point light").into();
+                                layer.options.light = Some(light);
+                                self.recover();
+                                ui.close();
+                            }
+                        });
+                        });
                     });
                 });
                 ui.separator();
+                let selection_context = (self.layer, self.doc.layers.len(), self.doc.extras.active_scene,
+                    self.feature.symbol_stack.last().map(|entry| entry.3));
+                if self.feature.layer_selection.context != Some(selection_context) {
+                    self.feature.layer_selection = LayerSelection {
+                        context: Some(selection_context),
+                        ..Default::default()
+                    };
+                }
                 let mut all = vec![];
                 if !self.doc.extras.cameras.is_empty() {
                     all.push(Row::Cameras);
@@ -868,14 +957,15 @@ impl Editor {
                             }
                         }
                         for f in frames.clone() {
-                            if f == 0 || (f + 1) % 5 == 0 {
+                            let pose_label = self.lip_frame_label(f);
+                            if f == 0 || (f + 1) % 5 == 0 || pose_label.is_some() {
                                 painter.with_clip_rect(grid_clip).text(
                                     Pos2::new(
                                         r.left() + label_w + (f as f32 + 0.5) * cell,
                                         r.top() + 12.,
                                     ),
                                     egui::Align2::CENTER_CENTER,
-                                    (f + 1).to_string(),
+                                    pose_label.unwrap_or_else(|| (f + 1).to_string()),
                                     egui::FontId::monospace(10.),
                                     crate::themes::muted(),
                                 );
@@ -976,10 +1066,12 @@ impl Editor {
                                     painter.rect_filled(
                                         label,
                                         0.,
-                                        if self.doc.layers[l].options.mannequin.is_some() {
-                                            crate::themes::color(Color32::from_rgb(69, 48, 91))
-                                        } else if l == self.layer {
+                                        if l == self.layer {
                                             crate::themes::color(Color32::from_rgb(43, 65, 94))
+                                        } else if self.feature.layer_selection.indices.contains(&l) {
+                                            crate::themes::accent().gamma_multiply(0.24)
+                                        } else if self.doc.layers[l].options.mannequin.is_some() {
+                                            crate::themes::color(Color32::from_rgb(69, 48, 91))
                                         } else {
                                             crate::themes::color(Color32::from_gray(42))
                                         },
@@ -1064,11 +1156,11 @@ impl Editor {
                                         }
                                     } else {
                                         let masked = self.doc.layers[l].options.clip || self.doc.layers[l].options.masked_by.is_some();
-                                        let special = self.doc.layers[l].options.animation_track || self.doc.layers[l].options.adjustment.is_some();
+                                        let special = self.doc.layers[l].options.animation_track || crate::post::is_adjustment(&self.doc.layers[l]);
                                         use crate::studio::LayerColor;
                                         let color = self.studio.prefs.layer_color(if self.doc.layers[l].options.animation_track {
                                             LayerColor::Animation
-                                        } else if self.doc.layers[l].options.adjustment.is_some() {
+                                        } else if crate::post::is_adjustment(&self.doc.layers[l]) {
                                             LayerColor::Adjustment
                                         } else if self.doc.layers[l].options.raster {
                                             LayerColor::Raster
@@ -1105,23 +1197,27 @@ impl Editor {
                                             painter.text(center, egui::Align2::CENTER_CENTER, if self.doc.layers[l].options.raster { "R" } else { "V" }, egui::FontId::monospace(10.), color);
                                         }
                                         if special {
-                                            let icon=if self.doc.layers[l].options.animation_track {Icon::Symbol} else {Icon::Fx};
+                                            let icon=if self.doc.layers[l].options.animation_track {Icon::Symbol} else if self.doc.layers[l].options.light.is_some() { Icon::Bulb } else {Icon::Fx};
                                             draw(&painter,Rect::from_center_size(name_rect.right_center()-Vec2::new(8.,0.),Vec2::splat(16.)),icon,color);
                                         }
                                         if masked {
                                             draw(&painter, Rect::from_center_size(name_rect.right_center() - Vec2::new(8., 0.), Vec2::splat(15.)), Icon::Mask, crate::themes::accent());
                                         }
+                                        let modifiers = ui.input(|i| i.modifiers);
+                                        let toggle = modifiers.command || modifiers.ctrl;
                                         if response.clicked() {
                                             self.folder_groups.selected=None;
-                                            self.layer = l;
+                                            self.layer = self.feature.layer_selection.click(&all, self.layer, l, modifiers.shift, toggle);
+                                            self.feature.layer_selection.context = Some((self.layer, selection_context.1, selection_context.2, selection_context.3));
                                             self.feature.selected_folder =
-                                                self.doc.layers[l].options.folder;
+                                                self.doc.layers[self.layer].options.folder;
+                                            ui.ctx().request_repaint();
                                         }
-                                        if response.double_clicked() {
+                                        if response.double_clicked() && !toggle && !modifiers.shift {
                                             self.renaming_layer = Some(l);
                                             self.rename_focus = true;
                                         }
-                                        if response.drag_started_by(egui::PointerButton::Primary) {
+                                        if !toggle && !modifiers.shift && response.drag_started_by(egui::PointerButton::Primary) {
                                             self.feature.row_drag = Some((false, l));
                                         }
                                         if response.secondary_clicked() { self.layer = l; }
@@ -1171,11 +1267,24 @@ impl Editor {
                                     ui.set_clip_rect(grid_clip);
                                     let painter = ui.painter().with_clip_rect(grid_clip);
                                     let animation_row = Rect::from_min_max(Pos2::new(r.left()+label_w,y),Pos2::new(r.right(),y+row_h));
-                                    if self.doc.layers[l].options.adjustment.is_some() {
+                                    if crate::post::is_adjustment(&self.doc.layers[l]) {
                                         let band=animation_row.shrink2(Vec2::new(1.,4.));
                                         painter.rect_filled(band,4.,self.studio.prefs.layer_color(crate::studio::LayerColor::Adjustment).gamma_multiply(if l == self.layer { 0.42 } else { 0.24 }));
                                         let click=ui.interact(band,ui.scope_id().with(("adjustment-track",l)),Sense::click());
-                                        if click.clicked(){self.layer=l;self.playing=false;}
+                                        if click.clicked() {
+                                            self.layer = l;
+                                            self.playing = false;
+                                            if self.doc.layers[l].options.light.is_some()
+                                                && let Some(pos) = click.interact_pointer_pos() {
+                                                self.frame = (((pos.x-r.left()-label_w)/cell).floor().max(0.) as usize).min(count-1);
+                                            }
+                                        }
+                                        if let Some(light) = &self.doc.layers[l].options.light {
+                                            for f in frames.clone().filter(|f| light.keyed(*f)) {
+                                                let p = Pos2::new(r.left()+label_w+(f as f32+0.5)*cell, band.center().y);
+                                                painter.circle_filled(p, 3.5, Color32::GOLD);
+                                            }
+                                        }
                                         continue;
                                     }
                                     self.animation_drop_target(ui,animation_row,r.left()+label_w,cell,Some(l));
@@ -1183,6 +1292,10 @@ impl Editor {
                                         self.animation_track_ui(ui,l,animation_row,r.left()+label_w,cell);
                                         continue;
                                     }
+                                    let mouth_keys = self.canvas.selected.first().and_then(|&(layer, mark)| {
+                                        if layer != l { return None; }
+                                        self.doc.layers[l].frames.get(self.frame)?.get(mark).map(|mark| mark.style.mouth_keys.clone())
+                                    }).unwrap_or_default();
                                     let layer_color = self.studio.prefs.layer_color(if self.doc.layers[l].options.mannequin.is_some() {
                                         crate::studio::LayerColor::Mannequin
                                     } else if self.doc.layers[l].options.raster {
@@ -1212,6 +1325,13 @@ impl Editor {
                                                 layer_color.gamma_multiply(0.14)
                                             };
                                         painter.rect_filled(rect, 0., color);
+                                        if mouth_keys.binary_search_by_key(&f, |key| key.frame).is_ok() {
+                                            let p = rect.center_top() + Vec2::Y * 5.;
+                                            painter.add(egui::Shape::convex_polygon(
+                                                vec![p - Vec2::Y * 3., p + Vec2::X * 4., p + Vec2::Y * 3., p - Vec2::X * 4.],
+                                                Color32::LIGHT_GREEN, Stroke::NONE
+                                            ));
+                                        }
                                         painter.rect_stroke(
                                             rect,
                                             0.,
@@ -1873,6 +1993,7 @@ impl Editor {
         self.recover();
     }
     fn reorder_row(&mut self, source: (bool, usize), target: (bool, usize)) {
+        self.feature.layer_selection = Default::default();
         self.finish_pending_pen();
         let parent = if target.1 == usize::MAX {
             None
@@ -2335,5 +2456,35 @@ mod viewport_input_tests {
             "layer labels must stay pinned while frames move"
         );
         assert_eq!(editor.frame, 0);
+    }
+}
+
+#[cfg(test)]
+mod layer_selection_tests {
+    use super::*;
+
+    #[test]
+    fn toggles_individual_layers_and_extends_in_visible_row_order() {
+        let rows = [
+            Row::Layer(3, 0),
+            Row::Folder(0, 0),
+            Row::Layer(0, 1),
+            Row::Rigging,
+            Row::Layer(2, 0),
+        ];
+        let mut selection = LayerSelection::default();
+        let active = selection.click(&rows, 3, 2, false, true);
+        assert_eq!(active, 2);
+        assert_eq!(selection.indices, [3, 2]);
+        let active = selection.click(&rows, active, 2, false, true);
+        assert_eq!(active, 3);
+        assert_eq!(selection.indices, [3]);
+        let active = selection.click(&rows, active, 2, true, false);
+        assert_eq!(active, 2);
+        assert_eq!(selection.indices, [3, 0, 2]);
+        assert_eq!(selection.click(&rows, active, 0, true, false), 0);
+        assert_eq!(selection.indices, [3, 0]);
+        assert_eq!(selection.click(&rows, 0, 2, false, false), 2);
+        assert_eq!(selection.indices, [2]);
     }
 }

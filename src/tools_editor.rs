@@ -513,7 +513,7 @@ impl Editor {
     }
     pub fn commit_paint(&mut self, layer: usize, frame: usize, marks: Vec<Mark>) {
         if self.doc.layers[layer].options.mannequin.is_some()
-            || self.doc.layers[layer].options.adjustment.is_some()
+            || crate::post::is_adjustment(&self.doc.layers[layer])
         {
             return;
         }

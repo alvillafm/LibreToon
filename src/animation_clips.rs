@@ -463,6 +463,7 @@ impl Editor {
             layers,
             rig,
             library_folder: None,
+            mouth_poses: Default::default(),
             folders: Default::default(),
             perspective: self.doc.extras.perspective.clone(),
         });

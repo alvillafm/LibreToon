@@ -94,6 +94,30 @@ pub struct MediaLibrary {
     pub(crate) tracks: SharedVec<Track>,
 }
 
+impl MediaLibrary {
+    fn lip_audio(&self, clip: &Clip) -> Option<crate::lip::Audio> {
+        let asset = self
+            .assets
+            .iter()
+            .find(|asset| asset.id == clip.asset && asset.kind == Kind::Audio)?;
+        Some(crate::lip::Audio {
+            name: format!("{} · {}", asset.name, clip.start + 1),
+            data: asset.data.clone(),
+            start: clip.start,
+            offset: clip.offset,
+            length: clip.length,
+        })
+    }
+
+    pub(crate) fn dialogue_clips(&self) -> Vec<crate::lip::Audio> {
+        self.tracks
+            .iter()
+            .filter(|track| track.kind == Kind::Audio)
+            .flat_map(|track| track.clips.iter().filter_map(|clip| self.lip_audio(clip)))
+            .collect()
+    }
+}
+
 #[derive(Default)]
 pub struct MediaEditor {
     audio_destination: Option<(u64, usize)>,
@@ -273,6 +297,45 @@ impl Editor {
         };
         if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > ASSET_LIMIT as u64 {
             return Err("Media file exceeds 64 MiB".into());
+        }
+        if kind == Kind::Audio
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        {
+            let data = std::fs::read(path).map_err(|error| error.to_string())?;
+            if data.len() > ASSET_LIMIT {
+                return Err("Media file exceeds 64 MiB".into());
+            }
+            if let Some(wave) = crate::lip::Wave::read(&data)
+                && wave.frames() > 0
+            {
+                let seconds = wave.frames() as f64 / wave.rate as f64;
+                let end = wave.frames().min(420 * wave.rate);
+                let step = (wave.rate / 8000).max(1);
+                let peaks = (0..end)
+                    .step_by((wave.rate / 50).max(1))
+                    .map(|start| {
+                        let stop = (start + wave.rate / 50).min(end);
+                        let peak = (start..stop)
+                            .step_by(step)
+                            .map(|sample| wave.sample(sample).abs())
+                            .fold(0f32, f32::max);
+                        (peak * 255.).round() as u8
+                    })
+                    .collect();
+                return Ok(Asset {
+                    id: id(),
+                    name,
+                    folder: None,
+                    raster_tile: false,
+                    kind,
+                    data: data.into(),
+                    size: [0; 2],
+                    seconds,
+                    peaks,
+                });
+            }
         }
         let ffmpeg = || {
             let mut command = Command::new(ffmpeg_path);
@@ -1652,6 +1715,39 @@ impl Editor {
                     Color32::WHITE,
                 );
             response.context_menu(|ui| {
+                if track.kind == Kind::Audio {
+                    let target =
+                        self.canvas.selected.first().and_then(|&(layer, mark)| {
+                            let l = self.doc.layers.get(layer).filter(|l| !l.options.locked)?;
+                            let instance = l
+                                .frames
+                                .get(self.frame)?
+                                .get(mark)?
+                                .style
+                                .instance
+                                .as_ref()?;
+                            let symbol =
+                                self.doc.extras.symbols.iter().find(|s| {
+                                    s.id == instance.symbol && !s.mouth_poses.is_empty()
+                                })?;
+                            Some((layer, mark, symbol.mouth_poses.clone()))
+                        });
+                    if crate::design::button(
+                        ui,
+                        crate::design::Icon::Mouth,
+                        "Generate Lip Sync for selected mouth",
+                        "Select a Lip Sync mouth on the stage first.",
+                        false,
+                        target.is_some(),
+                    )
+                    .clicked()
+                        && let Some((layer, mark, poses)) = target
+                        && let Some(audio) = self.doc.extras.media.lip_audio(clip)
+                    {
+                        self.start_lip_analysis(ui.ctx(), audio, layer, mark, poses);
+                        ui.close();
+                    }
+                }
                 if !track.locked {
                     let split = self.frame > clip.start && self.frame < clip.start + clip.length;
                     if ui
@@ -2506,6 +2602,9 @@ impl Editor {
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let result = (|| {
+                    if let Some(samples) = native_wav_mix(&doc, last) {
+                        return Ok(Some(std::sync::Arc::from(samples)));
+                    }
                     let Some(file) = prepare_audio(&doc, 0, last, &ffmpeg)? else {
                         return Ok(None);
                     };
@@ -2617,6 +2716,75 @@ impl Editor {
     }
 }
 
+fn native_wav_mix(doc: &crate::Document, last: usize) -> Option<Vec<f32>> {
+    let samples = audio_sample_offset(last, doc.fps);
+    if samples > 256 * 1024 * 1024 / 4 {
+        return None;
+    }
+    let mut sources = Vec::new();
+    let mut scene_start = 0usize;
+    for index in 0..doc.extras.scenes.len().max(1) {
+        let scene = crate::animation::scene_doc(doc, index);
+        let scene_end = scene_start + scene.layers[0].frames.len();
+        for clip in scene
+            .extras
+            .media
+            .tracks
+            .iter()
+            .filter(|t| t.kind == Kind::Audio && !t.hidden)
+            .flat_map(|t| t.clips.iter())
+        {
+            let start = scene_start + clip.start;
+            let end = (start + clip.length).min(scene_end).min(last);
+            if start >= end {
+                continue;
+            }
+            let asset = doc
+                .extras
+                .media
+                .assets
+                .iter()
+                .find(|a| a.id == clip.asset && a.kind == Kind::Audio)?;
+            let wave = crate::lip::Wave::read(&asset.data).filter(|wav| wav.channels <= 2)?;
+            sources.push((start, end, clip.offset, clip.length, clip.audio, wave));
+        }
+        scene_start = scene_end;
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    let mut mix = vec![0.; samples];
+    for (start, end, offset, length, audio, wave) in sources {
+        let source_start = offset as f64 * wave.rate as f64 / doc.fps as f64;
+        let ratio = wave.rate as f64 / AUDIO_RATE as f64;
+        let frames_per_sample = doc.fps as f32 / AUDIO_RATE as f32;
+        let a = audio_sample_offset(start, doc.fps);
+        let b = audio_sample_offset(end, doc.fps);
+        for (i, dst) in mix[a..b].chunks_exact_mut(2).enumerate() {
+            let source = source_start + i as f64 * ratio;
+            let sample = source as usize;
+            let fraction = source.fract() as f32;
+            let frame = i as f32 * frames_per_sample;
+            let mut gain = audio.gain;
+            if audio.fade_in > 0 {
+                gain *= (frame / audio.fade_in.min(length) as f32).clamp(0., 1.);
+            }
+            if audio.fade_out > 0 {
+                gain *= ((length as f32 - frame) / audio.fade_out.min(length) as f32).clamp(0., 1.);
+            }
+            for (channel, dst) in dst.iter_mut().enumerate() {
+                let first = wave.channel(sample, channel);
+                let next = wave.channel(sample + 1, channel);
+                *dst += (first + (next - first) * fraction) * gain;
+            }
+        }
+    }
+    for sample in &mut mix {
+        *sample = sample.clamp(-1., 1.);
+    }
+    Some(mix)
+}
+
 fn prepare_audio(
     doc: &crate::Document,
     first: usize,
@@ -2688,6 +2856,26 @@ pub(crate) fn test_wav() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_wav_preview_uses_clip_offset_and_scene_position() {
+        let mut wav = test_wav();
+        for i in 2000..4000 {
+            wav[44 + 2 * i..46 + 2 * i].copy_from_slice(&16384i16.to_le_bytes());
+        }
+        let asset = imported_audio(wav, "dialogue.wav".into()).unwrap();
+        let mut doc = crate::Document::default();
+        doc.fps = 24;
+        let track =
+            imported_sound_track("Dialogue".into(), vec![(&asset, 3, 6, 4)], doc.fps).unwrap();
+        doc.extras.media.tracks.push(track);
+        doc.extras.media.assets.push(asset);
+        let mix = native_wav_mix(&doc, 12).unwrap();
+        let start = audio_sample_offset(3, 24);
+        assert!(mix[..start].iter().all(|sample| *sample == 0.));
+        assert_eq!(&mix[start..start + 2], &[0.5, 0.5]);
+        assert_eq!(mix[audio_sample_offset(7, 24)], 0.);
+    }
 
     #[test]
     fn track_header_opens_delete_action_with_right_click() {

@@ -45,6 +45,7 @@ fn symbol(id: u64, marks: Vec<Mark>) -> Symbol {
         perspective: Default::default(),
         rig: Default::default(),
         library_folder: None,
+        mouth_poses: Default::default(),
     }
 }
 fn instance(id: u64, track: u64) -> Mark {

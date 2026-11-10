@@ -522,12 +522,16 @@ impl Editor {
                 state = std::mem::take(&mut self.canvas);
             }
         }
-        let trim_input =
-            !self.raster_active() && self.vector_trim_input(ui, area, self.camera_view(stage_view));
-        let folder_input =
-            !trim_input && self.folder_canvas_input(ui, area, self.camera_view(stage_view));
-        let video_input =
-            !folder_input && self.video_transform_input(ui, area, self.camera_view(stage_view));
+        let light_input = self.light_gizmo(ui, self.camera_view(stage_view), true);
+        let trim_input = !light_input
+            && !self.raster_active()
+            && self.vector_trim_input(ui, area, self.camera_view(stage_view));
+        let folder_input = !light_input
+            && !trim_input
+            && self.folder_canvas_input(ui, area, self.camera_view(stage_view));
+        let video_input = !light_input
+            && !folder_input
+            && self.video_transform_input(ui, area, self.camera_view(stage_view));
         if video_input {
             state.clear_selection();
         }
@@ -620,6 +624,7 @@ impl Editor {
                     | Tool::Object
                     | Tool::Transform
             ))
+            || light_input
             || trim_input
             || folder_input
             || self.folder_groups.dialog.is_some()
@@ -699,6 +704,7 @@ impl Editor {
             }
         }
         let mut convert = false;
+        let mut lip_symbol = false;
         let mut arrange = None;
         if tool != Tool::Mannequin {
             response.context_menu(|ui| {
@@ -717,14 +723,27 @@ impl Editor {
                     convert = true;
                     ui.close();
                 }
+                if crate::design::button(
+                    ui,
+                    Icon::Mouth,
+                    "Convert to Lip Sync symbol",
+                    "",
+                    false,
+                    !state.selected.is_empty() && !self.playing,
+                )
+                .clicked()
+                {
+                    lip_symbol = true;
+                    ui.close();
+                }
             });
         }
         if let Some(action) = arrange {
             self.arrange_selection(&mut state, action);
         }
-        if convert {
+        if convert || lip_symbol {
             self.canvas = state;
-            self.convert_symbol();
+            self.convert_symbol_kind(lip_symbol);
             state = std::mem::take(&mut self.canvas);
             ctx.request_repaint();
         }
@@ -2023,6 +2042,7 @@ impl Editor {
                 Stroke::new(1., crate::themes::accent()),
             ));
         }
+        self.light_gizmo(ui, self.camera_view(stage_view), false);
         self.paint_folder_gizmo(&painter, self.camera_view(stage_view));
         self.paint_vector_trim(&painter, self.camera_view(stage_view));
         if raster_edit

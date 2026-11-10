@@ -31,6 +31,8 @@ mod inspector;
 #[cfg(test)]
 mod interaction_ux_tests;
 mod library;
+mod light;
+mod lip;
 mod loading;
 mod mannequin;
 mod media;
@@ -80,6 +82,7 @@ struct Editor {
     references: reftool::State,
     raster_cleanup: usize,
     post: post::State,
+    lip: lip::State,
     vector_trim: vector_trim::State,
     media: media::MediaEditor,
     loader: loading::Loader,
@@ -175,6 +178,7 @@ impl Editor {
             references: Default::default(),
             raster_cleanup: 0,
             post: Default::default(),
+            lip: Default::default(),
             vector_trim: Default::default(),
             media: Default::default(),
             loader: Default::default(),
@@ -291,6 +295,7 @@ impl Editor {
             self.undo.pop()
         };
         if let Some(d) = entry {
+            self.feature.layer_selection = Default::default();
             self.hub.dirty();
             if redo {
                 self.undo.push(self.doc.clone())
@@ -364,6 +369,7 @@ impl eframe::App for Editor {
             self.save_project(false);
         }
         self.action_shortcuts(&ctx);
+        self.poll_lip_analysis();
         self.space_playback(&ctx);
         if self.profile_transaction && !ctx.input(|i| i.pointer.primary_down()) {
             self.profile_transaction = false;

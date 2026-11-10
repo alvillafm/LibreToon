@@ -938,6 +938,7 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
             perspective: Default::default(),
             rig: Default::default(),
             library_folder: None,
+            mouth_poses: Default::default(),
         });
     }
     // Traverse the dependency DAG once, not once per held frame or path.

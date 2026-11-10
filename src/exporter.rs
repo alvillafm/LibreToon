@@ -585,6 +585,7 @@ pub(crate) fn run_export(
                 true,
                 true,
                 true,
+                true,
             );
             for pixel in rgba.chunks_exact_mut(4) {
                 let alpha = u32::from(pixel[3]);
@@ -806,7 +807,7 @@ pub(crate) fn raster_with_video(
 ) -> Vec<u8> {
     let resolved = crate::animation::resolve_movie(doc, frame, true);
     raster_composited(
-        doc, frame, w, h, ctx, cache, video, resolved, false, true, true,
+        doc, frame, w, h, ctx, cache, video, resolved, false, true, true, true,
     )
 }
 pub(crate) fn raster_preview(
@@ -824,7 +825,7 @@ pub(crate) fn raster_preview(
 ) -> Vec<u8> {
     let resolved = crate::features::resolve_preview(doc, frame, camera, clock);
     raster_composited(
-        doc, frame, w, h, ctx, cache, video, resolved, false, post, blur,
+        doc, frame, w, h, ctx, cache, video, resolved, false, post, blur, camera,
     )
 }
 fn raster_composited(
@@ -839,6 +840,7 @@ fn raster_composited(
     transparent: bool,
     post: bool,
     camera_blur: bool,
+    camera: bool,
 ) -> Vec<u8> {
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
@@ -896,7 +898,7 @@ fn raster_composited(
                     && crate::post::visible_effects(l)
                     && crate::folder_groups::layer_active(&scene, l, local)
                 {
-                    apply_adjustment(&mut result, w, h, l, scale);
+                    apply_adjustment(&mut result, w, h, l, scale, &scene, local, camera);
                 } else if !crate::post::is_adjustment(l)
                     && resolved.iter().any(|(i, ..)| *i == layer)
                 {
@@ -935,7 +937,7 @@ fn raster_composited(
                 );
                 composite(&mut result, &group, 4);
             }
-            apply_adjustment(&mut result, w, h, layer, scale);
+            apply_adjustment(&mut result, w, h, layer, scale, &scene, local, camera);
             start = at + 1;
         }
         let group = raster_flat(
@@ -980,19 +982,25 @@ fn apply_adjustment(
     h: u32,
     layer: &crate::document::Layer,
     scale: f32,
+    doc: &Document,
+    frame: usize,
+    camera: bool,
 ) {
     let opacity = layer.options.opacity.clamp(0., 1.);
     if opacity == 0. {
         return;
     }
-    let original = (opacity < 1.).then(|| result.clone());
     if let Some(effects) = &layer.options.adjustment {
+        let original = (opacity < 1.).then(|| result.clone());
         crate::post::apply(result, w, h, effects, scale);
-    }
-    if let Some(original) = original {
-        for (p, old) in result.iter_mut().zip(original) {
-            *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
+        if let Some(original) = original {
+            for (p, old) in result.iter_mut().zip(original) {
+                *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
+            }
         }
+    }
+    if let Some(light) = &layer.options.light {
+        light.apply(result, w, h, doc, frame, camera, opacity);
     }
 }
 
