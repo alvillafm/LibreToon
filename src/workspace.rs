@@ -540,6 +540,24 @@ impl Editor {
                             self.studio.stage_only = !self.studio.stage_only;
                             ui.ctx().request_repaint();
                         }
+                        if self
+                            .doc
+                            .layers
+                            .iter()
+                            .any(|layer| layer.options.light.is_some())
+                            && button(
+                                ui,
+                                Icon::Bulb,
+                                "",
+                                "Show / Hide Lights",
+                                !self.post.hide_lights,
+                                true,
+                            )
+                            .clicked()
+                        {
+                            self.post.hide_lights = !self.post.hide_lights;
+                            ui.ctx().request_repaint();
+                        }
                         if crate::post::present(&self.doc)
                             && button(
                                 ui,

@@ -791,14 +791,16 @@ impl Editor {
                         }
                         let lights = button(ui, Icon::Bulb, "", "Add light", false, self.doc.layers.len() < 100 && self.feature.symbol_stack.is_empty());
                         egui::Popup::menu(&lights).show(|ui| {
-                            if button(ui, Icon::Bulb, "Point light", "", false, true).clicked() {
-                                self.add_layer_advanced(false);
-                                let light = crate::light::Light::new(self.doc.width, self.doc.height);
-                                let layer = &mut self.doc.layers[self.layer];
-                                layer.name = tr("Point light").into();
-                                layer.options.light = Some(light);
-                                self.recover();
-                                ui.close();
+                            for kind in [crate::light::Kind::Point, crate::light::Kind::Directional] {
+                                if button(ui, Icon::Bulb, kind.name(), "", false, true).clicked() {
+                                    self.add_layer_advanced(false);
+                                    let light = crate::light::Light::new(self.doc.width, self.doc.height, kind);
+                                    let layer = &mut self.doc.layers[self.layer];
+                                    layer.name = tr(kind.name()).into();
+                                    layer.options.light = Some(light);
+                                    self.recover();
+                                    ui.close();
+                                }
                             }
                         });
                         });
@@ -1068,6 +1070,8 @@ impl Editor {
                                         0.,
                                         if l == self.layer {
                                             crate::themes::color(Color32::from_rgb(43, 65, 94))
+                                        } else if self.doc.layers[l].options.light.is_some() && !self.feature.layer_selection.indices.contains(&l) {
+                                            Color32::GOLD.gamma_multiply(0.20)
                                         } else if self.feature.layer_selection.indices.contains(&l) {
                                             crate::themes::accent().gamma_multiply(0.24)
                                         } else if self.doc.layers[l].options.mannequin.is_some() {
@@ -1198,7 +1202,7 @@ impl Editor {
                                         }
                                         if special {
                                             let icon=if self.doc.layers[l].options.animation_track {Icon::Symbol} else if self.doc.layers[l].options.light.is_some() { Icon::Bulb } else {Icon::Fx};
-                                            draw(&painter,Rect::from_center_size(name_rect.right_center()-Vec2::new(8.,0.),Vec2::splat(16.)),icon,color);
+                                            draw(&painter,Rect::from_center_size(name_rect.right_center()-Vec2::new(8.,0.),Vec2::splat(16.)),icon,if self.doc.layers[l].options.light.is_some() { Color32::GOLD } else { color });
                                         }
                                         if masked {
                                             draw(&painter, Rect::from_center_size(name_rect.right_center() - Vec2::new(8., 0.), Vec2::splat(15.)), Icon::Mask, crate::themes::accent());
@@ -1211,6 +1215,14 @@ impl Editor {
                                             self.feature.layer_selection.context = Some((self.layer, selection_context.1, selection_context.2, selection_context.3));
                                             self.feature.selected_folder =
                                                 self.doc.layers[self.layer].options.folder;
+                                            self.canvas.clear_selection();
+                                            for &selected in &self.feature.layer_selection.indices {
+                                                let layer = &self.doc.layers[selected];
+                                                if layer.visible && !layer.options.locked && !crate::post::is_adjustment(layer) {
+                                                    let count = layer.frames[self.frame].len().min(crate::animation::marks(layer, self.frame).len());
+                                                    self.canvas.selected.extend((0..count).map(|mark| (selected, mark)));
+                                                }
+                                            }
                                             ui.ctx().request_repaint();
                                         }
                                         if response.double_clicked() && !toggle && !modifiers.shift {
@@ -1268,21 +1280,61 @@ impl Editor {
                                     let painter = ui.painter().with_clip_rect(grid_clip);
                                     let animation_row = Rect::from_min_max(Pos2::new(r.left()+label_w,y),Pos2::new(r.right(),y+row_h));
                                     if crate::post::is_adjustment(&self.doc.layers[l]) {
-                                        let band=animation_row.shrink2(Vec2::new(1.,4.));
-                                        painter.rect_filled(band,4.,self.studio.prefs.layer_color(crate::studio::LayerColor::Adjustment).gamma_multiply(if l == self.layer { 0.42 } else { 0.24 }));
-                                        let click=ui.interact(band,ui.scope_id().with(("adjustment-track",l)),Sense::click());
-                                        if click.clicked() {
-                                            self.layer = l;
-                                            self.playing = false;
-                                            if self.doc.layers[l].options.light.is_some()
-                                                && let Some(pos) = click.interact_pointer_pos() {
-                                                self.frame = (((pos.x-r.left()-label_w)/cell).floor().max(0.) as usize).min(count-1);
+                                        let band = animation_row.shrink2(Vec2::new(1.,4.));
+                                        let selected = l == self.layer;
+                                        if self.doc.layers[l].options.light.is_some() {
+                                            let color = Color32::GOLD;
+                                            painter.rect_filled(band, 4., color.gamma_multiply(if selected { 0.35 } else { 0.19 }));
+                                            let origin = r.left() + label_w;
+                                            let keyed = self.doc.layers[l].options.light.clone().unwrap();
+                                            let locked = self.doc.layers[l].options.locked;
+                                            let mut edit = None;
+                                            for f in frames.clone() {
+                                                let rect = Rect::from_min_size(Pos2::new(origin + f as f32 * cell, animation_row.top()), Vec2::new(cell, row_h));
+                                                let has_key = keyed.keyed(f);
+                                                if has_key {
+                                                    let p = rect.center();
+                                                    painter.add(egui::Shape::convex_polygon(
+                                                        vec![p - Vec2::Y * 5., p + Vec2::X * 5., p + Vec2::Y * 5., p - Vec2::X * 5.],
+                                                        color, Stroke::NONE));
+                                                }
+                                                let response = ui.interact(rect, ui.scope_id().with(("light-key", l, f)),
+                                                    if has_key && !locked { Sense::click_and_drag() } else { Sense::click() });
+                                                if response.clicked() || response.secondary_clicked() {
+                                                    self.layer = l;
+                                                    self.frame = f;
+                                                    self.playing = false;
+                                                }
+                                                if response.dragged_by(egui::PointerButton::Primary) {
+                                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                                }
+                                                if response.drag_stopped_by(egui::PointerButton::Primary) && has_key
+                                                    && let Some(pos) = response.interact_pointer_pos()
+                                                    && (animation_row.top()..=animation_row.bottom()).contains(&pos.y)
+                                                {
+                                                    let dest = ((pos.x - origin) / cell).floor() as usize;
+                                                    if dest < count { edit = Some((f, Some(dest))); }
+                                                }
+                                                response.context_menu(|ui| {
+                                                    let (icon, label, dest) = if has_key {
+                                                        (Icon::Minus, "Delete light key", None)
+                                                    } else {
+                                                        (Icon::Plus, "Add light key", Some(f))
+                                                    };
+                                                    if button(ui, icon, label, "", false, !locked).clicked() {
+                                                        edit = Some((f, dest));
+                                                        ui.close();
+                                                    }
+                                                });
                                             }
-                                        }
-                                        if let Some(light) = &self.doc.layers[l].options.light {
-                                            for f in frames.clone().filter(|f| light.keyed(*f)) {
-                                                let p = Pos2::new(r.left()+label_w+(f as f32+0.5)*cell, band.center().y);
-                                                painter.circle_filled(p, 3.5, Color32::GOLD);
+                                            if let Some((source, dest)) = edit {
+                                                self.edit_light_key(l, source, dest);
+                                            }
+                                        } else {
+                                            painter.rect_filled(band,4.,self.studio.prefs.layer_color(crate::studio::LayerColor::Adjustment).gamma_multiply(if selected { 0.42 } else { 0.24 }));
+                                            if ui.interact(band,ui.scope_id().with(("adjustment-track",l)),Sense::click()).clicked() {
+                                                self.layer = l;
+                                                self.playing = false;
                                             }
                                         }
                                         continue;

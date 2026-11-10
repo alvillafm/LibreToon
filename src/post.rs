@@ -117,7 +117,9 @@ pub fn is_adjustment(layer: &crate::document::Layer) -> bool {
     layer.options.adjustment.is_some() || layer.options.light.is_some()
 }
 pub fn present(doc: &Document) -> bool {
-    doc.layers.iter().any(is_adjustment)
+    doc.layers
+        .iter()
+        .any(|layer| layer.options.adjustment.is_some())
 }
 pub fn visible_effects(layer: &crate::document::Layer) -> bool {
     layer.visible
@@ -445,6 +447,7 @@ struct EffectDrag(usize);
 #[derive(Default)]
 pub(crate) struct State {
     pub hidden: bool,
+    pub hide_lights: bool,
     selected: usize,
     channel: usize,
     transaction: bool,

@@ -322,7 +322,11 @@ impl Editor {
             .binary_search_by_key(&self.frame, |k| k.frame)
             .is_ok();
         let unlocked = !self.doc.layers[l].options.locked;
-        design::category(ui, "Lip Sync");
+        design::category(ui, "LIPSYNC");
+        if design::button(ui, Icon::Node, "Editar símbolo", "", false, true).clicked() {
+            self.enter_symbol(symbol);
+            return true;
+        }
         let previous = mark
             .style
             .mouth_keys
@@ -356,7 +360,7 @@ impl Editor {
             return true;
         }
         ui.add_enabled_ui(unlocked, |ui| {
-            ui.label(tr("Manual pose at playhead"));
+            ui.small(tr("Edit the symbol to add more mouth poses."));
             ui.horizontal_wrapped(|ui| {
                 for (pose, drawing) in poses.iter().enumerate() {
                     if design::button(ui, Icon::Mouth, &drawing.name, "", current == pose, true)
@@ -382,8 +386,10 @@ impl Editor {
                 }
             });
             let audio = self.doc.extras.media.dialogue_clips();
-            design::category(ui, "Automatic Lip Sync");
-            ui.small(tr("Local WAV analysis. Review the suggested mouth keys."));
+            design::category(ui, "AUTOMATED SYNC");
+            ui.small(tr(
+                "Right-click a WAV clip to sync it with the selected Lip Sync symbol.",
+            ));
             if audio.is_empty() {
                 ui.small(tr("Add an audio clip to this scene."));
             } else {
@@ -418,9 +424,6 @@ impl Editor {
                 }
             }
         });
-        if design::button(ui, Icon::Node, "Editar símbolo", "", false, true).clicked() {
-            self.enter_symbol(symbol);
-        }
         true
     }
 

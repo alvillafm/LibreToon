@@ -240,7 +240,7 @@ pub struct DepthEditor {
     job: Option<std::sync::mpsc::Receiver<(Vec<usize>, Vec<u8>, [usize; 2])>>,
     requested: Vec<usize>,
     owner: Option<Document>,
-    preview_scope: Option<(usize, Option<u64>, u32, u32, bool, bool, bool)>,
+    preview_scope: Option<(usize, Option<u64>, u32, u32, bool, bool, bool, bool)>,
     preview_epoch: usize,
 }
 impl DepthEditor {
@@ -549,7 +549,17 @@ impl Editor {
         let blur = (use_camera || self.depth.open)
             && !self.depth.hide_blur
             && optics.as_ref().is_some_and(|o| o.strength > 0.);
-        let post = !self.post.hidden && self.doc.layers.iter().any(crate::post::visible_effects);
+        let fx = !self.post.hidden
+            && self.doc.layers.iter().any(|layer| {
+                layer.options.adjustment.is_some() && crate::post::visible_effects(layer)
+            });
+        let lights = !self.post.hide_lights
+            && self
+                .doc
+                .layers
+                .iter()
+                .any(|layer| layer.visible && layer.options.light.is_some());
+        let post = fx || lights;
         if !post && !blur {
             if self.depth.preview_scope.is_some() {
                 self.depth.invalidate_preview();
@@ -562,7 +572,8 @@ impl Editor {
             self.doc.width,
             self.doc.height,
             use_camera,
-            post,
+            fx,
+            lights,
             blur,
         );
         if self.depth.preview_scope != Some(scope) {
@@ -641,6 +652,25 @@ impl Editor {
             let mut doc = crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene);
             doc.extras.scenes.clear();
             self.depth.owner = Some(doc.clone());
+            if !lights || !fx {
+                for layer in &mut doc.layers {
+                    if !crate::post::is_adjustment(layer) {
+                        continue;
+                    }
+                    let use_light = lights && layer.options.light.is_some();
+                    let use_fx = fx && layer.options.adjustment.is_some();
+                    if !use_light && !use_fx {
+                        layer.visible = false;
+                    } else {
+                        if !use_light {
+                            layer.options.light = None;
+                        }
+                        if !use_fx {
+                            layer.options.adjustment = None;
+                        }
+                    }
+                }
+            }
             self.depth.requested = key.clone();
             let frame = self.frame;
             let clock = if self.playing {

@@ -1,4 +1,4 @@
-//! Point lighting for the composited artwork underneath a timeline layer.
+//! Lighting for the composited artwork underneath a timeline layer.
 use crate::{
     Editor,
     canvas::View,
@@ -6,16 +6,63 @@ use crate::{
     i18n::tr,
     shared::SharedVec,
 };
-use eframe::egui::{self, Pos2, Rect, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub enum Kind {
+    #[default]
+    Point,
+    Directional,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Point => "Point light",
+            Self::Directional => "Directional light",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     position: [f32; 2],
     radius: f32,
     intensity: f32,
     relief: f32,
     color: [u8; 3],
+    angle: f32,
+    elevation: f32,
+    falloff: f32,
+    bevel: f32,
+    texture_relief: f32,
+    shadow: f32,
+    specular: f32,
+    gloss: f32,
+    steps: u8,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            position: [0., 0.],
+            radius: 240.,
+            intensity: 0.75,
+            relief: 0.55,
+            color: [255, 228, 181],
+            angle: -135.,
+            elevation: 40.,
+            falloff: 1.4,
+            bevel: 28.,
+            texture_relief: 0.15,
+            shadow: 0.28,
+            specular: 0.16,
+            gloss: 24.,
+            steps: 0,
+        }
+    }
 }
 
 impl Settings {
@@ -26,25 +73,35 @@ impl Settings {
             && (1. ..=20_000.).contains(&self.radius)
             && (0. ..=2.).contains(&self.intensity)
             && (0. ..=1.).contains(&self.relief)
+            && (-180. ..=180.).contains(&self.angle)
+            && (5. ..=85.).contains(&self.elevation)
+            && (0.25..=5.).contains(&self.falloff)
+            && (1. ..=240.).contains(&self.bevel)
+            && (0. ..=1.).contains(&self.texture_relief)
+            && (0. ..=1.).contains(&self.shadow)
+            && (0. ..=1.).contains(&self.specular)
+            && (2. ..=96.).contains(&self.gloss)
+            && self.steps <= 8
     }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Light {
+    #[serde(default)]
+    pub kind: Kind,
     base: Settings,
     #[serde(default)]
     keys: SharedVec<(usize, Settings)>,
 }
 
 impl Light {
-    pub fn new(w: u32, h: u32) -> Self {
+    pub fn new(w: u32, h: u32, kind: Kind) -> Self {
         Self {
+            kind,
             base: Settings {
                 position: [w as f32 * 0.5, h as f32 * 0.4],
                 radius: (w.min(h) as f32 * 0.42).max(1.),
-                intensity: 0.75,
-                relief: 0.55,
-                color: [255, 228, 181],
+                ..Settings::default()
             },
             keys: Default::default(),
         }
@@ -86,6 +143,18 @@ impl Light {
             radius: lerp(start.radius, end.radius),
             intensity: lerp(start.intensity, end.intensity),
             relief: lerp(start.relief, end.relief),
+            angle: {
+                let delta = (end.angle - start.angle + 180.).rem_euclid(360.) - 180.;
+                (start.angle + delta * t + 180.).rem_euclid(360.) - 180.
+            },
+            elevation: lerp(start.elevation, end.elevation),
+            falloff: lerp(start.falloff, end.falloff),
+            bevel: lerp(start.bevel, end.bevel),
+            texture_relief: lerp(start.texture_relief, end.texture_relief),
+            shadow: lerp(start.shadow, end.shadow),
+            specular: lerp(start.specular, end.specular),
+            gloss: lerp(start.gloss, end.gloss),
+            steps: start.steps,
             color: std::array::from_fn(|i| {
                 lerp(start.color[i].into(), end.color[i].into()).round() as u8
             }),
@@ -102,22 +171,18 @@ impl Light {
         camera: bool,
         opacity: f32,
     ) {
-        let Settings {
-            position,
-            radius,
-            intensity,
-            relief,
-            color,
-        } = self.at(frame);
-        if intensity == 0. || opacity == 0. {
+        let settings = self.at(frame);
+        if settings.intensity == 0. || opacity == 0. {
             return;
         }
         let center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
-        let mut point = crate::vector::pos(position);
+        let mut point = crate::vector::pos(settings.position);
         let mut zoom = 1.;
+        let mut angle = settings.angle.to_radians();
         if camera && let Some(camera) = crate::depth::camera(doc, frame) {
             let pose = crate::animation::camera_at(camera, frame);
             zoom = pose.zoom;
+            angle -= pose.angle;
             point = center
                 + egui::emath::Rot2::from_angle(-pose.angle)
                     * (point - crate::vector::pos(pose.center))
@@ -126,49 +191,224 @@ impl Light {
         let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
         let x = (point.x - center.x) * scale + w as f32 * 0.5;
         let y = (point.y - center.y) * scale + h as f32 * 0.5;
-        let radius = (radius * zoom * scale).max(1.);
-        let left = (x - radius).floor().max(0.) as usize;
-        let right = ((x + radius).ceil() as usize).min(w as usize);
-        let top = (y - radius).floor().max(0.) as usize;
-        let bottom = ((y + radius).ceil() as usize).min(h as usize);
+        let radius = (settings.radius * zoom * scale).max(1.);
+        let (left, top, right, bottom) = match self.kind {
+            Kind::Point => (
+                (x - radius).max(0.) as usize,
+                (y - radius).max(0.) as usize,
+                ((x + radius).ceil() as usize).min(w as usize),
+                ((y + radius).ceil() as usize).min(h as usize),
+            ),
+            Kind::Directional => (0, 0, w as usize, h as usize),
+        };
+        if left >= right || top >= bottom {
+            return;
+        }
         let width = w as usize;
-        let stride = (4. * scale).round().max(1.) as usize;
-        // Alpha is preserved, so neighbouring coverage can be sampled in place.
+        let surface = Surface::new(
+            pixels,
+            width,
+            h as usize,
+            settings.bevel * scale * zoom,
+            settings.texture_relief,
+        );
+        let elevation = settings.elevation.to_radians();
+        let dir = Vec2::angled(angle) * elevation.cos();
+        let height = elevation.sin().max(0.08);
+        let tint = settings.color.map(|c| f32::from(c) / 255.);
         for py in top..bottom {
             for px in left..right {
                 let idx = (py * width + px) * 4;
-                let alpha = pixels[idx + 3] as f32;
+                let alpha = f32::from(pixels[idx + 3]);
                 if alpha == 0. {
                     continue;
                 }
-                let dx = (x - px as f32) / radius;
-                let dy = (y - py as f32) / radius;
-                let dist = dx.hypot(dy);
-                if dist >= 1. {
-                    continue;
+                let (lx, ly, lz, attenuation) = match self.kind {
+                    Kind::Directional => (dir.x, dir.y, height, 1.),
+                    Kind::Point => {
+                        let dx = (x - px as f32) / radius;
+                        let dy = (y - py as f32) / radius;
+                        let d2 = dx * dx + dy * dy;
+                        if d2 >= 1. {
+                            continue;
+                        }
+                        let z = height * 0.85;
+                        let inverse = (d2 + z * z).sqrt().recip();
+                        (
+                            dx * inverse,
+                            dy * inverse,
+                            z * inverse,
+                            (1. - d2.sqrt()).powf(settings.falloff),
+                        )
+                    }
+                };
+                let n = surface.slope(px, py) * settings.relief * 3.2;
+                let nz = (1. + n.length_sq()).sqrt().recip();
+                let mut diffuse = ((n.x * lx + n.y * ly + lz) * nz).clamp(0., 1.);
+                if settings.steps >= 2 {
+                    let steps = f32::from(settings.steps - 1);
+                    diffuse = (diffuse * steps).round() / steps;
                 }
-                let coverage = |sx, sy| pixels[(sy * width + sx) * 4 + 3] as f32 / 255.;
-                let nx = coverage(px.saturating_sub(stride), py)
-                    - coverage((px + stride).min(width - 1), py);
-                let ny = coverage(px, py.saturating_sub(stride))
-                    - coverage(px, (py + stride).min(h as usize - 1));
-                let shading = 1. - relief * 0.35 + relief * (nx * dx + ny * dy) * 1.4;
-                let gain = (1. - dist).powi(2) * intensity * shading * opacity;
-                for c in 0..3 {
-                    let value = f32::from(pixels[idx + c]);
-                    pixels[idx + c] = (value
-                        + (alpha * 0.7 + value * 0.3) * gain * f32::from(color[c]) / 255.)
-                        .clamp(0., alpha)
-                        .round() as u8;
+                let halfway = (2. + 2. * lz).sqrt();
+                let specular = if settings.specular > 0. {
+                    (((n.x * lx + n.y * ly + lz + 1.) * nz) / halfway)
+                        .clamp(0., 1.)
+                        .powf(settings.gloss)
+                        * settings.specular
+                } else {
+                    0.
+                };
+                let strength = settings.intensity * attenuation * opacity;
+                let shade = (1. - diffuse) * settings.shadow * strength;
+                for channel in 0..3 {
+                    let value = f32::from(pixels[idx + channel]);
+                    let lit = value * (1. - shade)
+                        + ((alpha - value) * diffuse * 0.64 + alpha * specular)
+                            * strength
+                            * tint[channel];
+                    pixels[idx + channel] = lit.clamp(0., alpha).round() as u8;
                 }
             }
         }
     }
+
+    pub fn edit_key(&mut self, frame: usize, destination: Option<usize>) -> bool {
+        match (self.keys.binary_search_by_key(&frame, |k| k.0), destination) {
+            (Ok(index), Some(to)) if to != frame && !self.keyed(to) => {
+                let value = self.keys.remove(index).1;
+                self.set(to, value);
+            }
+            (Ok(index), None) => {
+                self.keys.remove(index);
+            }
+            (Err(_), Some(to)) if to == frame => {
+                self.set(frame, self.at(frame));
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+// A capped, two-pass distance field gives an editable bevel across the silhouette.
+// Texture relief also works on opaque artwork, where coverage has no internal edges.
+struct Surface {
+    width: usize,
+    height: usize,
+    step: usize,
+    values: Vec<f32>,
+}
+impl Surface {
+    fn new(pixels: &[u8], width: usize, height: usize, bevel: f32, texture: f32) -> Self {
+        let step = width.max(height).div_ceil(1024).max(1);
+        let w = width.div_ceil(step);
+        let h = height.div_ceil(step);
+        let limit = (bevel / step as f32).max(1.) * 3.;
+        let cap = limit.ceil().min(4096.) as u16;
+        let mut distance = vec![cap; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if pixels[(y * step * width + x * step) * 4 + 3] < 128 {
+                    distance[i] = 0;
+                    continue;
+                }
+                if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
+                    distance[i] = 3;
+                }
+                if x > 0 {
+                    distance[i] = distance[i].min(distance[i - 1] + 3);
+                }
+                if y > 0 {
+                    distance[i] = distance[i].min(distance[i - w] + 3);
+                    if x > 0 {
+                        distance[i] = distance[i].min(distance[i - w - 1] + 4);
+                    }
+                    if x + 1 < w {
+                        distance[i] = distance[i].min(distance[i - w + 1] + 4);
+                    }
+                }
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                if x + 1 < w {
+                    distance[i] = distance[i].min(distance[i + 1] + 3);
+                }
+                if y + 1 < h {
+                    distance[i] = distance[i].min(distance[i + w] + 3);
+                    if x > 0 {
+                        distance[i] = distance[i].min(distance[i + w - 1] + 4);
+                    }
+                    if x + 1 < w {
+                        distance[i] = distance[i].min(distance[i + w + 1] + 4);
+                    }
+                }
+            }
+        }
+        let values = distance
+            .into_iter()
+            .enumerate()
+            .map(|(i, distance)| {
+                let p = ((i / w) * step * width + (i % w) * step) * 4;
+                let alpha = f32::from(pixels[p + 3]).max(1.);
+                let luma = (0.2126 * f32::from(pixels[p])
+                    + 0.7152 * f32::from(pixels[p + 1])
+                    + 0.0722 * f32::from(pixels[p + 2]))
+                    / alpha;
+                let t = (f32::from(distance) / limit).min(1.);
+                (t * (2. - t)).sqrt() * (limit / 3.).min(48.) + luma * texture * 8.
+            })
+            .collect();
+        Self {
+            width: w,
+            height: h,
+            step,
+            values,
+        }
+    }
+
+    fn slope(&self, px: usize, py: usize) -> Vec2 {
+        let x = px / self.step;
+        let y = py / self.step;
+        let height = |x, y| self.values[y * self.width + x];
+        Vec2::new(
+            height(x.saturating_sub(1), y) - height((x + 1).min(self.width - 1), y),
+            height(x, y.saturating_sub(1)) - height(x, (y + 1).min(self.height - 1)),
+        ) * 0.5
+    }
 }
 
 impl Editor {
+    pub(crate) fn edit_light_key(
+        &mut self,
+        layer: usize,
+        frame: usize,
+        destination: Option<usize>,
+    ) {
+        if self.doc.layers[layer].options.locked {
+            return;
+        }
+        let mut light = self.doc.layers[layer].options.light.clone().unwrap();
+        if light.edit_key(frame, destination) {
+            self.checkpoint();
+            self.doc.layers[layer].options.light = Some(light);
+            self.layer = layer;
+            self.frame = destination.unwrap_or(frame);
+            self.playing = false;
+            self.recover();
+        }
+    }
+
     pub(crate) fn light_properties(&mut self, ui: &mut egui::Ui) {
-        design::category(ui, "Point light");
+        let kind = self.doc.layers[self.layer]
+            .options
+            .light
+            .as_ref()
+            .unwrap()
+            .kind;
+        design::category(ui, kind.name());
         ui.small(tr("Illuminates the visible artwork below this track."));
         let light = self.doc.layers[self.layer].options.light.as_ref().unwrap();
         let original = light.at(self.frame);
@@ -176,31 +416,92 @@ impl Editor {
         let mut remove = false;
         let mut insert = false;
         ui.add_enabled_ui(!self.doc.layers[self.layer].options.locked, |ui| {
-            for (icon, name, field, range) in [
-                (
+            design::category(ui, "Light source");
+            if kind == Kind::Point {
+                control(
+                    ui,
                     Icon::Focus,
                     "X",
                     &mut value.position[0],
                     -100_000. ..=100_000.,
-                ),
-                (Icon::Ellipse, "Radius", &mut value.radius, 1. ..=20_000.),
+                );
+                control(
+                    ui,
+                    Icon::Focus,
+                    "Y",
+                    &mut value.position[1],
+                    -100_000. ..=100_000.,
+                );
+                control(
+                    ui,
+                    Icon::Ellipse,
+                    "Radius",
+                    &mut value.radius,
+                    1. ..=20_000.,
+                );
+                control(ui, Icon::Tween, "Falloff", &mut value.falloff, 0.25..=5.);
+            } else {
+                control(
+                    ui,
+                    Icon::Rotate,
+                    "Direction",
+                    &mut value.angle,
+                    -180. ..=180.,
+                );
+            }
+            for (icon, name, field, range) in [
                 (Icon::Bulb, "Intensity", &mut value.intensity, 0. ..=2.),
-                (Icon::Depth, "Relief", &mut value.relief, 0. ..=1.),
+                (Icon::Depth, "Elevation", &mut value.elevation, 5. ..=85.),
             ] {
                 control(ui, icon, name, field, range);
             }
-            control(
-                ui,
-                Icon::Focus,
-                "Y",
-                &mut value.position[1],
-                -100_000. ..=100_000.,
-            );
             ui.horizontal(|ui| {
                 ui.label(tr("Color"));
                 ui.color_edit_button_srgb(&mut value.color);
             });
-            ui.separator();
+            design::category(ui, "Surface shading");
+            for (icon, name, field, range) in [
+                (Icon::Depth, "Relief", &mut value.relief, 0. ..=1.),
+                (Icon::Ellipse, "Bevel width", &mut value.bevel, 1. ..=240.),
+                (
+                    Icon::Grid,
+                    "Texture relief",
+                    &mut value.texture_relief,
+                    0. ..=1.,
+                ),
+                (
+                    Icon::ShadeBrush,
+                    "Shadow strength",
+                    &mut value.shadow,
+                    0. ..=1.,
+                ),
+                (
+                    Icon::LightBrush,
+                    "Specular strength",
+                    &mut value.specular,
+                    0. ..=1.,
+                ),
+                (Icon::Focus, "Gloss", &mut value.gloss, 2. ..=96.),
+            ] {
+                control(ui, icon, name, field, range);
+            }
+            egui::ComboBox::from_id_salt("light-shading")
+                .selected_text(if value.steps < 2 {
+                    tr("Smooth shading").into()
+                } else {
+                    format!("{} · {}", tr("Cel shading"), value.steps)
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut value.steps, 0, tr("Smooth shading"));
+                    for steps in 2..=5 {
+                        ui.selectable_value(
+                            &mut value.steps,
+                            steps,
+                            format!("{} · {steps}", tr("Cel shading")),
+                        );
+                    }
+                });
+            design::category(ui, "Light keyframes");
             ui.horizontal(|ui| {
                 insert = design::button(
                     ui,
@@ -248,17 +549,32 @@ impl Editor {
         };
         let settings = light.at(self.frame);
         let center = view.screen(crate::vector::pos(settings.position));
-        let rect = Rect::from_center_size(center, Vec2::splat(27.));
+        let kind = light.kind;
+        let direction = Vec2::angled(settings.angle.to_radians());
+        let arrow =
+            view.screen(crate::vector::pos(settings.position) + direction * (55. / view.scale));
+        let handle = if kind == Kind::Point { center } else { arrow };
+        let rect = Rect::from_center_size(handle, Vec2::splat(27.));
         if !input {
-            let color = crate::themes::accent();
-            ui.painter().circle_stroke(
-                center,
-                settings.radius * view.scale,
-                Stroke::new(1., color.gamma_multiply(0.45)),
-            );
+            let color = Color32::GOLD;
+            if kind == Kind::Point {
+                ui.painter().circle_stroke(
+                    center,
+                    settings.radius * view.scale,
+                    Stroke::new(1., color.gamma_multiply(0.45)),
+                );
+            } else {
+                ui.painter()
+                    .arrow(center, arrow - center, Stroke::new(2., color));
+            }
             ui.painter()
                 .circle_filled(center, 13., crate::themes::panel());
-            design::draw(ui.painter(), rect.shrink(2.), Icon::Bulb, color);
+            design::draw(
+                ui.painter(),
+                Rect::from_center_size(center, Vec2::splat(23.)),
+                Icon::Bulb,
+                color,
+            );
             return false;
         }
         if layer.options.locked {
@@ -278,12 +594,20 @@ impl Editor {
             && let Some(pointer) = response.interact_pointer_pos()
         {
             let point = view.world(pointer);
-            let value = Settings {
-                position: [
-                    point.x.clamp(-100_000., 100_000.),
-                    point.y.clamp(-100_000., 100_000.),
-                ],
-                ..settings
+            let value = if kind == Kind::Point {
+                Settings {
+                    position: [
+                        point.x.clamp(-100_000., 100_000.),
+                        point.y.clamp(-100_000., 100_000.),
+                    ],
+                    ..settings
+                }
+            } else {
+                let delta = point - crate::vector::pos(settings.position);
+                Settings {
+                    angle: delta.y.atan2(delta.x).to_degrees().clamp(-180., 180.),
+                    ..settings
+                }
             };
             self.doc.layers[self.layer]
                 .options
@@ -324,6 +648,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn light_keys_can_be_moved_and_removed_without_overwriting_another_pose() {
+        let mut light = Light::new(64, 64, Kind::Directional);
+        light.set(
+            5,
+            Settings {
+                angle: 90.,
+                ..light.base
+            },
+        );
+        light.set(
+            9,
+            Settings {
+                angle: 0.,
+                ..light.base
+            },
+        );
+        assert!(!light.edit_key(5, Some(9)));
+        assert!(light.edit_key(5, Some(7)));
+        assert!(!light.keyed(5));
+        assert_eq!(light.at(7).angle, 90.);
+        assert!(light.edit_key(7, None));
+        assert!(!light.keyed(7));
+        assert!(light.keyed(9));
+    }
+
+    #[test]
+    fn directional_light_reverses_the_lit_edge_when_turned() {
+        let doc = crate::Document {
+            width: 64,
+            height: 64,
+            ..Default::default()
+        };
+        let mut pixels = vec![0; 64 * 64 * 4];
+        for y in 12..52 {
+            for x in 12..52 {
+                pixels[(y * 64 + x) * 4..(y * 64 + x + 1) * 4].copy_from_slice(&[90, 90, 90, 255]);
+            }
+        }
+        let mut left = pixels.clone();
+        let mut light = Light::new(64, 64, Kind::Directional);
+        light.base.angle = 180.;
+        light.base.bevel = 12.;
+        light.apply(&mut left, 64, 64, &doc, 0, false, 1.);
+        light.base.angle = 0.;
+        light.apply(&mut pixels, 64, 64, &doc, 0, false, 1.);
+        let edge = (32 * 64 + 14) * 4;
+        assert!(left[edge] > pixels[edge]);
+        assert_eq!(left[edge + 3], 255);
+        assert_eq!(left[3], 0);
+    }
+
+    #[test]
     fn keyed_point_light_moves_and_only_lights_artwork_under_its_track() {
         let mut doc = crate::Document {
             width: 64,
@@ -342,7 +718,7 @@ mod tests {
         let mut lighting = upper.clone();
         doc.layers[0].frames[0].push(mark(4.));
         upper.frames[0].push(mark(37.));
-        let mut light = Light::new(64, 64);
+        let mut light = Light::new(64, 64, Kind::Point);
         light.base.position = [16., 24.];
         light.set(
             10,

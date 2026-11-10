@@ -748,18 +748,19 @@ impl Editor {
             ctx.request_repaint();
         }
         if !video_input
-            && response.double_clicked()
+            && !light_input
+            && response.double_clicked_by(PointerButton::Primary)
             && matches!(tool, Tool::Select | Tool::Object | Tool::Transform)
         {
             if let Some(screen) = pointer {
                 let world = view.world(screen);
-                let symbol = self
+                let hit = self
                     .doc
                     .layers
                     .iter()
                     .enumerate()
                     .rev()
-                    .filter(|(_, l)| l.visible && !l.options.locked)
+                    .filter(|(_, l)| l.visible)
                     .find_map(|(l, layer)| {
                         let marks = crate::animation::marks(layer, self.frame);
                         marks
@@ -767,13 +768,25 @@ impl Editor {
                             .rev()
                             .find(|mark| self.depth_hit(l, mark, world, 0.))
                             .map(|mark| {
-                                mark.style.instance.as_ref().map(|instance| instance.symbol)
+                                (!layer.options.locked)
+                                    .then(|| {
+                                        mark.style.instance.as_ref().map(|instance| instance.symbol)
+                                    })
+                                    .flatten()
                             })
-                    })
-                    .flatten();
-                if let Some(id) = symbol {
+                    });
+                if let Some(Some(id)) = hit {
                     self.canvas = state;
                     self.enter_symbol(id);
+                    return;
+                }
+                let stage_bounds = Rect::from_min_size(Pos2::ZERO, state.stage_size);
+                if hit.is_none()
+                    && !self.feature.symbol_stack.is_empty()
+                    && stage_bounds.contains(stage_view.world(screen))
+                {
+                    self.canvas = state;
+                    self.exit_symbol();
                     return;
                 }
             }
