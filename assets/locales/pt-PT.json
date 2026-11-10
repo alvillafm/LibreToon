@@ -1385,5 +1385,7 @@
   "Gloss": "Gloss",
   "Smooth shading": "Smooth shading",
   "Cel shading": "Cel shading",
-  "Light keyframes": "Light keyframes"
+  "Light keyframes": "Light keyframes",
+  "Move light handle": "Move light handle",
+  "Rotate directional light": "Rotate directional light"
 }

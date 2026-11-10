@@ -52,6 +52,18 @@ impl From<String> for Pose {
         Self { name, shape: None }
     }
 }
+const DEFAULT_POSES: [&str; 9] = ["Rest", "M/P/B", "A", "E", "I", "O", "U", "F/V", "S"];
+
+pub(crate) fn default_poses(frame_count: usize) -> SharedVec<Pose> {
+    (0..frame_count.max(DEFAULT_POSES.len()))
+        .map(|frame| {
+            DEFAULT_POSES
+                .get(frame)
+                .map_or_else(|| format!("Pose {}", frame + 1).into(), |&name| name.into())
+        })
+        .collect()
+}
+
 impl Pose {
     pub fn valid(&self) -> bool {
         !self.name.is_empty() && self.name.len() <= 48
@@ -161,15 +173,15 @@ impl Editor {
         }
         if self.doc.extras.symbols[index].mouth_poses.is_empty() {
             self.checkpoint();
-            self.doc.extras.symbols[index].mouth_poses = (0..count)
-                .map(|frame| match frame {
-                    0 => "Rest".into(),
-                    1 => "A".into(),
-                    2 => "E".into(),
-                    3 => "O".into(),
-                    _ => format!("Pose {}", frame + 1).into(),
-                })
-                .collect();
+            let symbol = &mut self.doc.extras.symbols[index];
+            symbol.mouth_poses = default_poses(count);
+            for layer in &mut symbol.layers {
+                layer.init_keys();
+                layer
+                    .frames
+                    .resize_with(symbol.mouth_poses.len(), Default::default);
+                layer.options.keys.resize(symbol.mouth_poses.len(), true);
+            }
             self.recover();
         }
         true
@@ -190,9 +202,7 @@ impl Editor {
                     .hint_text(tr("Pose or sound")),
             );
             ui.menu_button(tr("Common poses"), |ui| {
-                for pose in [
-                    "Rest", "M/P/B", "A", "E", "I", "O", "U", "F/V", "S", "Ñ", "EAU",
-                ] {
+                for pose in DEFAULT_POSES.into_iter().chain(["Ñ", "EAU"]) {
                     if ui.button(tr(pose)).clicked() {
                         self.lip.pose_name = pose.into();
                         ui.close();
@@ -791,18 +801,20 @@ mod tests {
         editor.canvas.selected = vec![(0, 0)];
         editor.convert_symbol_kind(true);
         let symbol = &mut editor.doc.extras.symbols[0];
-        symbol.mouth_poses.push("A".into());
         let layer = &mut symbol.layers[0];
+        assert_eq!(symbol.mouth_poses.len(), DEFAULT_POSES.len());
+        assert_eq!(symbol.mouth_poses[2].name, "A");
+        assert!(layer.frames.iter().skip(1).all(|frame| frame.is_empty()));
+        assert!((0..layer.frames.len()).all(|frame| layer.key(frame)));
         let mut open = layer.frames[0].clone();
         open[0].points[1][1] = 20.;
-        layer.frames.push(open);
-        layer.options.keys.push(true);
+        layer.frames[2] = open;
         let second = editor.doc.layers[0].frames[0][0].clone();
         editor.doc.layers[0].frames[0].push(second);
         editor.change_mouth_keys(0, 0, 0, |keys| {
             keys.push(Key {
                 frame: 0,
-                pose: 1,
+                pose: 2,
                 manual: true,
             })
         });

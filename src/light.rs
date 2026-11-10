@@ -56,7 +56,7 @@ impl Default for Settings {
             elevation: 40.,
             falloff: 1.4,
             bevel: 28.,
-            texture_relief: 0.15,
+            texture_relief: 0.,
             shadow: 0.28,
             specular: 0.16,
             gloss: 24.,
@@ -89,6 +89,8 @@ impl Settings {
 pub struct Light {
     #[serde(default)]
     pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gizmo_position: Option<[f32; 2]>,
     base: Settings,
     #[serde(default)]
     keys: SharedVec<(usize, Settings)>,
@@ -98,6 +100,7 @@ impl Light {
     pub fn new(w: u32, h: u32, kind: Kind) -> Self {
         Self {
             kind,
+            gizmo_position: None,
             base: Settings {
                 position: [w as f32 * 0.5, h as f32 * 0.4],
                 radius: (w.min(h) as f32 * 0.42).max(1.),
@@ -109,6 +112,9 @@ impl Light {
 
     pub fn valid(&self) -> bool {
         self.base.valid()
+            && self
+                .gizmo_position
+                .is_none_or(|point| point.iter().all(|v| v.is_finite() && v.abs() <= 100_000.))
             && self.keys.len() <= 10_000
             && self
                 .keys
@@ -205,13 +211,15 @@ impl Light {
             return;
         }
         let width = w as usize;
-        let surface = Surface::new(
-            pixels,
-            width,
-            h as usize,
-            settings.bevel * scale * zoom,
-            settings.texture_relief,
-        );
+        let surface = (settings.relief > 0.).then(|| {
+            Surface::new(
+                pixels,
+                width,
+                h as usize,
+                settings.bevel * scale * zoom,
+                settings.texture_relief,
+            )
+        });
         let elevation = settings.elevation.to_radians();
         let dir = Vec2::angled(angle) * elevation.cos();
         let height = elevation.sin().max(0.08);
@@ -242,7 +250,11 @@ impl Light {
                         )
                     }
                 };
-                let n = surface.slope(px, py) * settings.relief * 3.2;
+                let n = surface
+                    .as_ref()
+                    .map_or(Vec2::ZERO, |surface| surface.slope(px, py))
+                    * settings.relief
+                    * 3.2;
                 let nz = (1. + n.length_sq()).sqrt().recip();
                 let mut diffuse = ((n.x * lx + n.y * ly + lz) * nz).clamp(0., 1.);
                 if settings.steps >= 2 {
@@ -296,7 +308,7 @@ struct Surface {
     width: usize,
     height: usize,
     step: usize,
-    values: Vec<f32>,
+    slopes: Vec<Vec2>,
 }
 impl Surface {
     fn new(pixels: &[u8], width: usize, height: usize, bevel: f32, texture: f32) -> Self {
@@ -347,7 +359,7 @@ impl Surface {
                 }
             }
         }
-        let values = distance
+        let mut values: Vec<_> = distance
             .into_iter()
             .enumerate()
             .map(|(i, distance)| {
@@ -358,25 +370,75 @@ impl Surface {
                     + 0.0722 * f32::from(pixels[p + 2]))
                     / alpha;
                 let t = (f32::from(distance) / limit).min(1.);
-                (t * (2. - t)).sqrt() * (limit / 3.).min(48.) + luma * texture * 8.
+                t * (2. - t) * (limit / 3.).min(48.) + luma * texture * 8.
+            })
+            .collect();
+        // Smooth both the distance-field steps and the optional luma detail before
+        // deriving normals. The bounded grid keeps this independent of export size.
+        let mut scratch = vec![0.; values.len()];
+        for _ in 0..2 {
+            smooth_surface(&values, &mut scratch, w, h, true);
+            smooth_surface(&scratch, &mut values, w, h, false);
+        }
+        let slopes = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let y = i / w;
+                Vec2::new(
+                    values[y * w + x.saturating_sub(1)] - values[y * w + (x + 1).min(w - 1)],
+                    values[y.saturating_sub(1) * w + x] - values[(y + 1).min(h - 1) * w + x],
+                ) * 0.5
             })
             .collect();
         Self {
             width: w,
             height: h,
             step,
-            values,
+            slopes,
         }
     }
 
     fn slope(&self, px: usize, py: usize) -> Vec2 {
         let x = px / self.step;
         let y = py / self.step;
-        let height = |x, y| self.values[y * self.width + x];
-        Vec2::new(
-            height(x.saturating_sub(1), y) - height((x + 1).min(self.width - 1), y),
-            height(x, y.saturating_sub(1)) - height(x, (y + 1).min(self.height - 1)),
-        ) * 0.5
+        if self.step == 1 {
+            return self.slopes[y * self.width + x];
+        }
+        let x1 = (x + 1).min(self.width - 1);
+        let y1 = (y + 1).min(self.height - 1);
+        let fx = (px % self.step) as f32 / self.step as f32;
+        let fy = (py % self.step) as f32 / self.step as f32;
+        let at = |x, y| self.slopes[y * self.width + x];
+        let lerp = |a: Vec2, b: Vec2, t| a + (b - a) * t;
+        lerp(
+            lerp(at(x, y), at(x1, y), fx),
+            lerp(at(x, y1), at(x1, y1), fx),
+            fy,
+        )
+    }
+}
+
+fn smooth_surface(
+    source: &[f32],
+    target: &mut [f32],
+    width: usize,
+    height: usize,
+    horizontal: bool,
+) {
+    for (i, value) in target.iter_mut().enumerate() {
+        let x = i % width;
+        let y = i / width;
+        let axis = if horizontal { x } else { y };
+        let last = if horizontal { width - 1 } else { height - 1 };
+        let sample = |offset: isize| {
+            let p = axis.saturating_add_signed(offset).min(last);
+            source[if horizontal {
+                y * width + p
+            } else {
+                p * width + x
+            }]
+        };
+        *value = (sample(-2) + 4. * sample(-1) + 6. * source[i] + 4. * sample(1) + sample(2)) / 16.;
     }
 }
 
@@ -548,13 +610,13 @@ impl Editor {
             return false;
         };
         let settings = light.at(self.frame);
-        let center = view.screen(crate::vector::pos(settings.position));
         let kind = light.kind;
-        let direction = Vec2::angled(settings.angle.to_radians());
+        let anchor = crate::vector::pos(light.gizmo_position.unwrap_or(settings.position));
+        let center = view.screen(anchor);
         let arrow =
-            view.screen(crate::vector::pos(settings.position) + direction * (55. / view.scale));
-        let handle = if kind == Kind::Point { center } else { arrow };
-        let rect = Rect::from_center_size(handle, Vec2::splat(27.));
+            view.screen(anchor + Vec2::angled(settings.angle.to_radians()) * (55. / view.scale));
+        let center_rect = Rect::from_center_size(center, Vec2::splat(27.));
+        let arrow_rect = Rect::from_center_size(arrow, Vec2::splat(24.));
         if !input {
             let color = Color32::GOLD;
             if kind == Kind::Point {
@@ -566,27 +628,38 @@ impl Editor {
             } else {
                 ui.painter()
                     .arrow(center, arrow - center, Stroke::new(2., color));
+                ui.painter()
+                    .circle_stroke(arrow, 8., Stroke::new(1., color));
             }
             ui.painter()
                 .circle_filled(center, 13., crate::themes::panel());
-            design::draw(
-                ui.painter(),
-                Rect::from_center_size(center, Vec2::splat(23.)),
-                Icon::Bulb,
-                color,
-            );
+            design::draw(ui.painter(), center_rect.shrink(2.), Icon::Bulb, color);
             return false;
         }
         if layer.options.locked {
             return false;
         }
-        let response = ui
+        let moved = ui
             .interact(
-                rect,
-                ui.scope_id().with("point-light-gizmo"),
+                center_rect,
+                ui.scope_id().with(("move-light", self.layer)),
                 egui::Sense::drag(),
             )
-            .on_hover_cursor(egui::CursorIcon::Grab);
+            .on_hover_cursor(egui::CursorIcon::Grab)
+            .on_hover_text(tr("Move light handle"));
+        let rotated = (kind == Kind::Directional).then(|| {
+            ui.interact(
+                arrow_rect,
+                ui.scope_id().with(("rotate-light", self.layer)),
+                egui::Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab)
+            .on_hover_text(tr("Rotate directional light"))
+        });
+        let response = rotated
+            .as_ref()
+            .filter(|r| r.dragged() || r.drag_stopped() || r.is_pointer_button_down_on());
+        let (response, rotate) = response.map_or((&moved, false), |r| (r, true));
         if response.drag_started() {
             self.checkpoint();
         }
@@ -594,27 +667,28 @@ impl Editor {
             && let Some(pointer) = response.interact_pointer_pos()
         {
             let point = view.world(pointer);
-            let value = if kind == Kind::Point {
-                Settings {
-                    position: [
-                        point.x.clamp(-100_000., 100_000.),
-                        point.y.clamp(-100_000., 100_000.),
-                    ],
-                    ..settings
+            let position = [
+                point.x.clamp(-100_000., 100_000.),
+                point.y.clamp(-100_000., 100_000.),
+            ];
+            let light = self.doc.layers[self.layer].options.light.as_mut().unwrap();
+            if rotate {
+                let delta = point - anchor;
+                if delta.length_sq() > 0.0001 {
+                    let angle = delta.y.atan2(delta.x).to_degrees();
+                    light.set(self.frame, Settings { angle, ..settings });
                 }
+            } else if kind == Kind::Directional {
+                light.gizmo_position = Some(position);
             } else {
-                let delta = point - crate::vector::pos(settings.position);
-                Settings {
-                    angle: delta.y.atan2(delta.x).to_degrees().clamp(-180., 180.),
-                    ..settings
-                }
-            };
-            self.doc.layers[self.layer]
-                .options
-                .light
-                .as_mut()
-                .unwrap()
-                .set(self.frame, value);
+                light.set(
+                    self.frame,
+                    Settings {
+                        position,
+                        ..settings
+                    },
+                );
+            }
         }
         if response.drag_stopped() {
             self.recover();
@@ -646,6 +720,24 @@ fn control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bevel_normals_interpolate_between_surface_grid_samples() {
+        let width = 2048;
+        let height = 32;
+        let mut pixels = vec![0; width * height * 4];
+        for row in pixels.chunks_exact_mut(width * 4) {
+            for p in row[12 * 4..64 * 4].chunks_exact_mut(4) {
+                p.copy_from_slice(&[90, 90, 90, 255]);
+            }
+        }
+        let surface = Surface::new(&pixels, width, height, 20., 0.);
+        assert_eq!(surface.step, 2);
+        let a = surface.slope(16, 16);
+        let b = surface.slope(18, 16);
+        assert_ne!(a, b);
+        assert!((surface.slope(17, 16) - (a + b) * 0.5).length() < 0.0001);
+    }
 
     #[test]
     fn light_keys_can_be_moved_and_removed_without_overwriting_another_pose() {
@@ -691,6 +783,10 @@ mod tests {
         light.base.angle = 180.;
         light.base.bevel = 12.;
         light.apply(&mut left, 64, 64, &doc, 0, false, 1.);
+        let mut moved = pixels.clone();
+        light.gizmo_position = Some([200., 200.]);
+        light.apply(&mut moved, 64, 64, &doc, 0, false, 1.);
+        assert_eq!(left, moved);
         light.base.angle = 0.;
         light.apply(&mut pixels, 64, 64, &doc, 0, false, 1.);
         let edge = (32 * 64 + 14) * 4;

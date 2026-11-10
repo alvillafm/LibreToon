@@ -1385,5 +1385,7 @@
   "Gloss": "Brillo",
   "Smooth shading": "Sombreado suave",
   "Cel shading": "Sombreado por tonos",
-  "Light keyframes": "Claves de luz"
+  "Light keyframes": "Claves de luz",
+  "Move light handle": "Mover el control de luz",
+  "Rotate directional light": "Girar la luz direccional"
 }

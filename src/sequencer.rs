@@ -961,14 +961,21 @@ impl Editor {
                         for f in frames.clone() {
                             let pose_label = self.lip_frame_label(f);
                             if f == 0 || (f + 1) % 5 == 0 || pose_label.is_some() {
-                                painter.with_clip_rect(grid_clip).text(
+                                let label_clip = if pose_label.is_some() {
+                                    let left = r.left() + label_w + f as f32 * cell;
+                                    grid_clip.intersect(Rect::from_min_max(Pos2::new(left, r.top()), Pos2::new(left + cell, r.top()+24.)))
+                                } else {
+                                    grid_clip
+                                };
+                                let size = pose_label.as_ref().map_or(10., |name| (cell / (name.chars().count().max(1) as f32 * 0.62)).clamp(6., 10.));
+                                painter.with_clip_rect(label_clip).text(
                                     Pos2::new(
                                         r.left() + label_w + (f as f32 + 0.5) * cell,
                                         r.top() + 12.,
                                     ),
                                     egui::Align2::CENTER_CENTER,
                                     pose_label.unwrap_or_else(|| (f + 1).to_string()),
-                                    egui::FontId::monospace(10.),
+                                    egui::FontId::monospace(size),
                                     crate::themes::muted(),
                                 );
                             }

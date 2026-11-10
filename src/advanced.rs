@@ -126,29 +126,30 @@ impl Editor {
             .extras
             .rig
             .snapshot_targets(&selected_tracks, self.frame);
-        let count = 1;
+        let mouth_poses = if lip {
+            crate::lip::default_poses(1)
+        } else {
+            Default::default()
+        };
+        let count = mouth_poses.len().max(1);
         let id = id();
         let number = self.doc.extras.symbols.len() + 1;
         self.checkpoint();
-        let mut keys = vec![false; count];
-        keys[0] = true;
+        let mut frames = vec![Default::default(); count];
+        frames[0] = marks.into();
         let layer = Layer {
             name: "Artwork".into(),
             visible: true,
-            frames: vec![marks.into(); count].into(),
+            frames: frames.into(),
             options: LayerOptions {
-                keys: keys.into(),
+                keys: vec![true; count].into(),
                 ..Default::default()
             },
         };
         self.doc.extras.symbols.push(Symbol {
             rig,
             library_folder: None,
-            mouth_poses: if lip {
-                vec!["Rest".into()].into()
-            } else {
-                Default::default()
-            },
+            mouth_poses,
             folders: Default::default(),
             perspective: Default::default(),
             id,
