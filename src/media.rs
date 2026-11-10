@@ -103,6 +103,7 @@ impl MediaLibrary {
         Some(crate::lip::Audio {
             name: format!("{} · {}", asset.name, clip.start + 1),
             data: asset.data.clone(),
+            peaks: asset.peaks.clone(),
             start: clip.start,
             offset: clip.offset,
             length: clip.length,
@@ -1716,35 +1717,18 @@ impl Editor {
                 );
             response.context_menu(|ui| {
                 if track.kind == Kind::Audio {
-                    let target =
-                        self.canvas.selected.first().and_then(|&(layer, mark)| {
-                            let l = self.doc.layers.get(layer).filter(|l| !l.options.locked)?;
-                            let instance = l
-                                .frames
-                                .get(self.frame)?
-                                .get(mark)?
-                                .style
-                                .instance
-                                .as_ref()?;
-                            let symbol =
-                                self.doc.extras.symbols.iter().find(|s| {
-                                    s.id == instance.symbol && !s.mouth_poses.is_empty()
-                                })?;
-                            Some((layer, mark, symbol.mouth_poses.clone()))
-                        });
                     if crate::design::button(
                         ui,
                         crate::design::Icon::Mouth,
-                        "Generate Lip Sync for selected mouth",
-                        "Select a Lip Sync mouth on the stage first.",
+                        "Dialogue Lip Sync",
+                        "",
                         false,
-                        target.is_some(),
+                        true,
                     )
                     .clicked()
-                        && let Some((layer, mark, poses)) = target
                         && let Some(audio) = self.doc.extras.media.lip_audio(clip)
                     {
-                        self.start_lip_analysis(ui.ctx(), audio, layer, mark, poses);
+                        self.open_lip_session(audio);
                         ui.close();
                     }
                 }
@@ -2116,6 +2100,58 @@ impl Drop for MediaFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+pub(crate) fn decode_lip_audio(
+    audio: &crate::lip::Audio,
+    fps: u32,
+    ffmpeg: &Path,
+) -> Result<SharedVec<u8>, &'static str> {
+    let error = "Could not decode this audio. Check FFmpeg in Program Preferences.";
+    let source = MediaFile::new(&audio.data).map_err(|_| error)?;
+    let output = MediaFile::new(&[]).map_err(|_| error)?;
+    let mut command = Command::new(ffmpeg);
+    crate::exporter::hidden(&mut command);
+    let offset = audio.offset as f64 / f64::from(fps);
+    let duration = audio.length as f64 / f64::from(fps);
+    let result = command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-format_whitelist",
+            DEMUXERS,
+            "-ss",
+        ])
+        .arg(format!("{offset:.9}"))
+        .arg("-i")
+        .arg(&source.0)
+        .args(["-map", "0:a:0", "-t"])
+        .arg(format!("{duration:.9}"))
+        .args([
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            "-fs",
+            "160001024",
+        ])
+        .arg(&output.0)
+        .output()
+        .map_err(|_| error)?;
+    if !result.status.success() {
+        return Err(error);
+    }
+    let decoded = std::fs::read(&output.0).map_err(|_| error)?;
+    Ok(decoded.into())
 }
 
 pub(crate) fn audio_export(

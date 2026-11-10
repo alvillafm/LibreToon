@@ -301,6 +301,9 @@ impl Editor {
     }
 
     pub(crate) fn loop_range(&self) -> Option<(usize, usize)> {
+        if let Some(range) = self.lip.preview_range {
+            return Some(range);
+        }
         if !self.animation.loop_tag
             || self.animation.play_all
             || !self.feature.symbol_stack.is_empty()

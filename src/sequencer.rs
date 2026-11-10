@@ -789,10 +789,23 @@ impl Editor {
                             layer.options.adjustment=Some(Default::default());
                             self.recover();
                         }
-                        let lights = button(ui, Icon::Bulb, "", "Add light", false, self.doc.layers.len() < 100 && self.feature.symbol_stack.is_empty());
+                        if !self.feature.symbol_stack.is_empty()
+                            && button(ui, Icon::Depth, "", "Add relief guide", false, self.doc.layers.len() < 100).clicked()
+                        {
+                            self.add_layer_advanced(false);
+                            self.doc.layers[self.layer].name = tr("Relief guide").into();
+                            self.doc.layers[self.layer].options.height_guide = Some(0.5);
+                            self.recover();
+                        }
+                        if !self.feature.symbol_stack.is_empty()
+                            && button(ui, Icon::Mask, "", "Add light mask", false, self.doc.layers.len() < 100).clicked()
+                        {
+                            self.open_symbol_light_mask();
+                        }
+                        let lights = button(ui, Icon::Bulb, "", "Add light", false, self.feature.symbol_stack.is_empty());
                         egui::Popup::menu(&lights).show(|ui| {
-                            for kind in [crate::light::Kind::Point, crate::light::Kind::Directional] {
-                                if button(ui, Icon::Bulb, kind.name(), "", false, true).clicked() {
+                            for kind in [crate::light::Kind::Point, crate::light::Kind::Directional, crate::light::Kind::Ambient, crate::light::Kind::Rim] {
+                                if button(ui, Icon::Bulb, kind.name(), "", false, self.doc.layers.len() < 100).clicked() {
                                     self.add_layer_advanced(false);
                                     let light = crate::light::Light::new(self.doc.width, self.doc.height, kind);
                                     let layer = &mut self.doc.layers[self.layer];
@@ -802,6 +815,8 @@ impl Editor {
                                     ui.close();
                                 }
                             }
+                            ui.separator();
+                            self.light_presets_ui(ui);
                         });
                         });
                     });

@@ -134,6 +134,18 @@ impl Remap {
         if let Some(i) = &mut out.style.instance {
             i.symbol = self.symbols[&i.symbol];
         }
+        out.style.mouth_routes.retain(|route| {
+            route
+                .path
+                .iter()
+                .all(|slot| self.symbols.contains_key(&slot.symbol))
+        });
+        for route in &mut out.style.mouth_routes {
+            for slot in &mut route.path {
+                slot.symbol = self.symbols[&slot.symbol];
+                slot.track = mapped(&mut self.tracks, slot.track);
+            }
+        }
         if let Some(i) = &mut out.style.media_image {
             *i = self.media[i];
         }

@@ -44,6 +44,7 @@ impl Session {
         e.folder_groups.clear();
         e.vector_trim.clear();
         e.depth.invalidate_preview();
+        e.close_lip_session();
         e.references.reset_document();
         e.clips.reset_document();
         e.frame_clipboard.focus = false;
@@ -696,68 +697,86 @@ impl Editor {
             });
             self.hub.previews.push(Preview { path, frames });
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::themes::color(Color32::from_rgb(24,26,32))).inner_margin(28.)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::themes::color(Color32::from_rgb(24,26,32))).inner_margin(egui::Margin::symmetric(28, 12))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| { ui.heading(egui::RichText::new(crate::i18n::tr("Tu próximo movimiento")).size(30.)); ui.label(egui::RichText::new(crate::i18n::tr("LIBRETOON  /  ESTUDIO DE ANIMACIÓN")).small().color(crate::themes::muted())); });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.new_document(); }
-                    if crate::design::button(ui, crate::design::Icon::Open, "Abrir", "Abrir proyecto", false, true).clicked() { self.open(); }
-                    if crate::design::button(ui, crate::design::Icon::Folder, "Carpeta", "Añadir carpeta de proyectos", false, true).clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                            if !self.hub.catalogue.folders.contains(&p) { self.hub.catalogue.folders.push(p.clone()); }
-                            if let Ok(entries) = p.read_dir() { for entry in entries.flatten() { let p = entry.path(); if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ltoon") || e.eq_ignore_ascii_case("fla") || e.eq_ignore_ascii_case("trazo")) { self.hub.remember(p); } } }
-                            self.persist_documents();
-                        }
+                if crate::design::button(ui, crate::design::Icon::Folder, "Carpeta", "Añadir carpeta de proyectos", false, true).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        if !self.hub.catalogue.folders.contains(&p) { self.hub.catalogue.folders.push(p.clone()); }
+                        if let Ok(entries) = p.read_dir() { for entry in entries.flatten() { let p = entry.path(); if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ltoon") || e.eq_ignore_ascii_case("fla") || e.eq_ignore_ascii_case("trazo")) { self.hub.remember(p); } } }
+                        self.persist_documents();
                     }
+                }
+                if crate::design::button(ui, crate::design::Icon::Open, "Abrir", "Abrir proyecto", false, true).clicked() { self.open(); }
+                if crate::design::button(ui, crate::design::Icon::Plus, "Nuevo proyecto", "Crear animación", false, true).clicked() { self.new_document(); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let width = ui.available_width().clamp(0., 320.);
+                    let blue = if crate::themes::palette().light { Color32::from_rgb(28, 91, 175) } else { Color32::from_rgb(123, 182, 255) };
+                    ui.add(egui::TextEdit::singleline(&mut self.hub.search)
+                        .hint_text(egui::RichText::new(crate::i18n::tr("Buscar por nombre de archivo…")).color(blue))
+                        .desired_width(width));
                 });
             });
-            ui.add_space(24.); crate::design::category(ui, "PROYECTOS");
-            ui.add(egui::TextEdit::singleline(&mut self.hub.search).hint_text(crate::i18n::tr("Buscar por nombre de archivo…")).desired_width(320.));
-            ui.add_space(14.);
+            ui.add_space(12.);
+            crate::design::category(ui, "EJEMPLOS");
+            ui.add_space(12.);
+            crate::design::category(ui, "EN CURSO");
             let query = self.hub.search.to_lowercase();
             let paths: Vec<_> = self.hub.catalogue.recent.iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&query))).cloned().collect();
             let columns = ((ui.available_width() / 270.).floor() as usize).clamp(1, 8);
             let width = (ui.available_width() - (columns - 1) as f32 * 14.) / columns as f32;
             let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
-            let unsaved: Vec<_> = self.hub.tabs.iter().enumerate().filter(|(_,t)| (t.record.path.is_none() || t.record.dirty) && t.record.name.to_lowercase().contains(&query)).map(|(i,t)| {
-                let doc=if self.hub.active==Some(i) {Some(self.project_document())} else {t.state.as_ref().map(|s|s.doc.clone())};
-                (i,t.record.name.clone(),doc,t.record.recovery.clone())
-            }).collect();
+            let in_progress: Vec<_> = self.hub.tabs.iter().enumerate()
+                .filter_map(|(index, tab)| tab.record.name.to_lowercase().contains(&query).then_some(index))
+                .collect();
             let mut selected_tab=None;
             self.hub.live_cache.begin_frame();
-            if !unsaved.is_empty() {
-                crate::design::category(ui,"EN CURSO");
-                egui::ScrollArea::vertical().id_salt("live-projects").max_height(440.).show_rows(ui,216.,unsaved.len().div_ceil(columns),|ui,rows| {
+            if in_progress.is_empty() {
+                ui.label(egui::RichText::new(crate::i18n::tr(if query.is_empty() { "No open projects." } else { "No open projects match the search." })).color(crate::themes::muted()));
+                ui.add_space(8.);
+            } else {
+                egui::ScrollArea::vertical().id_salt("live-projects").max_height(440.).show_rows(ui,216.,in_progress.len().div_ceil(columns),|ui,rows| {
                     for row in rows {ui.horizontal(|ui| {
-                        for (i,name,doc,recovery) in unsaved.iter().skip(row*columns).take(columns) {
+                        for &i in in_progress.iter().skip(row*columns).take(columns) {
+                             let doc = if self.hub.active == Some(i) {
+                                 Some(self.project_document())
+                             } else {
+                                 self.hub.tabs[i].state.as_ref().map(|session| session.doc.clone())
+                             };
+                             let record = &self.hub.tabs[i].record;
+                             let name = &record.name;
+                             let preview_path = if record.dirty {
+                                 &record.recovery
+                             } else {
+                                 record.path.as_ref().unwrap_or(&record.recovery)
+                             };
                             let (r,response)=ui.allocate_exact_size(Vec2::new(width,202.),egui::Sense::click());
                             ui.painter().rect_filled(r,10.,if response.hovered(){crate::themes::color(Color32::from_rgb(48,55,70))}else{crate::themes::color(Color32::from_rgb(34,37,46))});
                             let preview=Rect::from_min_max(r.min+Vec2::splat(8.),r.max-Vec2::new(8.,48.));
                             ui.painter().rect_filled(preview,5.,Color32::WHITE);
-                            if let Some(doc)=doc {
+                            if let Some(doc)=&doc {
                             let count=animation::movie_count(doc).max(1);let f=(seconds*doc.fps as f64) as usize%count;
                             let view=crate::canvas::View{center:preview.center(),stage_center:Pos2::new(doc.width as f32/2.,doc.height as f32/2.),scale:(preview.width()/doc.width as f32).min(preview.height()/doc.height as f32),angle:0.};
                             let painter=ui.painter().with_clip_rect(preview);
                             for (_,_,m) in animation::resolve_movie(doc,f,true){crate::paint::draw(&painter,&m,view,false,false,Some(&mut self.hub.live_cache));}
-                            } else if let Some(preview_data)=self.hub.previews.iter().find(|p| &p.path==recovery) {
+                            } else if let Some(preview_data)=self.hub.previews.iter().find(|p| &p.path==preview_path) {
                                 if let Ok((textures,duration))=&preview_data.frames {
                                     let index=((seconds%duration.max(0.01))/duration.max(0.01)*textures.len() as f64) as usize;
                                     ui.painter().image(textures[index.min(textures.len()-1)].id(),preview,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.,1.)),Color32::WHITE);
                                 }
                             } else {
                                 crate::design::draw(ui.painter(),preview,crate::design::Icon::Film,Color32::GRAY);
-                                if self.hub.pending.is_none() && self.hub.request.try_send(recovery.clone()).is_ok() {self.hub.pending=Some(recovery.clone());}
+                                if self.hub.pending.is_none() && self.hub.request.try_send(preview_path.clone()).is_ok() {self.hub.pending=Some(preview_path.clone());}
                             }
                             caption(ui,r,name,width);
-                            if response.clicked(){selected_tab=Some(*i);}
+                            if response.clicked(){selected_tab=Some(i);}
                         }
                     });}
                 });
-                crate::design::category(ui,"ARCHIVOS");
             }
+            crate::design::category(ui,"ARCHIVOS");
             if let Some(i)=selected_tab{self.activate_document(i);}
             let mut open = None;
-            if paths.is_empty() && unsaved.is_empty() { ui.add_space(50.); ui.label(crate::i18n::tr("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta.")); }
+            if paths.is_empty() && in_progress.is_empty() { ui.add_space(50.); ui.label(crate::i18n::tr("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta.")); }
             let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
             egui::ScrollArea::vertical().show_rows(ui, 216., paths.len().div_ceil(columns), |ui, rows| {
                 for row in rows { ui.horizontal(|ui| {

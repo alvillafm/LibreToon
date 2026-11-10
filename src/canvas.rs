@@ -300,6 +300,53 @@ impl Canvas {
         }
     }
 }
+const SELECTION_BLUE: Color32 = Color32::from_rgb(104, 193, 255);
+
+fn paint_selection_outline(painter: &egui::Painter, corners: [Pos2; 4], dashed: bool) {
+    if corners.iter().any(|point| !point.is_finite()) {
+        return;
+    }
+    let color = Stroke::new(
+        1.5,
+        if dashed {
+            SELECTION_BLUE
+        } else {
+            Color32::from_rgb(43, 166, 101)
+        },
+    );
+    let clip = painter.clip_rect().expand(2.);
+    for (a, b) in corners.into_iter().zip(corners.into_iter().cycle().skip(1)) {
+        if !dashed {
+            painter.line_segment([a, b], color);
+            continue;
+        }
+        // Limit dash generation to the visible portion of large or zoomed objects.
+        let delta = b - a;
+        let (mut start, mut end) = (0.0_f32, 1.0_f32);
+        for axis in 0..2 {
+            if delta[axis] == 0. {
+                if a[axis] < clip.min[axis] || a[axis] > clip.max[axis] {
+                    start = 1.;
+                    end = 0.;
+                }
+            } else {
+                let p = (clip.min[axis] - a[axis]) / delta[axis];
+                let q = (clip.max[axis] - a[axis]) / delta[axis];
+                start = start.max(p.min(q));
+                end = end.min(p.max(q));
+            }
+        }
+        if start < end {
+            painter.extend(egui::Shape::dashed_line(
+                &[a + delta * start, a + delta * end],
+                color,
+                5.,
+                3.,
+            ));
+        }
+    }
+}
+
 pub fn vertices(m: &Mark) -> Vec<Pos2> {
     let mut points = crate::vector::flatten(m, 0.1);
     if m.style.text.is_some() {
@@ -665,6 +712,7 @@ impl Editor {
                 && !guide_handled
                 && !space,
             primary_down && !space && !escape,
+            ctx.input(|i| i.modifiers.ctrl || i.modifiers.command),
         );
         if Self::raster_needs_tick(&state) {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -1961,54 +2009,87 @@ impl Editor {
                 }
             }
         }
-        if let Some(bounds) = state.bounds(self) {
-            if tool == Tool::Transform {
-                let mut points: Vec<Pos2> = [
+        if tool != Tool::Transform {
+            let mut evaluated = std::collections::HashMap::new();
+            for &(layer, mark) in &state.selected {
+                let marks = evaluated.entry(layer).or_insert_with(|| {
+                    crate::animation::marks(&self.doc.layers[layer], self.frame)
+                });
+                let Some(mark) = marks.get(mark) else {
+                    continue;
+                };
+                let local_view = self.camera_depth_view(self.camera_view(stage_view), layer);
+                let mut bounds = crate::vector::control_bounds(mark);
+                let mut matrix = crate::rig::IDENTITY;
+                if let Some(instance) = &mark.style.instance
+                    && let Some(symbol_bounds) = self.animation_instance_bounds(mark)
+                {
+                    bounds = symbol_bounds;
+                    matrix = instance.matrix;
+                } else if mark.stroke {
+                    bounds = bounds.expand(mark.width * 0.5);
+                }
+                if !bounds.is_finite() {
+                    continue;
+                }
+                let padding = (2. / local_view.scale.max(0.001)).max(0.);
+                let bounds = bounds.expand(padding);
+                let corners = [
                     bounds.left_top(),
                     bounds.right_top(),
                     bounds.right_bottom(),
                     bounds.left_bottom(),
-                    bounds.left_top(),
                 ]
-                .into_iter()
-                .map(|p| view.screen(p))
-                .collect();
-                painter.add(egui::Shape::line(
-                    std::mem::take(&mut points),
-                    Stroke::new(1., crate::themes::accent()),
-                ));
-                if tool == Tool::Transform {
-                    for p in bounds.handles() {
-                        painter.rect_filled(
-                            Rect::from_center_size(view.screen(p), Vec2::splat(7.)),
-                            0.,
-                            Color32::from_rgb(32, 36, 43),
-                        );
-                        painter.rect_stroke(
-                            Rect::from_center_size(view.screen(p), Vec2::splat(7.)),
-                            0.,
-                            Stroke::new(1., crate::themes::accent()),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    let top = view.screen(bounds.center_top());
-                    let rot = top + rotate(Vec2::new(0., -30.), view.angle + bounds.angle);
-                    painter.line_segment([top, rot], Stroke::new(1., crate::themes::accent()));
-                    painter.circle_filled(rot, 5., Color32::from_rgb(32, 36, 43));
-                    painter.circle_stroke(rot, 5., Stroke::new(1.5, crate::themes::accent()));
-                    let pivot = view.screen(state.pivot.unwrap_or(bounds.center()));
-                    painter.circle_filled(pivot, 5., Color32::from_gray(28));
-                    painter.circle_stroke(pivot, 5., Stroke::new(1.5, crate::themes::accent()));
-                    painter.line_segment(
-                        [pivot - Vec2::new(8., 0.), pivot + Vec2::new(8., 0.)],
-                        Stroke::new(1., crate::themes::accent()),
-                    );
-                    painter.line_segment(
-                        [pivot - Vec2::new(0., 8.), pivot + Vec2::new(0., 8.)],
-                        Stroke::new(1., crate::themes::accent()),
-                    );
-                }
+                .map(|p| local_view.screen(crate::rig::point(matrix, p)));
+                paint_selection_outline(&painter, corners, mark.style.instance.is_some());
             }
+        }
+        if tool == Tool::Transform
+            && let Some(bounds) = state.bounds(self)
+        {
+            let corners = [
+                bounds.left_top(),
+                bounds.right_top(),
+                bounds.right_bottom(),
+                bounds.left_bottom(),
+            ]
+            .map(|p| view.screen(p));
+            let dashed = match state.selected.as_slice() {
+                [(l, m)] => self.doc.layers[*l].frames[self.frame]
+                    .get(*m)
+                    .is_some_and(|mark| mark.style.instance.is_some()),
+                _ => false,
+            };
+            paint_selection_outline(&painter, corners, dashed);
+            for p in bounds.handles() {
+                painter.rect_filled(
+                    Rect::from_center_size(view.screen(p), Vec2::splat(7.)),
+                    0.,
+                    Color32::from_rgb(32, 36, 43),
+                );
+                painter.rect_stroke(
+                    Rect::from_center_size(view.screen(p), Vec2::splat(7.)),
+                    0.,
+                    Stroke::new(1., crate::themes::accent()),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let top = view.screen(bounds.center_top());
+            let rot = top + rotate(Vec2::new(0., -30.), view.angle + bounds.angle);
+            painter.line_segment([top, rot], Stroke::new(1., crate::themes::accent()));
+            painter.circle_filled(rot, 5., Color32::from_rgb(32, 36, 43));
+            painter.circle_stroke(rot, 5., Stroke::new(1.5, crate::themes::accent()));
+            let pivot = view.screen(state.pivot.unwrap_or(bounds.center()));
+            painter.circle_filled(pivot, 5., Color32::from_gray(28));
+            painter.circle_stroke(pivot, 5., Stroke::new(1.5, crate::themes::accent()));
+            painter.line_segment(
+                [pivot - Vec2::new(8., 0.), pivot + Vec2::new(8., 0.)],
+                Stroke::new(1., crate::themes::accent()),
+            );
+            painter.line_segment(
+                [pivot - Vec2::new(0., 8.), pivot + Vec2::new(0., 8.)],
+                Stroke::new(1., crate::themes::accent()),
+            );
         }
         if let Some(Drag::Marquee { start, end, .. }) = &state.drag {
             let r = Rect::from_two_pos(*start, *end);
@@ -2179,6 +2260,29 @@ mod tests {
         assert!((out.points[1][0] + 20.).abs() < 0.001);
         assert!((out.points[1][1] - 50.).abs() < 0.001);
     }
+    #[test]
+    fn symbol_outline_dashes_are_visible_and_bounded_at_high_zoom() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let clip = Rect::from_min_max(Pos2::ZERO, Pos2::new(96., 64.));
+            paint_selection_outline(
+                &ui.painter().with_clip_rect(clip),
+                [
+                    Pos2::new(-1_000_000., 10.),
+                    Pos2::new(1_000_000., 10.),
+                    Pos2::new(1_000_000., 30.),
+                    Pos2::new(-1_000_000., 30.),
+                ],
+                true,
+            );
+        });
+        let count = output.shapes.iter().filter(|shape| {
+            matches!(&shape.shape, egui::Shape::LineSegment { stroke, .. } if stroke.color == SELECTION_BLUE)
+        }).count();
+        assert!((15..=32).contains(&count), "unexpected dash count: {count}");
+        output.textures_delta.clear();
+    }
+
     #[test]
     fn stroke_hit_tests_geometry_not_bounds() {
         assert!(hit(&mark(), Pos2::new(30., 40.), 2.));

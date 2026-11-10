@@ -240,7 +240,17 @@ pub struct DepthEditor {
     job: Option<std::sync::mpsc::Receiver<(Vec<usize>, Vec<u8>, [usize; 2])>>,
     requested: Vec<usize>,
     owner: Option<Document>,
-    preview_scope: Option<(usize, Option<u64>, u32, u32, bool, bool, bool, bool)>,
+    preview_scope: Option<(
+        usize,
+        Option<u64>,
+        u32,
+        u32,
+        bool,
+        bool,
+        bool,
+        bool,
+        Option<usize>,
+    )>,
     preview_epoch: usize,
 }
 impl DepthEditor {
@@ -559,6 +569,8 @@ impl Editor {
                 .layers
                 .iter()
                 .any(|layer| layer.visible && layer.options.light.is_some());
+        let solo = (self.post.solo_light && self.doc.layers[self.layer].options.light.is_some())
+            .then_some(self.layer);
         let post = fx || lights;
         if !post && !blur {
             if self.depth.preview_scope.is_some() {
@@ -575,13 +587,17 @@ impl Editor {
             fx,
             lights,
             blur,
+            solo,
         );
         if self.depth.preview_scope != Some(scope) {
             self.depth.invalidate_preview();
             self.depth.preview_scope = Some(scope);
         }
+        let longest = self.doc.width.max(self.doc.height) as f32;
         let max = if post {
-            900.
+            let physical_zoom = stage.scale * painter.ctx().pixels_per_point();
+            let cap = if self.playing { 1920. } else { 3072. };
+            ((longest * physical_zoom * 1.5 / 128.).ceil() * 128.).clamp(900., cap)
         } else {
             match optics.as_ref().map(|o| o.quality).unwrap_or_default() {
                 Quality::Low => 480.,
@@ -589,7 +605,11 @@ impl Editor {
                 Quality::High => 1200.,
             }
         };
-        let scale = (max / self.doc.width.max(self.doc.height) as f32).min(1.);
+        let scale = if post {
+            max / longest
+        } else {
+            (max / longest).min(1.)
+        };
         let size = [
             (self.doc.width as f32 * scale).round().max(1.) as usize,
             (self.doc.height as f32 * scale).round().max(1.) as usize,
@@ -652,12 +672,14 @@ impl Editor {
             let mut doc = crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene);
             doc.extras.scenes.clear();
             self.depth.owner = Some(doc.clone());
-            if !lights || !fx {
-                for layer in &mut doc.layers {
+            if !lights || !fx || solo.is_some() {
+                for (index, layer) in doc.layers.iter_mut().enumerate() {
                     if !crate::post::is_adjustment(layer) {
                         continue;
                     }
-                    let use_light = lights && layer.options.light.is_some();
+                    let use_light = lights
+                        && solo.is_none_or(|selected| selected == index)
+                        && layer.options.light.is_some();
                     let use_fx = fx && layer.options.adjustment.is_some();
                     if !use_light && !use_fx {
                         layer.visible = false;

@@ -14,6 +14,22 @@ fn top_menu(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui))
     egui::containers::menu::MenuButton::from_button(trigger).ui(ui, content);
 }
 
+fn file_submenu(ui: &mut egui::Ui, icon: Icon, label: &str, content: impl FnOnce(&mut egui::Ui)) {
+    let response = ui.menu_button(format!("        {}", crate::i18n::tr(label)), content);
+    draw(
+        ui.painter(),
+        Rect::from_center_size(
+            egui::pos2(
+                response.response.rect.left() + 12.,
+                response.response.rect.center().y,
+            ),
+            Vec2::splat(15.),
+        ),
+        icon,
+        crate::themes::palette().text,
+    );
+}
+
 impl Editor {
     pub fn workspace(&mut self, ui: &mut egui::Ui) {
         self.animation.thumbnail_cache.begin_frame();
@@ -45,7 +61,7 @@ impl Editor {
                             self.open();
                             ui.close();
                         }
-                        ui.menu_button(crate::i18n::tr("Importar"), |ui| {
+                        file_submenu(ui, Icon::Open, "Importar", |ui| {
                             if button(
                                 ui,
                                 Icon::Open,
@@ -98,14 +114,19 @@ impl Editor {
                                 })
                                 .collect();
                             if !backups.is_empty() {
-                                ui.menu_button(crate::i18n::tr("Open previous version"), |ui| {
+                                file_submenu(ui, Icon::Undo, "Open previous version", |ui| {
                                     for (version, file) in backups {
-                                        if ui
-                                            .button(format!(
-                                                "{} {version}",
-                                                crate::i18n::tr("Backup")
-                                            ))
-                                            .clicked()
+                                        let label =
+                                            format!("{} {version}", crate::i18n::tr("Backup"));
+                                        if button(
+                                            ui,
+                                            Icon::SaveAs,
+                                            &label,
+                                            "Open previous version",
+                                            false,
+                                            true,
+                                        )
+                                        .clicked()
                                         {
                                             self.loader.request_saved_copy(file);
                                             ui.close();
@@ -169,6 +190,35 @@ impl Editor {
                         .clicked()
                         {
                             self.export_fla_copy();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Film,
+                            "Export for Toon Boom Studio (PNG sequence)…",
+                            "Export rendered frames for Toon Boom Studio",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.open_export(false);
+                            if let Some(settings) = &mut self.studio.export {
+                                settings.use_png_sequence();
+                            }
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Grid,
+                            "Export to Sprite Sheet…",
+                            "Export to Sprite Sheet…",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.open_sprite_sheet_export();
                             ui.close();
                         }
                         if button(

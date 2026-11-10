@@ -170,6 +170,7 @@ pub struct Preferences {
     pub auto_key_paint: bool,
     pub saving: crate::project_save::Options,
     pub raster_brush: crate::raster::Brush,
+    pub(crate) light_presets: Vec<crate::light::Preset>,
     layer_colors: [[u8; 3]; 9],
     pub bindings: Vec<Binding>,
     pub actions: Vec<Binding>,
@@ -204,6 +205,7 @@ impl Default for Preferences {
             auto_key_paint: false,
             saving: Default::default(),
             raster_brush: Default::default(),
+            light_presets: Vec::new(),
             layer_colors: LayerColor::ALL.map(|(_, _, _, color)| color),
             bindings: TOOLS
                 .iter()

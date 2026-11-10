@@ -130,6 +130,16 @@ pub struct Instance {
 pub struct MarkStyle {
     #[serde(skip_serializing_if = "SharedVec::is_empty")]
     pub mouth_keys: SharedVec<crate::lip::Key>,
+    #[serde(skip_serializing_if = "SharedVec::is_empty")]
+    pub mouth_routes: SharedVec<crate::lip::Route>,
+    #[serde(skip)]
+    pub surface_height: Option<f32>,
+    #[serde(skip)]
+    pub light_mask: bool,
+    #[serde(skip)]
+    pub light_mask_target: Option<u64>,
+    #[serde(skip)]
+    pub surface_piece: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_clip: Option<crate::animation_clips::Timing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +168,14 @@ pub struct LayerOptions {
     pub adjustment: Option<SharedVec<crate::post::Effect>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light: Option<crate::light::Light>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_receiver: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_guide: Option<f32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub light_mask: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_mask_target: Option<u64>,
     pub depth: crate::depth::LayerDepth,
     pub mannequin: Option<crate::mannequin::Mannequin>,
     pub tweens: SharedVec<crate::animation::Tween>,
@@ -179,6 +197,10 @@ impl Default for LayerOptions {
             raster: false,
             adjustment: None,
             light: None,
+            light_receiver: None,
+            height_guide: None,
+            light_mask: false,
+            light_mask_target: None,
             depth: Default::default(),
             mannequin: None,
             locked: false,
@@ -467,6 +489,9 @@ fn expand(
     guides: bool,
     clock: usize,
     poses: &std::collections::HashMap<u64, crate::rig::Pose>,
+    mouth: Option<crate::lip::RouteScope<'_>>,
+    surfaces: bool,
+    piece: u64,
 ) {
     if mark.style.guide && !guides {
         return;
@@ -480,6 +505,11 @@ fn expand(
         };
         let count = symbol.layers.first().map_or(1, |l| l.frames.len()).max(1);
         let parent_frame = rig_frame;
+        let mouth = if mouth.is_none() && !mark.style.mouth_routes.is_empty() {
+            Some(crate::lip::RouteScope::new(&mark.style.mouth_routes, frame))
+        } else {
+            mouth
+        };
         let frame = mark
             .style
             .animation_clip
@@ -488,7 +518,11 @@ fn expand(
                 crate::animation_clips::source_frame(doc, timing, instance.born, frame)
             })
             .or_else(|| {
-                crate::lip::pose_at(&mark.style.mouth_keys, frame).filter(|&pose| pose < count)
+                mouth
+                    .as_ref()
+                    .and_then(crate::lip::RouteScope::pose)
+                    .or_else(|| crate::lip::pose_at(&mark.style.mouth_keys, frame))
+                    .filter(|&pose| pose < count)
             })
             .unwrap_or_else(|| {
                 if symbol.mouth_poses.is_empty() {
@@ -521,6 +555,9 @@ fn expand(
                     .saturating_sub(instance.born)
                     .saturating_add(instance.first)
             },
+            mouth.as_ref(),
+            surfaces,
+            piece,
         ) {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
@@ -563,6 +600,9 @@ fn resolve_internal(
     depth: usize,
     guides: bool,
     clock: usize,
+    mouth: Option<&crate::lip::RouteScope<'_>>,
+    surfaces: bool,
+    scope: u64,
 ) -> Vec<(usize, usize, Mark)> {
     let mut pose_cache = std::collections::HashMap::new();
     let mut previous_folder = crate::rig::IDENTITY;
@@ -570,6 +610,11 @@ fn resolve_internal(
     let mut output = vec![];
     let mut below = vec![];
     for (l, layer) in doc.layers.iter().enumerate() {
+        let guide = layer.options.height_guide.is_some() || layer.options.light_mask;
+        if guide && !(surfaces || guides && depth == 0 && layer.options.light_mask_target.is_none())
+        {
+            continue;
+        }
         if layer.options.mannequin.is_some()
             || layer.options.mask_id.is_some()
             || crate::post::is_adjustment(layer)
@@ -601,6 +646,7 @@ fn resolve_internal(
                     {
                         expand(
                             doc, mark, frame, rig_frame, depth, &mut marks, false, clock, &poses,
+                            None, false, 0,
                         );
                     }
                 }
@@ -630,6 +676,7 @@ fn resolve_internal(
         } else {
             None
         };
+        let first_output = output.len();
         for (m, mark) in crate::animation::marks(layer, frame.min(layer.frames.len() - 1))
             .iter()
             .enumerate()
@@ -645,6 +692,11 @@ fn resolve_internal(
                 guides,
                 clock,
                 poses,
+                mouth.and_then(|scope| scope.child(l, m, mark)),
+                surfaces,
+                scope
+                    .wrapping_mul(0x100000001b3)
+                    .wrapping_add(((l as u64 + 1) << 32) | (m as u64 + 1)),
             );
             for original in expanded {
                 let parts = mask
@@ -661,7 +713,22 @@ fn resolve_internal(
                             s.color[3] = (s.color[3] as f32 * alpha).round() as u8;
                         }
                     }
-                    current.push(part.clone());
+                    if surfaces {
+                        if part.style.surface_piece == 0 {
+                            part.style.surface_piece =
+                                scope.wrapping_mul(0x100000001b3).wrapping_add(l as u64 + 1);
+                        }
+                        part.style.surface_height =
+                            layer.options.height_guide.or(part.style.surface_height);
+                        part.style.light_mask |= layer.options.light_mask;
+                        part.style.light_mask_target = layer
+                            .options
+                            .light_mask_target
+                            .or(part.style.light_mask_target);
+                    }
+                    if part.style.surface_height.is_none() && !part.style.light_mask && !guide {
+                        current.push(part.clone());
+                    }
                     output.push((
                         l,
                         m,
@@ -674,16 +741,26 @@ fn resolve_internal(
                 }
             }
         }
-        below = current;
-        previous_folder = folder;
+        if surfaces && layer.options.light_mask && output.len() == first_output {
+            // A visible empty mask is still a mask. Erasing the last stroke must
+            // leave an empty matte rather than restore unrestricted lighting.
+            let mut empty = Mark::default();
+            empty.style.light_mask = true;
+            empty.style.light_mask_target = layer.options.light_mask_target;
+            output.push((l, 0, empty));
+        }
+        if !guide {
+            below = current;
+            previous_folder = folder;
+        }
     }
     output
 }
 pub fn resolve(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, true, frame)
+    resolve_mode(doc, frame, camera, true, frame, false)
 }
 pub fn resolve_export(doc: &Document, frame: usize, camera: bool) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, false, frame)
+    resolve_mode(doc, frame, camera, false, frame, false)
 }
 fn resolve_mode(
     doc: &Document,
@@ -691,8 +768,9 @@ fn resolve_mode(
     camera: bool,
     guides: bool,
     clock: usize,
+    surfaces: bool,
 ) -> Vec<(usize, usize, Mark)> {
-    let mut marks = resolve_internal(doc, frame, 0, guides, clock);
+    let mut marks = resolve_internal(doc, frame, 0, guides, clock, None, surfaces, 0);
     if camera || !guides {
         for (l, _, mark) in &mut marks {
             let matrix = crate::folder_groups::layer_matrix(doc, &doc.layers[*l]);
@@ -805,6 +883,13 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         .chain(doc.extras.scenes.iter().flat_map(|s| s.layers.iter()))
         .chain(doc.extras.symbols.iter().flat_map(|s| s.layers.iter()))
     {
+        if layer
+            .options
+            .height_guide
+            .is_some_and(|v| !(-1. ..=1.).contains(&v))
+        {
+            return Err("Invalid height guide".into());
+        }
         if crate::post::is_adjustment(layer)
             && (layer
                 .options
@@ -1023,6 +1108,9 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
                 {
                     return Err("Invalid Lip Sync keys".into());
                 }
+                if !crate::lip::valid_routes(&mark.style.mouth_routes) {
+                    return Err("Invalid nested Lip Sync channels".into());
+                }
                 if mark.style.text.as_ref().is_some_and(|t| !t.valid()) {
                     return Err("Invalid text".into());
                 }
@@ -1240,7 +1328,7 @@ pub fn resolve_preview(
     camera: bool,
     clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, false, clock)
+    resolve_mode(doc, frame, camera, false, clock, true)
 }
 pub fn resolve_at(
     doc: &Document,
@@ -1248,7 +1336,7 @@ pub fn resolve_at(
     camera: bool,
     clock: usize,
 ) -> Vec<(usize, usize, Mark)> {
-    resolve_mode(doc, frame, camera, true, clock)
+    resolve_mode(doc, frame, camera, true, clock, false)
 }
 pub fn symbol_frame(i: &Instance, count: usize, frame: usize, clock: usize) -> usize {
     let count = count.max(1);

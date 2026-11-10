@@ -274,6 +274,13 @@ impl Editor {
                 return;
             }
             self.lip_pose_properties(ui);
+            self.height_guide_properties(ui);
+            if self.doc.layers[self.layer].options.light_mask {
+                design::category(ui, "Light mask");
+                ui.small(crate::i18n::tr(
+                    "Click to paint. Ctrl or Cmd + click to remove.",
+                ));
+            }
             if self.adjustment_active() {
                 self.adjustment_properties(ui);
                 return;

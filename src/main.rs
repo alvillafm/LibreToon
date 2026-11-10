@@ -447,6 +447,7 @@ impl eframe::App for Editor {
         }
         self.reference_windows(&ctx);
         self.annotation_dialog(&ctx);
+        self.lip_session_ui(&ctx);
         self.project_save_ui(&ctx);
         if self.studio.credits_open {
             egui::Window::new(crate::i18n::tr("Credits"))

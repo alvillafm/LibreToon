@@ -448,6 +448,8 @@ struct EffectDrag(usize);
 pub(crate) struct State {
     pub hidden: bool,
     pub hide_lights: bool,
+    pub solo_light: bool,
+    pub preset_name: String,
     selected: usize,
     channel: usize,
     transaction: bool,

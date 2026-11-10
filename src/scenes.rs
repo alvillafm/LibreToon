@@ -19,6 +19,7 @@ impl Editor {
         }
     }
     pub fn switch_scene(&mut self, index: usize) {
+        self.close_lip_session();
         self.finish_raster_stroke();
         self.feature.exposure_drag = None;
         self.folder_groups.clear();

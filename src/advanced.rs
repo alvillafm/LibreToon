@@ -208,6 +208,7 @@ impl Editor {
         self.feature
             .symbol_stack
             .push((self.doc.clone(), self.frame, self.layer, id));
+        self.close_lip_session();
         self.animation.play_all = false;
         self.animation.picker = None;
         self.doc.layers = layers;
