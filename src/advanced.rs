@@ -1242,6 +1242,7 @@ mod tests {
             parent: None,
             collapsed: false,
             transform: Default::default(),
+            timeline_slot: None,
             range: None,
             source_shift: 0,
         });
@@ -1373,6 +1374,7 @@ mod tests {
             parent: Some(1),
             collapsed: false,
             transform: Default::default(),
+            timeline_slot: None,
             range: None,
             source_shift: 0,
         });

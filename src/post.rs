@@ -113,6 +113,122 @@ pub fn valid(effects: &[Effect]) -> bool {
         })
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct Key {
+    frame: i32,
+    effects: crate::shared::SharedVec<Effect>,
+}
+
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Band {
+    start: usize,
+    end: Option<usize>,
+    #[serde(default)]
+    keys: crate::shared::SharedVec<Key>,
+}
+
+impl Band {
+    fn range(&self, count: usize) -> std::ops::Range<usize> {
+        self.start.min(count)..self.end.unwrap_or(count).min(count)
+    }
+
+    fn set_key(&mut self, frame: usize, effects: crate::shared::SharedVec<Effect>) {
+        let frame = frame as i32;
+        match self.keys.binary_search_by_key(&frame, |key| key.frame) {
+            Ok(index) => self.keys[index].effects = effects,
+            Err(index) => self.keys.insert(index, Key { frame, effects }),
+        }
+    }
+
+    fn evaluate<'a>(&'a self, base: &'a [Effect], frame: usize) -> std::borrow::Cow<'a, [Effect]> {
+        let frame = frame as i32;
+        let next = self.keys.partition_point(|key| key.frame <= frame);
+        match (
+            next.checked_sub(1).and_then(|i| self.keys.get(i)),
+            self.keys.get(next),
+        ) {
+            (None, None) => base.into(),
+            (None, Some(key)) | (Some(key), None) => key.effects.as_slice().into(),
+            (Some(a), Some(b)) => {
+                let t = (frame - a.frame) as f32 / (b.frame - a.frame) as f32;
+                if t == 0. {
+                    return a.effects.as_slice().into();
+                }
+                let lerp = |a: f32, b: f32| a + (b - a) * t;
+                a.effects
+                    .iter()
+                    .zip(b.effects.iter())
+                    .map(|(a, b)| Effect {
+                        kind: a.kind,
+                        enabled: a.enabled,
+                        values: std::array::from_fn(|i| lerp(a.values[i], b.values[i])),
+                        color: std::array::from_fn(|i| {
+                            lerp(a.color[i] as f32, b.color[i] as f32).round() as u8
+                        }),
+                        channels: std::array::from_fn(|i| {
+                            std::array::from_fn(|j| lerp(a.channels[i][j], b.channels[i][j]))
+                        }),
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            }
+        }
+    }
+}
+
+pub(crate) fn valid_bands(layer: &crate::document::Layer) -> bool {
+    layer.options.adjustment_bands.as_ref().is_none_or(|bands| {
+        let Some(base) = &layer.options.adjustment else {
+            return false;
+        };
+        bands.len() <= 10000
+            && bands.iter().enumerate().all(|(i, band)| {
+                band.start < 10000
+                    && band
+                        .end
+                        .map_or(i + 1 == bands.len(), |end| end > band.start && end <= 10000)
+                    && (i == 0 || bands[i - 1].end.is_some_and(|end| end <= band.start))
+                    && band.keys.len() <= 10000
+                    && band
+                        .keys
+                        .windows(2)
+                        .all(|pair| pair[0].frame < pair[1].frame)
+                    && band.keys.iter().all(|key| {
+                        (-1_000_000..=1_000_000).contains(&key.frame)
+                            && valid(&key.effects)
+                            && key.effects.len() == base.len()
+                            && key
+                                .effects
+                                .iter()
+                                .zip(base.iter())
+                                .all(|(key, base)| key.kind == base.kind)
+                    })
+            })
+    })
+}
+
+pub(crate) fn effects_at(
+    layer: &crate::document::Layer,
+    frame: usize,
+) -> Option<std::borrow::Cow<'_, [Effect]>> {
+    let base = layer.options.adjustment.as_ref()?;
+    if let Some(bands) = &layer.options.adjustment_bands {
+        let band = bands
+            .iter()
+            .find(|band| band.range(layer.frames.len()).contains(&frame))?;
+        Some(band.evaluate(base, frame))
+    } else {
+        Some(base.as_slice().into())
+    }
+}
+
+pub(crate) fn visible_effects_at(layer: &crate::document::Layer, frame: usize) -> bool {
+    layer.visible
+        && (layer.options.light.is_some()
+            || effects_at(layer, frame)
+                .is_some_and(|effects| effects.iter().any(|effect| effect.enabled)))
+}
+
 pub fn is_adjustment(layer: &crate::document::Layer) -> bool {
     layer.options.adjustment.is_some() || layer.options.light.is_some()
 }
@@ -128,7 +244,18 @@ pub fn visible_effects(layer: &crate::document::Layer) -> bool {
                 .options
                 .adjustment
                 .as_ref()
-                .is_some_and(|effects| effects.iter().any(|e| e.enabled)))
+                .is_some_and(|effects| effects.iter().any(|e| e.enabled))
+            || layer
+                .options
+                .adjustment_bands
+                .as_ref()
+                .is_some_and(|bands| {
+                    bands.iter().any(|band| {
+                        band.keys
+                            .iter()
+                            .any(|key| key.effects.iter().any(|e| e.enabled))
+                    })
+                }))
 }
 
 fn luma(c: [f32; 3]) -> f32 {
@@ -444,6 +571,60 @@ fn settings(ui: &mut egui::Ui, effect: &mut Effect, channel: &mut usize) {
 #[derive(Clone, Copy)]
 struct EffectDrag(usize);
 
+#[derive(Clone, Copy)]
+enum BandHandle {
+    Start,
+    End,
+    Move,
+    Key(usize),
+}
+
+#[derive(Clone, Copy)]
+struct BandDrag {
+    layer: usize,
+    band: usize,
+    x: f32,
+    handle: BandHandle,
+}
+
+fn bands_for(layer: &crate::document::Layer) -> crate::shared::SharedVec<Band> {
+    layer
+        .options
+        .adjustment_bands
+        .clone()
+        .unwrap_or_else(|| vec![Band::default()].into())
+}
+
+#[derive(Clone, Copy)]
+enum BandAction {
+    Split,
+    Remove,
+    AddKey,
+    RemoveKey,
+}
+
+#[derive(Clone)]
+enum StackEdit {
+    Add(Effect),
+    Remove(usize),
+    Move(usize, usize),
+}
+
+impl StackEdit {
+    fn apply(&self, effects: &mut crate::shared::SharedVec<Effect>) {
+        match self {
+            Self::Add(effect) => effects.push(effect.clone()),
+            Self::Remove(index) => {
+                effects.remove(*index);
+            }
+            Self::Move(from, to) => {
+                let effect = effects.remove(*from);
+                effects.insert(*to, effect);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct State {
     pub hidden: bool,
@@ -453,22 +634,355 @@ pub(crate) struct State {
     selected: usize,
     channel: usize,
     transaction: bool,
+    band_drag: Option<BandDrag>,
 }
 impl Editor {
+    pub(crate) fn cancel_adjustment_drag(&mut self) {
+        self.post.band_drag = None;
+        self.post.transaction = false;
+    }
+
+    fn edit_adjustment_band(&mut self, layer: usize, frame: usize, action: BandAction) {
+        let data = &self.doc.layers[layer];
+        if data.options.locked {
+            return;
+        }
+        let Some(base) = &data.options.adjustment else {
+            return;
+        };
+        let mut bands = bands_for(data);
+        let Some(index) = bands
+            .iter()
+            .position(|band| band.range(data.frames.len()).contains(&frame))
+        else {
+            return;
+        };
+        match action {
+            BandAction::Split if frame > bands[index].start => {
+                let mut right = bands[index].clone();
+                right.start = frame;
+                let first_at_or_after = right.keys.partition_point(|key| key.frame < frame as i32);
+                // Keep the neighbouring keys on each side for a continuous split.
+                right.keys.drain(..first_at_or_after.saturating_sub(1));
+                bands[index].keys.truncate(first_at_or_after + 1);
+                bands[index].end = Some(frame);
+                bands.insert(index + 1, right);
+            }
+            BandAction::Remove => {
+                bands.remove(index);
+            }
+            BandAction::AddKey => {
+                let value = bands[index].evaluate(base, frame).into_owned().into();
+                bands[index].set_key(frame, value);
+            }
+            BandAction::RemoveKey => {
+                let Ok(key) = bands[index]
+                    .keys
+                    .binary_search_by_key(&(frame as i32), |key| key.frame)
+                else {
+                    return;
+                };
+                bands[index].keys.remove(key);
+            }
+            _ => return,
+        }
+        self.checkpoint();
+        self.doc.layers[layer].options.adjustment_bands = Some(bands);
+        self.recover();
+    }
+
+    pub(crate) fn adjustment_track_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        layer: usize,
+        rect: egui::Rect,
+        cell: f32,
+        count: usize,
+    ) {
+        let data = &self.doc.layers[layer];
+        let locked = data.options.locked;
+        let mut bands = bands_for(data);
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("fx-band", layer)),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter().with_clip_rect(ui.clip_rect());
+        let x = |frame: usize| rect.left() + frame as f32 * cell;
+        let frame_at = |pos: Pos2| (((pos.x - rect.left()) / cell).floor() as usize).min(count - 1);
+        let hit = |pos: Pos2| {
+            let frame = frame_at(pos);
+            let (index, band) = bands
+                .iter()
+                .enumerate()
+                .find(|(_, band)| band.range(count).contains(&frame))?;
+            let range = band.range(count);
+            let grip = (cell * 0.28).clamp(2., 6.);
+            let handle = if pos.x - x(range.start) <= grip {
+                BandHandle::Start
+            } else if x(range.end) - pos.x <= grip {
+                BandHandle::End
+            } else if band
+                .keys
+                .binary_search_by_key(&(frame as i32), |key| key.frame)
+                .is_ok()
+                && (pos.x - x(frame) - cell * 0.5).abs() <= 6.
+            {
+                BandHandle::Key(frame)
+            } else {
+                BandHandle::Move
+            };
+            Some((index, handle))
+        };
+        if !locked
+            && let Some(pos) = response.hover_pos()
+            && let Some((_, handle)) = hit(pos)
+        {
+            ui.ctx().set_cursor_icon(match handle {
+                BandHandle::Start | BandHandle::End => egui::CursorIcon::ResizeHorizontal,
+                BandHandle::Move | BandHandle::Key(_) => egui::CursorIcon::Grab,
+            });
+        }
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        if (response.clicked() || response.secondary_clicked())
+            && let Some(pos) = pointer
+        {
+            self.layer = layer;
+            self.frame = frame_at(pos);
+            self.playing = false;
+        }
+        let mut action = None;
+        response.context_menu(|ui| {
+            let frame = self.frame;
+            let band = bands.iter().find(|band| band.range(count).contains(&frame));
+            let keyed = band.is_some_and(|band| {
+                band.keys
+                    .binary_search_by_key(&(frame as i32), |key| key.frame)
+                    .is_ok()
+            });
+            for (icon, label, command, enabled) in [
+                (
+                    Icon::Cut,
+                    "Split FX band here",
+                    BandAction::Split,
+                    band.is_some_and(|band| frame > band.start),
+                ),
+                (
+                    Icon::KeyAdd,
+                    "Add FX keyframe",
+                    BandAction::AddKey,
+                    band.is_some() && !keyed,
+                ),
+                (
+                    Icon::KeyRemove,
+                    "Delete FX keyframe",
+                    BandAction::RemoveKey,
+                    keyed,
+                ),
+                (
+                    Icon::Trash,
+                    "Delete FX band",
+                    BandAction::Remove,
+                    band.is_some() && bands.len() > 1,
+                ),
+            ] {
+                if button(ui, icon, label, "", false, !locked && enabled).clicked() {
+                    action = Some((frame, command));
+                    ui.close();
+                }
+            }
+        });
+        if !locked
+            && response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(pos) = ui.input(|input| input.pointer.press_origin())
+            && let Some((band, handle)) = hit(pos)
+        {
+            self.layer = layer;
+            self.playing = false;
+            self.post.band_drag = Some(BandDrag {
+                layer,
+                band,
+                x: pos.x,
+                handle,
+            });
+        }
+        let mut changed = false;
+        if !locked
+            && let Some(drag) = self.post.band_drag.filter(|drag| drag.layer == layer)
+            && let Some(pos) = pointer
+            && drag.band < bands.len()
+        {
+            let delta = ((pos.x - drag.x) / cell).round() as i32;
+            let low = drag
+                .band
+                .checked_sub(1)
+                .and_then(|i| bands[i].end)
+                .unwrap_or(0);
+            let high = bands
+                .get(drag.band + 1)
+                .map_or(count, |next| next.start.min(count));
+            let band = &mut bands[drag.band];
+            let range = band.range(count);
+            if !range.is_empty() && delta != 0 {
+                let offset = |frame: usize| frame.saturating_add_signed(delta as isize);
+                match drag.handle {
+                    BandHandle::Start => band.start = offset(range.start).clamp(low, range.end - 1),
+                    BandHandle::End => {
+                        let end = offset(range.end).clamp(range.start + 1, high);
+                        if end != range.end {
+                            band.end = Some(end);
+                        }
+                    }
+                    BandHandle::Move => {
+                        let start = offset(range.start).clamp(low, high - range.len());
+                        let shift = start as i32 - range.start as i32;
+                        if shift != 0 {
+                            band.start = start;
+                            band.end = Some(start + range.len());
+                            for key in &mut band.keys {
+                                key.frame += shift;
+                            }
+                        }
+                    }
+                    BandHandle::Key(frame) => {
+                        let to = offset(frame).clamp(range.start, range.end - 1) as i32;
+                        if band
+                            .keys
+                            .binary_search_by_key(&to, |key| key.frame)
+                            .is_err()
+                            && let Ok(index) = band
+                                .keys
+                                .binary_search_by_key(&(frame as i32), |key| key.frame)
+                        {
+                            band.keys[index].frame = to;
+                            band.keys.sort_by_key(|key| key.frame);
+                            if response.drag_stopped() {
+                                self.frame = to as usize;
+                            }
+                        }
+                    }
+                }
+            }
+            changed = bands != bands_for(&self.doc.layers[layer]);
+            if matches!(drag.handle, BandHandle::Move | BandHandle::Key(_)) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+        }
+        let color = self
+            .studio
+            .prefs
+            .layer_color(crate::studio::LayerColor::Adjustment);
+        let opacity = if layer == self.layer { 0.42 } else { 0.24 };
+        for band in &bands {
+            let range = band.range(count);
+            if range.is_empty() {
+                continue;
+            }
+            let band_rect = egui::Rect::from_min_max(
+                Pos2::new(x(range.start) + 1., rect.top() + 4.),
+                Pos2::new(x(range.end) - 1., rect.bottom() - 4.),
+            );
+            painter.rect_filled(band_rect, 4., color.gamma_multiply(opacity));
+            for key in &band.keys {
+                if key.frame < 0 || !range.contains(&(key.frame as usize)) {
+                    continue;
+                }
+                let center = Pos2::new(x(key.frame as usize) + cell / 2., band_rect.center().y);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        center - Vec2::Y * 5.,
+                        center + Vec2::X * 5.,
+                        center + Vec2::Y * 5.,
+                        center - Vec2::X * 5.,
+                    ],
+                    color,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.post.band_drag = None;
+            if changed {
+                self.checkpoint();
+                self.doc.layers[layer].options.adjustment_bands = Some(bands);
+                self.recover();
+            }
+        }
+        if let Some((frame, action)) = action {
+            self.edit_adjustment_band(layer, frame, action);
+        }
+    }
+
     pub(crate) fn adjustment_active(&self) -> bool {
         self.doc.layers.get(self.layer).is_some_and(is_adjustment)
     }
 
     pub(crate) fn adjustment_properties(&mut self, ui: &mut egui::Ui) {
-        let Some(effects) = self.doc.layers[self.layer].options.adjustment.as_ref() else {
+        let layer = self.layer;
+        let frame = self.frame;
+        let data = &self.doc.layers[layer];
+        let Some(mut base) = data.options.adjustment.clone() else {
             return;
         };
-        let before = effects.clone();
+        let locked = data.options.locked;
+        let mut stored_bands = data.options.adjustment_bands.clone();
+        let active = bands_for(data)
+            .iter()
+            .find(|band| band.range(data.frames.len()).contains(&frame))
+            .cloned();
+        let keyed = active.as_ref().is_some_and(|band| {
+            band.keys
+                .binary_search_by_key(&(frame as i32), |key| key.frame)
+                .is_ok()
+        });
+        let animated = active.as_ref().is_some_and(|band| !band.keys.is_empty());
+        let before: crate::shared::SharedVec<Effect> = if animated {
+            active
+                .as_ref()
+                .unwrap()
+                .evaluate(&base, frame)
+                .into_owned()
+                .into()
+        } else {
+            base.clone()
+        };
         let mut effects = before.clone();
-        let locked = self.doc.layers[self.layer].options.locked;
+        let mut stack_edits = Vec::new();
         ui.heading(tr("Adjustment layer"));
         ui.small(tr("Effects apply to all visible layers below this layer."));
         ui.small(tr("Effects run from bottom to top. Drag to reorder."));
+        ui.horizontal(|ui| {
+            for (icon, label, action, enabled) in [
+                (
+                    Icon::KeyAdd,
+                    "Add FX keyframe",
+                    BandAction::AddKey,
+                    active.is_some() && !keyed,
+                ),
+                (
+                    Icon::KeyRemove,
+                    "Delete FX keyframe",
+                    BandAction::RemoveKey,
+                    keyed,
+                ),
+                (
+                    Icon::Cut,
+                    "Split FX band here",
+                    BandAction::Split,
+                    active.as_ref().is_some_and(|band| frame > band.start),
+                ),
+            ] {
+                if button(ui, icon, "", label, false, !locked && enabled).clicked() {
+                    self.edit_adjustment_band(layer, frame, action);
+                }
+            }
+            if keyed {
+                ui.small(tr("FX keyframe"));
+            }
+            if active.is_none() {
+                ui.small(tr("Outside FX band"));
+            }
+        });
         ui.separator();
         ui.add_enabled_ui(!locked, |ui| {
             ui.horizontal(|ui| {
@@ -478,7 +992,9 @@ impl Editor {
                         if button(ui, kind.icon(), kind.name(), "", false, effects.len() < 16)
                             .clicked()
                         {
-                            effects.push(Effect::new(kind));
+                            let effect = Effect::new(kind);
+                            effects.push(effect.clone());
+                            stack_edits.push(StackEdit::Add(effect));
                             self.post.selected = effects.len() - 1;
                             self.post.channel = 0;
                             ui.close();
@@ -497,6 +1013,7 @@ impl Editor {
                 {
                     let selected = self.post.selected.min(effects.len() - 1);
                     effects.remove(selected);
+                    stack_edits.push(StackEdit::Remove(selected));
                     self.post.selected = self.post.selected.saturating_sub(1);
                 }
             });
@@ -568,6 +1085,7 @@ impl Editor {
                 if from != to {
                     let effect = effects.remove(from);
                     effects.insert(to, effect);
+                    stack_edits.push(StackEdit::Move(from, to));
                 }
                 self.post.selected = to;
             }
@@ -583,12 +1101,39 @@ impl Editor {
                 }
             }
         });
-        if *effects != *before {
+        if effects != before || !stack_edits.is_empty() {
             if !self.post.transaction {
                 self.checkpoint();
                 self.post.transaction = true;
             }
-            self.doc.layers[self.layer].options.adjustment = Some(effects);
+            let mut reordered = before;
+            for edit in &stack_edits {
+                edit.apply(&mut base);
+                edit.apply(&mut reordered);
+                if let Some(bands) = &mut stored_bands {
+                    for band in bands {
+                        for key in &mut band.keys {
+                            edit.apply(&mut key.effects);
+                        }
+                    }
+                }
+            }
+            if animated {
+                if effects != reordered
+                    && let Some(band) = stored_bands.as_mut().and_then(|bands| {
+                        bands.iter_mut().find(|band| {
+                            band.range(self.doc.layers[layer].frames.len())
+                                .contains(&frame)
+                        })
+                    })
+                {
+                    band.set_key(frame, effects);
+                }
+            } else {
+                base = effects;
+            }
+            self.doc.layers[layer].options.adjustment = Some(base);
+            self.doc.layers[layer].options.adjustment_bands = stored_bands;
             self.recover();
         }
         if !ui.input(|i| i.pointer.primary_down()) {
@@ -600,6 +1145,128 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fx_band_limits_rendering_and_interpolates_across_a_split() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        editor.doc = Document {
+            width: 32,
+            height: 32,
+            ..Default::default()
+        };
+        editor.recovery =
+            std::env::temp_dir().join(format!("fx-band-test-{}.json", std::process::id()));
+        let mut adjustment = editor.doc.layers[0].clone();
+        let mut first = Effect::new(Kind::Hue);
+        first.values[0] = 0.;
+        let mut last = first.clone();
+        last.values[0] = 120.;
+        let mut band = Band {
+            start: 2,
+            end: Some(9),
+            ..Default::default()
+        };
+        band.set_key(2, vec![first.clone()].into());
+        band.set_key(8, vec![last].into());
+        adjustment.options.adjustment = Some(vec![first].into());
+        adjustment.options.adjustment_bands = Some(vec![band].into());
+        editor.doc.layers.push(adjustment);
+        let art = crate::Mark {
+            points: vec![[2., 2.], [30., 30.]].into(),
+            rectangle: true,
+            stroke: false,
+            fill: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        for frame in &mut editor.doc.layers[0].frames {
+            frame.push(art.clone());
+        }
+        editor.edit_adjustment_band(1, 5, BandAction::Split);
+        let layer = &editor.doc.layers[1];
+        assert_eq!(layer.options.adjustment_bands.as_ref().unwrap().len(), 2);
+        assert_eq!(effects_at(layer, 4).unwrap()[0].values[0], 40.);
+        assert_eq!(effects_at(layer, 5).unwrap()[0].values[0], 60.);
+        assert!(effects_at(layer, 9).is_none());
+        let bytes = crate::native_project::encode(&editor.doc).unwrap();
+        let doc = crate::native_project::decode_if_native(&bytes)
+            .unwrap()
+            .unwrap();
+        let render = |frame| {
+            let pixels =
+                crate::exporter::raster(&doc, frame, 32, 32, &ctx, &mut Default::default());
+            let offset = (16 * 32 + 16) * 3;
+            [pixels[offset], pixels[offset + 1], pixels[offset + 2]]
+        };
+        assert_eq!(render(1), [255, 0, 0]);
+        assert_eq!(render(5), [255, 255, 0]);
+        assert_eq!(render(8), [0, 255, 0]);
+        assert_eq!(render(9), [255, 0, 0]);
+        editor.history(false);
+        assert_eq!(
+            editor.doc.layers[1]
+                .options
+                .adjustment_bands
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn fx_band_edges_trim_and_body_moves_keys_with_the_band() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        editor.doc = Document::default();
+        editor.recovery =
+            std::env::temp_dir().join(format!("fx-drag-test-{}.json", std::process::id()));
+        let effects: crate::shared::SharedVec<_> = vec![Effect::new(Kind::Gaussian)].into();
+        let mut band = Band {
+            start: 2,
+            end: Some(9),
+            ..Default::default()
+        };
+        band.set_key(3, effects.clone());
+        editor.doc.layers[0].options.adjustment = Some(effects);
+        editor.doc.layers[0].options.adjustment_bands = Some(vec![band].into());
+        let rect = egui::Rect::from_min_size(Pos2::new(10., 30.), Vec2::new(480., 28.));
+        let tick = |editor: &mut Editor, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(600., 200.))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| editor.adjustment_track_ui(ui, 0, rect, 20., 24),
+            )
+            .textures_delta
+            .clear();
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let drag = |editor: &mut Editor, from: Pos2, to: Pos2| {
+            tick(editor, vec![egui::Event::PointerMoved(from)]);
+            tick(editor, vec![button(from, true)]);
+            tick(editor, vec![egui::Event::PointerMoved(to)]);
+            tick(editor, vec![button(to, false)]);
+        };
+        tick(&mut editor, vec![]);
+        drag(&mut editor, Pos2::new(188., 44.), Pos2::new(148., 44.));
+        assert_eq!(bands_for(&editor.doc.layers[0])[0].range(24), 2..7);
+        drag(&mut editor, Pos2::new(101., 44.), Pos2::new(141., 44.));
+        let bands = bands_for(&editor.doc.layers[0]);
+        assert_eq!(bands[0].range(24), 4..9);
+        assert_eq!(bands[0].keys[0].frame, 5);
+        drag(&mut editor, Pos2::new(120., 44.), Pos2::new(140., 44.));
+        let bands = bands_for(&editor.doc.layers[0]);
+        assert_eq!(bands[0].range(24), 4..9);
+        assert_eq!(bands[0].keys[0].frame, 6);
+    }
 
     #[test]
     fn adjustment_roundtrips_and_only_affects_layers_below_it() {

@@ -536,6 +536,7 @@ impl Importer<'_> {
                 parent: parent_index(index).and_then(|parent| folder_ids.get(&parent).copied()),
                 collapsed: node.a("isExpanded") == Some("false"),
                 transform: Default::default(),
+                timeline_slot: None,
                 range: None,
                 source_shift: 0,
             });

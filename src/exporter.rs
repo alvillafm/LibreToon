@@ -1042,7 +1042,11 @@ fn raster_composited(
     cache.begin_frame();
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
-    let adjust = post && scene.layers.iter().any(crate::post::visible_effects);
+    let adjust = post
+        && scene
+            .layers
+            .iter()
+            .any(|layer| crate::post::visible_effects_at(layer, local));
     let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
     let optics = crate::depth::camera(&scene, local)
         .map(|c| crate::animation::camera_optics(c, local))
@@ -1378,7 +1382,7 @@ fn raster_composited(
             }
             if let Some(l) = scene.layers.get(layer).filter(|l| l.visible) {
                 if adjust
-                    && crate::post::visible_effects(l)
+                    && crate::post::visible_effects_at(l, local)
                     && crate::folder_groups::layer_active(&scene, l, local)
                 {
                     apply_adjustment(
@@ -1409,7 +1413,7 @@ fn raster_composited(
         let mut result = vec![0; (w * h * 4) as usize];
         let mut start = 0;
         for (index, layer) in scene.layers.iter().enumerate() {
-            if !crate::post::visible_effects(layer)
+            if !crate::post::visible_effects_at(layer, local)
                 || !crate::folder_groups::layer_active(&scene, layer, local)
             {
                 continue;
@@ -1560,9 +1564,9 @@ fn apply_adjustment(
     if opacity == 0. {
         return;
     }
-    if let Some(effects) = &layer.options.adjustment {
+    if let Some(effects) = crate::post::effects_at(layer, frame) {
         let original = (opacity < 1.).then(|| result.clone());
-        crate::post::apply(result, w, h, effects, scale);
+        crate::post::apply(result, w, h, &effects, scale);
         if let Some(original) = original {
             for (p, old) in result.iter_mut().zip(original) {
                 *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;

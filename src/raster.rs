@@ -817,7 +817,7 @@ impl Editor {
                 color: if mask_brush {
                     [255; 4]
                 } else {
-                    self.color.to_srgba_unmultiplied()
+                    self.fill_color.to_srgba_unmultiplied()
                 },
                 tiles: BTreeMap::new(),
                 started: false,
@@ -1045,7 +1045,8 @@ mod tests {
         raster.options.clip = true;
         editor.doc.layers.push(raster);
         editor.layer = 1;
-        editor.color = Color32::RED;
+        editor.color = Color32::BLUE;
+        editor.fill_color = Color32::RED;
         editor.studio.prefs.raster_brush = Brush {
             size: 20.,
             ..Brush::default()

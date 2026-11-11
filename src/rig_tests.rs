@@ -838,6 +838,7 @@ fn folder_split_relocation_preserves_rigged_poses_and_source_key_editing() {
         parent: None,
         collapsed: false,
         transform: Default::default(),
+        timeline_slot: None,
         range: None,
         source_shift: 0,
     });

@@ -445,6 +445,7 @@ mod tests {
                 parent,
                 collapsed: false,
                 transform: Default::default(),
+                timeline_slot: None,
                 range: None,
                 source_shift: 0,
             });

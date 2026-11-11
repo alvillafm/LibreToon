@@ -205,6 +205,8 @@ pub struct LayerOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adjustment: Option<SharedVec<crate::post::Effect>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjustment_bands: Option<SharedVec<crate::post::Band>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub light: Option<crate::light::Light>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_receiver: Option<u64>,
@@ -236,6 +238,7 @@ impl Default for LayerOptions {
             animation_track: false,
             raster: false,
             adjustment: None,
+            adjustment_bands: None,
             light: None,
             light_receiver: None,
             height_guide: None,
@@ -299,6 +302,8 @@ pub struct Folder {
     pub name: String,
     pub parent: Option<u64>,
     pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_slot: Option<usize>,
     #[serde(default)]
     pub transform: crate::folder_groups::Transform,
     #[serde(default)]
@@ -951,20 +956,21 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         {
             return Err("Invalid height guide".into());
         }
-        if crate::post::is_adjustment(layer)
-            && (layer
-                .options
-                .adjustment
-                .as_ref()
-                .is_some_and(|effects| !crate::post::valid(effects))
-                || layer
+        if !crate::post::valid_bands(layer)
+            || (crate::post::is_adjustment(layer)
+                && (layer
                     .options
-                    .light
+                    .adjustment
                     .as_ref()
-                    .is_some_and(|light| !light.valid())
-                || layer.options.raster
-                || layer.options.animation_track
-                || layer.frames.iter().any(|frame| !frame.is_empty()))
+                    .is_some_and(|effects| !crate::post::valid(effects))
+                    || layer
+                        .options
+                        .light
+                        .as_ref()
+                        .is_some_and(|light| !light.valid())
+                    || layer.options.raster
+                    || layer.options.animation_track
+                    || layer.frames.iter().any(|frame| !frame.is_empty())))
         {
             return Err("Invalid effect or light layer".into());
         }

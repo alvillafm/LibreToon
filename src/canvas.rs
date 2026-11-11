@@ -610,7 +610,7 @@ impl Editor {
                 _ => None,
             })
         });
-        let picker_click = picker.is_some()
+        let picker_click = (picker.is_some() || self.studio.color_popup_open)
             && press_position.is_some_and(|pos| {
                 area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
             });
@@ -695,14 +695,13 @@ impl Editor {
                 }
             }
         }
-        if let Some((popup, fill)) = picker.filter(|_| picker_click) {
+        if let Some(fill) = picker.filter(|_| picker_click) {
             let _ = self.sample_at(
                 view.world(press_position.unwrap()),
                 3. / view.scale,
                 Some(fill),
             );
             self.studio.color_picker = None;
-            egui::Popup::close_id(&ctx, popup);
         }
         let visual_handled =
             !picker_click && self.visual_canvas_input(ui, area, view, &state.selected);
@@ -1227,8 +1226,9 @@ impl Editor {
                             | Tool::FillBrush
                             | Tool::ShadeBrush
                             | Tool::LightBrush
+                            | Tool::VectorBrush
                     ) {
-                        self.fill_color.to_array()
+                        self.fill_color.to_srgba_unmultiplied()
                     } else {
                         self.color.to_array()
                     },
@@ -3251,6 +3251,8 @@ mod vector_gesture_tests {
     fn all_pointer_samples_in_one_frame_survive_vector_brush_completion() {
         run(|ctx, e| {
             e.tool = Tool::VectorBrush;
+            e.color = Color32::BLUE;
+            e.fill_color = Color32::RED;
             let a = Pos2::new(200., 200.);
             let middle = Pos2::new(350., 380.);
             let b = Pos2::new(500., 200.);
@@ -3271,6 +3273,7 @@ mod vector_gesture_tests {
             let mark = &e.doc.layers[0].frames[0][0];
             assert!(!mark.nodes.is_empty());
             assert!(mark.stroke && mark.fill.is_none());
+            assert_eq!(mark.color, Color32::RED.to_array());
             let bounds = crate::vector::control_bounds(mark);
             assert!(bounds.height() > 130., "{bounds:?}");
         });
@@ -4292,7 +4295,14 @@ mod new_tool_regressions {
 
             e.activate_tool(Tool::Brush);
             let fill = e.fill_color;
-            e.studio.color_picker = Some((egui::Id::unique("stroke-picker-test"), false));
+            let stroke = e.color;
+            e.studio.color_popup_open = true;
+            click(ctx, e, view.screen(Pos2::new(180., 150.)));
+            assert_eq!((e.fill_color, e.color), (fill, stroke));
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+
+            e.studio.color_popup_open = false;
+            e.studio.color_picker = Some(false);
             click(ctx, e, view.screen(Pos2::new(180., 150.)));
             assert_eq!(e.color, Color32::from_rgb(210, 20, 40));
             assert_eq!(e.fill_color, fill);

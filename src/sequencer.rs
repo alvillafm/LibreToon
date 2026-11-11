@@ -100,32 +100,127 @@ impl Default for TimelineViewport {
     }
 }
 
-fn rows(e: &Editor, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DropSide {
+    Above,
+    Inside,
+    Below,
+}
+impl DropSide {
+    fn for_row(rect: Rect, y: f32, folder: bool) -> Self {
+        let fraction = (y - rect.top()) / rect.height();
+        if folder && (0.25..=0.75).contains(&fraction) {
+            Self::Inside
+        } else if fraction < 0.5 {
+            Self::Above
+        } else {
+            Self::Below
+        }
+    }
+}
+
+fn in_folder(doc: &crate::Document, mut parent: Option<u64>, id: u64) -> bool {
+    for _ in 0..doc.extras.folders.len() {
+        let Some(current) = parent else { break };
+        if current == id {
+            return true;
+        }
+        parent = doc
+            .extras
+            .folders
+            .iter()
+            .find(|f| f.id == current)
+            .and_then(|f| f.parent);
+    }
+    false
+}
+
+fn folder_range(doc: &crate::Document, index: usize) -> std::ops::Range<usize> {
+    let folder = &doc.extras.folders[index];
+    let mut indices = doc
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| in_folder(doc, layer.options.folder, folder.id))
+        .map(|(index, _)| index);
+    if let Some(first) = indices.next() {
+        first..indices.last().unwrap_or(first) + 1
+    } else {
+        let slot = folder
+            .timeline_slot
+            .unwrap_or(doc.layers.len())
+            .min(doc.layers.len());
+        slot..slot
+    }
+}
+
+fn rows(e: &Editor, out: &mut Vec<Row>) {
+    let folders = &e.doc.extras.folders;
+    let indices: std::collections::HashMap<_, _> = folders
+        .iter()
+        .enumerate()
+        .map(|(index, folder)| (folder.id, index))
+        .collect();
+    let mut top = vec![None; folders.len()];
+    for (layer_index, layer) in e.doc.layers.iter().enumerate().rev() {
+        let mut parent = layer.options.folder;
+        while let Some(&index) = parent.as_ref().and_then(|id| indices.get(id)) {
+            if top[index].is_some() {
+                break;
+            }
+            top[index] = Some(layer_index + 1);
+            parent = folders[index].parent;
+        }
+    }
+    for (slot, folder) in top.iter_mut().zip(folders.iter()) {
+        if slot.is_none() {
+            *slot = Some(
+                folder
+                    .timeline_slot
+                    .unwrap_or(e.doc.layers.len())
+                    .min(e.doc.layers.len()),
+            );
+        }
+    }
+    append_rows(e, &top, None, 0, out);
+}
+
+fn append_rows(
+    e: &Editor,
+    top: &[Option<usize>],
+    parent: Option<u64>,
+    depth: usize,
+    out: &mut Vec<Row>,
+) {
     if depth > 200 {
         return;
     }
-    for (index, folder) in e
+    let mut children: Vec<_> = e
         .doc
         .extras
         .folders
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.parent == parent)
-    {
-        out.push(Row::Folder(index, depth));
-        if !folder.collapsed {
-            rows(e, Some(folder.id), depth + 1, out);
+        .filter(|(_, folder)| folder.parent == parent)
+        .map(|(index, _)| (top[index].unwrap_or_default(), Row::Folder(index, depth)))
+        .chain(
+            e.doc
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_, layer)| layer.options.folder == parent)
+                .map(|(index, _)| (index + 1, Row::Layer(index, depth))),
+        )
+        .collect();
+    children.sort_by_key(|(slot, _)| std::cmp::Reverse(*slot));
+    for (_, row) in children {
+        out.push(row);
+        if let Row::Folder(index, _) = row {
+            let folder = &e.doc.extras.folders[index];
+            if !folder.collapsed {
+                append_rows(e, top, Some(folder.id), depth + 1, out);
+            }
         }
-    }
-    for (index, _) in e
-        .doc
-        .layers
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, l)| l.options.folder == parent)
-    {
-        out.push(Row::Layer(index, depth));
     }
 }
 
@@ -439,22 +534,46 @@ impl Editor {
         let mut keys = vec![false; count];
         keys[0] = true;
         let number = self.doc.layers.len() + 1;
-        self.doc.layers.push(Layer {
-            name: if raster {
-                format!("{} {number}", tr("Raster layer"))
-            } else {
-                format!("Layer {number}")
+        let slot = self
+            .doc
+            .extras
+            .folders
+            .iter()
+            .position(|folder| Some(folder.id) == self.feature.selected_folder)
+            .map_or(self.doc.layers.len(), |index| {
+                folder_range(&self.doc, index).end
+            });
+        for track in &mut self.doc.extras.media.tracks {
+            if track.slot > slot {
+                track.slot += 1;
+            }
+        }
+        for folder in &mut self.doc.extras.folders {
+            if let Some(position) = &mut folder.timeline_slot
+                && *position > slot
+            {
+                *position += 1;
+            }
+        }
+        self.doc.layers.insert(
+            slot,
+            Layer {
+                name: if raster {
+                    format!("{} {number}", tr("Raster layer"))
+                } else {
+                    format!("Layer {number}")
+                },
+                visible: true,
+                frames: vec![Default::default(); count].into(),
+                options: LayerOptions {
+                    raster,
+                    folder: self.feature.selected_folder,
+                    keys: keys.into(),
+                    ..Default::default()
+                },
             },
-            visible: true,
-            frames: vec![Default::default(); count].into(),
-            options: LayerOptions {
-                raster,
-                folder: self.feature.selected_folder,
-                keys: keys.into(),
-                ..Default::default()
-            },
-        });
-        self.layer = self.doc.layers.len() - 1;
+        );
+        self.layer = slot;
         self.recover();
     }
     fn delete_folder(&mut self) {
@@ -718,6 +837,7 @@ impl Editor {
                                     name: format!("Folder {}", number),
                                     parent: self.feature.selected_folder,
                                     collapsed: false,
+                                    timeline_slot: None,
                                 transform:Default::default(), range:None, source_shift:0,
 });
                                 self.feature.selected_folder = Some(id);
@@ -844,7 +964,7 @@ impl Editor {
                 if !self.doc.extras.rig.is_empty() {
                     all.push(Row::Rigging);
                 }
-                rows(self, None, 0, &mut all);
+                rows(self, &mut all);
                 for (index, track) in self.doc.extras.media.tracks.iter().enumerate().rev() {
                     let slot = track.slot.min(self.doc.layers.len());
                     let at = all.iter().position(|row| matches!(row, Row::Layer(layer, _) if *layer < slot)).unwrap_or(all.len());
@@ -852,7 +972,10 @@ impl Editor {
                 }
                 let mut layer_menu_action = None;
                 let mut delete_rigging=false;
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.feature.frame_drag = None; }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.feature.frame_drag = None;
+                    self.cancel_adjustment_drag();
+                }
                 if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
                 let mut target = None;
                 let mut camera_target = None;
@@ -946,7 +1069,7 @@ impl Editor {
                         if Rect::from_min_size(Pos2::new(label_left, r.top()), Vec2::new(label_w, 24.))
                             .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
                         {
-                            target = Some((false, usize::MAX));
+                            target = Some((false, usize::MAX, DropSide::Above));
                         }
                         ui.set_clip_rect(grid_clip);
                         let scrub = ui.interact(
@@ -1067,7 +1190,8 @@ impl Editor {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         }),
                                     ) {
-                                        target = Some((true, index));
+                                        let y = ui.input(|i| i.pointer.interact_pos().unwrap().y);
+                                        target = Some((true, index, DropSide::for_row(label, y, true)));
                                     }
                                     ui.set_clip_rect(grid_clip);
                                     self.folder_track(ui,index,Rect::from_min_max(Pos2::new(grid_clip.left(),y),Pos2::new(grid_clip.right(),y+row_h)),r.left()+label_w,cell);
@@ -1303,7 +1427,8 @@ impl Editor {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         }),
                                     ) {
-                                        target = Some((false, l));
+                                        let y = ui.input(|i| i.pointer.interact_pos().unwrap().y);
+                                        target = Some((false, l, DropSide::for_row(label, y, false)));
                                     }
                                     ui.set_clip_rect(grid_clip);
                                     let painter = ui.painter().with_clip_rect(grid_clip);
@@ -1360,11 +1485,7 @@ impl Editor {
                                                 self.edit_light_key(l, source, dest);
                                             }
                                         } else {
-                                            painter.rect_filled(band,4.,self.studio.prefs.layer_color(crate::studio::LayerColor::Adjustment).gamma_multiply(if selected { 0.42 } else { 0.24 }));
-                                            if ui.interact(band,ui.scope_id().with(("adjustment-track",l)),Sense::click()).clicked() {
-                                                self.layer = l;
-                                                self.playing = false;
-                                            }
+                                            self.adjustment_track_ui(ui, l, animation_row, cell, count);
                                         }
                                         continue;
                                     }
@@ -2000,11 +2121,17 @@ impl Editor {
                                 {
                                     let y = if pos.y < top + row_h / 2. || matches!(row, Row::Media(..)) { top } else { top + row_h };
                                     painter.line_segment([Pos2::new(label_left, y), Pos2::new(r.right(), y)], Stroke::new(3., crate::themes::accent()));
-                                } else if self.feature.row_drag.is_some() && target.is_some()
+                                } else if self.feature.row_drag.is_some()
+                                    && let Some((_, _, side)) = target
                                     && matches!(row, Row::Layer(..) | Row::Folder(..))
                                 {
-                                    let dest = Rect::from_min_size(Pos2::new(label_left, top), Vec2::new(label_w, row_h));
-                                    timeline_drop_marker(&painter, dest, true);
+                                    if side == DropSide::Inside {
+                                        let dest = Rect::from_min_size(Pos2::new(label_left, top), Vec2::new(label_w, row_h));
+                                        timeline_drop_marker(&painter, dest, true);
+                                    } else {
+                                        let y = if side == DropSide::Above { top } else { top + row_h };
+                                        painter.line_segment([Pos2::new(label_left, y), Pos2::new(r.right(), y)], Stroke::new(3., crate::themes::accent()));
+                                    }
                                 }
                             }
                         }
@@ -2041,6 +2168,7 @@ impl Editor {
                 self.finish_folder_ui(ui.ctx());
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
+                    self.cancel_adjustment_drag();
                     if let Some(drag) = self.feature.frame_drag.take() {
                         if let Some(at) = drag.target { self.move_timeline_frames(drag, at); }
                     }
@@ -2054,7 +2182,7 @@ impl Editor {
                         self.move_camera(source, target);
                     }
                     if let (Some(source), Some(target)) = (self.feature.row_drag.take(), target) {
-                        if source != target {
+                        if source != (target.0, target.1) {
                             self.reorder_row(source, target);
                         }
                     }
@@ -2080,49 +2208,93 @@ impl Editor {
         self.normalize_cameras();
         self.recover();
     }
-    fn reorder_row(&mut self, source: (bool, usize), target: (bool, usize)) {
-        self.feature.layer_selection = Default::default();
-        self.finish_pending_pen();
-        let parent = if target.1 == usize::MAX {
-            None
-        } else if target.0 {
-            Some(self.doc.extras.folders[target.1].id)
+    fn reorder_row(&mut self, source: (bool, usize), target: (bool, usize, DropSide)) {
+        let (target_folder, target_index, side) = target;
+        let (parent, boundary) = if target_index == usize::MAX {
+            (None, self.doc.layers.len())
+        } else if target_folder {
+            let folder = &self.doc.extras.folders[target_index];
+            let range = folder_range(&self.doc, target_index);
+            match side {
+                DropSide::Inside => (Some(folder.id), range.end),
+                DropSide::Above => (folder.parent, range.end),
+                DropSide::Below => (folder.parent, range.start),
+            }
         } else {
-            self.doc.layers[target.1].options.folder
+            (
+                self.doc.layers[target_index].options.folder,
+                target_index + usize::from(side == DropSide::Above),
+            )
         };
-        if source.0 {
-            let id = self.doc.extras.folders[source.1].id;
-            let mut test = parent;
-            for _ in 0..=self.doc.extras.folders.len() {
-                if test == Some(id) {
-                    return;
-                }
-                test = test.and_then(|id| {
-                    self.doc
-                        .extras
-                        .folders
-                        .iter()
-                        .find(|f| f.id == id)
-                        .and_then(|f| f.parent)
-                });
-                if test.is_none() {
-                    break;
-                }
-            }
-            self.checkpoint();
-            self.doc.extras.folders[source.1].parent = parent;
-        } else {
-            self.checkpoint();
-            self.doc.layers[source.1].options.folder = parent;
-            if !target.0 && target.1 != usize::MAX {
-                let layer = self.doc.layers.remove(source.1);
-                let index = target.1.min(self.doc.layers.len());
-                self.doc.layers.insert(index, layer);
-                self.layer = index;
-            } else {
-                self.layer = source.1;
-            }
+        let folder_id = source.0.then(|| self.doc.extras.folders[source.1].id);
+        if folder_id.is_some_and(|id| in_folder(&self.doc, parent, id)) {
+            return;
         }
+
+        let (moved, mut remaining): (Vec<_>, Vec<_>) = (0..self.doc.layers.len()).partition(|&i| {
+            folder_id.map_or(i == source.1, |id| {
+                in_folder(&self.doc, self.doc.layers[i].options.folder, id)
+            })
+        });
+        let slot = remaining.partition_point(|&index| index < boundary);
+        let map_slot = |previous: usize| {
+            let base = remaining.partition_point(|&index| index < previous);
+            base + if previous > boundary { moved.len() } else { 0 }
+        };
+        self.finish_pending_pen();
+        self.checkpoint();
+        self.feature.layer_selection = Default::default();
+        self.feature.frame_selection = None;
+        self.renaming_layer = None;
+        for track in &mut self.doc.extras.media.tracks {
+            track.slot = map_slot(track.slot);
+        }
+        let folder_slots: Vec<_> = self
+            .doc
+            .extras
+            .folders
+            .iter()
+            .map(|folder| {
+                folder.timeline_slot.map(|previous| {
+                    if folder_id.is_some_and(|id| in_folder(&self.doc, folder.parent, id)) {
+                        slot + moved.partition_point(|&index| index < previous)
+                    } else {
+                        map_slot(previous)
+                    }
+                })
+            })
+            .collect();
+        for (folder, position) in self.doc.extras.folders.iter_mut().zip(folder_slots) {
+            folder.timeline_slot = position;
+        }
+        if let Some(id) = folder_id {
+            let folder = &mut self.doc.extras.folders[source.1];
+            folder.parent = parent;
+            folder.timeline_slot = Some(slot);
+            if target_folder && side != DropSide::Inside && target_index != source.1 {
+                let folder = self.doc.extras.folders.remove(source.1);
+                let index = target_index - usize::from(source.1 < target_index);
+                self.doc
+                    .extras
+                    .folders
+                    .insert(index + usize::from(side == DropSide::Below), folder);
+            }
+            self.feature.selected_folder = Some(id);
+        } else {
+            self.doc.layers[source.1].options.folder = parent;
+            self.layer = source.1;
+            self.feature.selected_folder = parent;
+        }
+        remaining.splice(slot..slot, moved);
+        self.layer = remaining
+            .iter()
+            .position(|&index| index == self.layer)
+            .unwrap_or(0);
+        self.doc.layers = remaining
+            .into_iter()
+            .map(|index| self.doc.layers[index].clone())
+            .collect::<Vec<_>>()
+            .into();
         self.recover();
     }
 }
@@ -2550,6 +2722,67 @@ mod viewport_input_tests {
 #[cfg(test)]
 mod layer_selection_tests {
     use super::*;
+
+    #[test]
+    fn folder_label_drop_reorders_nested_layers_as_one_block_and_can_be_undone() {
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        e.doc = crate::fresh_document();
+        let mut layer = e.doc.layers[0].clone();
+        for (name, folder) in [
+            ("Back", None),
+            ("Inside", Some(10)),
+            ("Nested", Some(11)),
+            ("Front", None),
+        ] {
+            layer.name = name.into();
+            layer.options.folder = folder;
+            if name == "Back" {
+                e.doc.layers[0] = layer.clone();
+            } else {
+                e.doc.layers.push(layer.clone());
+            }
+        }
+        for (id, parent) in [(10, None), (11, Some(10)), (12, None)] {
+            e.doc.extras.folders.push(Folder {
+                id,
+                parent,
+                name: id.to_string(),
+                collapsed: false,
+                timeline_slot: None,
+                transform: Default::default(),
+                range: None,
+                source_shift: 0,
+            });
+        }
+        e.recovery = std::env::temp_dir().join(format!("folder-order-{}.json", std::process::id()));
+        e.reorder_row((true, 0), (false, 0, DropSide::Below));
+        assert_eq!(
+            e.doc
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Inside", "Nested", "Back", "Front"]
+        );
+        assert_eq!(e.doc.layers[1].options.folder, Some(11));
+        let mut visible = vec![];
+        rows(&e, &mut visible);
+        assert!(matches!(visible[3], Row::Folder(0, 0)));
+        e.history(false);
+        assert_eq!(e.doc.layers[0].name, "Back");
+        e.reorder_row((true, 2), (false, 0, DropSide::Below));
+        assert_eq!(e.doc.extras.folders[2].timeline_slot, Some(0));
+        let mut visible = vec![];
+        rows(&e, &mut visible);
+        assert!(matches!(visible.last(), Some(Row::Folder(2, 0))));
+        let saved = crate::native_project::encode(&e.doc).unwrap();
+        let reopened = crate::native_project::decode_if_native(&saved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.extras.folders[2].timeline_slot, Some(0));
+    }
 
     #[test]
     fn toggles_individual_layers_and_extends_in_visible_row_order() {

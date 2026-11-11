@@ -341,7 +341,8 @@ impl Editor {
             let cached = ready.then(|| self.references.cache.get(&id).unwrap());
             let busy = self.references.job.is_some();
             let picker = self.studio.color_picker;
-            let eyedropper = self.tool == crate::canvas::Tool::Eyedropper || picker.is_some();
+            let eyedropper = picker.is_some()
+                || (self.tool == crate::canvas::Tool::Eyedropper && !self.studio.color_popup_open);
             let response = egui::Window::new(format!("RefTool · {}", reference.name))
                 .id(egui::Id::unique((
                     "reference",
@@ -441,10 +442,9 @@ impl Editor {
                 self.activate_tool(crate::canvas::Tool::Eyedropper);
             }
             if let Some(color) = sampled {
-                if let Some((popup, fill)) = picker {
+                if let Some(fill) = picker {
                     self.apply_picker_color(color, fill);
                     self.studio.color_picker = None;
-                    egui::Popup::close_id(ctx, popup);
                 } else {
                     self.color = color;
                     self.apply_picker_color(color, true);

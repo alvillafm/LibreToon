@@ -288,6 +288,7 @@ impl Editor {
         self.folder_groups.clear();
         self.vector_trim.clear();
         self.clips.reset_document();
+        self.cancel_adjustment_drag();
         self.rigging.cancel_gesture();
         let entry = if redo {
             self.redo.pop()

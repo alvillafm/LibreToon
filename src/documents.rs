@@ -47,6 +47,7 @@ impl Session {
         e.close_lip_session();
         e.references.reset_document();
         e.clips.reset_document();
+        e.cancel_adjustment_drag();
         e.frame_clipboard.focus = false;
         std::mem::swap(&mut self.rigging, &mut e.rigging);
         std::mem::swap(&mut self.assets, &mut e.assets);

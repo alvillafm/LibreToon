@@ -225,6 +225,7 @@ impl Editor {
                         return None;
                     }
                     self.color = color;
+                    self.fill_color = color;
                     self.stroke_enabled = true;
                     self.active_fill = false;
                     self.width = mark.width;

@@ -1271,6 +1271,7 @@ mod tests {
             name: format!("Folder {id}"),
             parent,
             collapsed: false,
+            timeline_slot: None,
             transform: Default::default(),
             range: None,
             source_shift: 0,

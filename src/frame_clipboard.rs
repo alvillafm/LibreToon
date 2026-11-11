@@ -610,6 +610,7 @@ mod tests {
                 scale: 2.,
                 ..Default::default()
             },
+            timeline_slot: None,
             range: None,
             source_shift: 0,
         };
