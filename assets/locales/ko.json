@@ -1457,5 +1457,20 @@
   "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.",
   "Full quality": "Full quality",
   "Viewport quality": "Viewport quality",
-  "Installer log:": "Installer log:"
+  "Installer log:": "Installer log:",
+  "Clear generated mouth keys": "Clear generated mouth keys",
+  "Move mouth key left": "Move mouth key left",
+  "Move mouth key right": "Move mouth key right",
+  "Shift: move anchor · Ctrl/Cmd+Shift: move pose · Alt: scale · Ctrl/Cmd: stretch": "Shift: move anchor · Ctrl/Cmd+Shift: move pose · Alt: scale · Ctrl/Cmd: stretch",
+  "Layer objects": "Layer objects",
+  "Reset symbol pivot": "Reset symbol pivot",
+  "Stretch / squash": "Stretch / squash",
+  "Move pin anchors before posing them.": "Move pin anchors before posing them.",
+  "Group selected objects": "Group selected objects",
+  "Switch folder": "Switch folder",
+  "Solo folder": "Solo folder",
+  "Show this object": "Show this object",
+  "Delete object folder": "Delete object folder",
+  "Show bone weights": "Show bone weights",
+  "Bind selected symbols": "Bind selected symbols"
 }

@@ -226,6 +226,7 @@ pub struct Studio {
     pub credits_open: bool,
     preference_category: usize,
     pub stage_only: bool,
+    pub(crate) layer_objects_open: bool,
     pub onion_before: usize,
     pub onion_after: usize,
     pub clipboard: Vec<Mark>,
@@ -292,6 +293,7 @@ impl Studio {
             credits_open: false,
             preference_category: 0,
             stage_only: false,
+            layer_objects_open: false,
             onion_before: 1,
             onion_after: 1,
             clipboard: vec![],
@@ -594,6 +596,12 @@ impl Editor {
             {
                 self.studio.clipboard.push(mark.clone());
             }
+        }
+        #[cfg(not(test))]
+        if !self.studio.clipboard.is_empty() {
+            // Replace an older system image when the user copies vector artwork.
+            let _ = arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_text("LibreToon vector selection"));
         }
         if cut {
             let mut state = std::mem::take(&mut self.canvas);

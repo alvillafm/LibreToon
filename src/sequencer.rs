@@ -1366,10 +1366,6 @@ impl Editor {
                                         self.animation_track_ui(ui,l,animation_row,r.left()+label_w,cell);
                                         continue;
                                     }
-                                    let mouth_keys = self.canvas.selected.first().and_then(|&(layer, mark)| {
-                                        if layer != l { return None; }
-                                        self.doc.layers[l].frames.get(self.frame)?.get(mark).map(|mark| mark.style.mouth_keys.clone())
-                                    }).unwrap_or_default();
                                     let layer_color = self.studio.prefs.layer_color(if self.doc.layers[l].options.mannequin.is_some() {
                                         crate::studio::LayerColor::Mannequin
                                     } else if self.doc.layers[l].options.raster {
@@ -1399,7 +1395,9 @@ impl Editor {
                                                 layer_color.gamma_multiply(0.14)
                                             };
                                         painter.rect_filled(rect, 0., color);
-                                        if mouth_keys.binary_search_by_key(&f, |key| key.frame).is_ok() {
+                                        let has_mouth_key = self.doc.layers[l].frames[f].iter()
+                                            .any(|mark| crate::lip::has_mouth_key(mark, f));
+                                        if has_mouth_key {
                                             let p = rect.center_top() + Vec2::Y * 5.;
                                             painter.add(egui::Shape::convex_polygon(
                                                 vec![p - Vec2::Y * 3., p + Vec2::X * 4., p + Vec2::Y * 3., p - Vec2::X * 4.],
@@ -1513,6 +1511,10 @@ impl Editor {
                                                     f + 1
                                                 ));
                                                 ui.separator();
+                                                if has_mouth_key {
+                                                    self.mouth_timeline_menu(ui, l, f);
+                                                    ui.separator();
+                                                }
                                                 if button(ui,Icon::Copy,"Copy frames","Copy frames",false,true).clicked(){
                                                     self.frame_clipboard_context(l,f);self.copy_timeline_frames();ui.close();
                                                 }

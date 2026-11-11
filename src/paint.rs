@@ -256,7 +256,9 @@ pub fn draw(
     selected: bool,
     cache: Option<&mut RenderCache>,
 ) -> bool {
-    draw_prepared(p, mark, view, ghost, selected, cache, false)
+    let thick_primitive =
+        mark.stroke && mark.width > 20. && (mark.rectangle || mark.closed && mark.nodes.is_empty());
+    draw_prepared(p, mark, view, ghost, selected, cache, thick_primitive)
 }
 
 pub(crate) fn draw_composited(p: &egui::Painter, mark: &Mark, view: View, cache: &mut RenderCache) {

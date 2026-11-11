@@ -179,7 +179,11 @@ impl Document {
                 .filter(|f| checked.insert(f.identity()))
                 .flatten()
             {
-                if !mark.width.is_finite()
+                if mark
+                    .style
+                    .symbol_pivot
+                    .is_some_and(|pivot| pivot.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
+                    || !mark.width.is_finite()
                     || mark.width <= 0.0
                     || mark.width > 100.0
                     || !crate::width::validate(&mark.width_profile)

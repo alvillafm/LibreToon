@@ -1457,5 +1457,20 @@
   "Frames fill the grid left to right, then top to bottom. Empty cells are transparent.": "Los fotogramas se colocan de izquierda a derecha y de arriba abajo. Las celdas vacías son transparentes.",
   "Full quality": "Calidad completa",
   "Viewport quality": "Calidad del lienzo",
-  "Installer log:": "Registro del instalador:"
+  "Installer log:": "Registro del instalador:",
+  "Clear generated mouth keys": "Borrar claves de boca generadas",
+  "Move mouth key left": "Mover clave de boca a la izquierda",
+  "Move mouth key right": "Mover clave de boca a la derecha",
+  "Shift: move anchor · Ctrl/Cmd+Shift: move pose · Alt: scale · Ctrl/Cmd: stretch": "Mayús mueve el ancla · Ctrl/Cmd+Mayús mueve la pose · Alt escala · Ctrl/Cmd estira",
+  "Layer objects": "Objetos de la capa",
+  "Reset symbol pivot": "Restablecer pivote del símbolo",
+  "Stretch / squash": "Estirar / comprimir",
+  "Move pin anchors before posing them.": "Mueve las anclas de los pines antes de posarlos.",
+  "Group selected objects": "Agrupar objetos seleccionados",
+  "Switch folder": "Carpeta de intercambio",
+  "Solo folder": "Carpeta solo",
+  "Show this object": "Mostrar este objeto",
+  "Delete object folder": "Eliminar carpeta de objetos",
+  "Show bone weights": "Mostrar pesos del hueso",
+  "Bind selected symbols": "Vincular símbolos seleccionados"
 }

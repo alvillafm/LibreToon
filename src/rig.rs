@@ -72,7 +72,18 @@ pub struct BoneKey {
     pub angle: f32,
     pub translation: [f32; 2],
     pub scale: f32,
+    #[serde(
+        default = "neutral_stretch",
+        skip_serializing_if = "is_neutral_stretch"
+    )]
+    pub stretch: f32,
     pub curve: Curve,
+}
+fn neutral_stretch() -> f32 {
+    1.
+}
+fn is_neutral_stretch(value: &f32) -> bool {
+    *value == neutral_stretch()
 }
 impl Default for BoneKey {
     fn default() -> Self {
@@ -81,6 +92,7 @@ impl Default for BoneKey {
             angle: 0.,
             translation: [0., 0.],
             scale: 1.,
+            stretch: 1.,
             curve: Default::default(),
         }
     }
@@ -247,6 +259,7 @@ pub fn bone_value(bone: &Bone, frame: usize) -> BoneKey {
             t,
         )),
         scale: a.scale * (1. - t) + b.scale * t,
+        stretch: a.stretch * (1. - t) + b.stretch * t,
         curve: a.curve.clone(),
     }
 }
@@ -348,7 +361,7 @@ impl Rig {
             let scale = value.scale * parent.as_ref().map_or(1., |p| p.scale);
             let rotation = angle - rest_angle;
             let (s, c) = rotation.sin_cos();
-            let matrix = [
+            let mut matrix = [
                 c * scale,
                 s * scale,
                 -s * scale,
@@ -356,6 +369,25 @@ impl Rig {
                 start.x - (c * rest.x - s * rest.y) * scale,
                 start.y - (s * rest.x + c * rest.y) * scale,
             ];
+            if !is_neutral_stretch(&value.stretch) {
+                let (sin, cos) = rest_angle.sin_cos();
+                let across = value.stretch.recip();
+                let difference = value.stretch - across;
+                let xx = across + difference * cos * cos;
+                let xy = difference * cos * sin;
+                let yy = across + difference * sin * sin;
+                matrix = multiply(
+                    matrix,
+                    [
+                        xx,
+                        xy,
+                        xy,
+                        yy,
+                        rest.x - xx * rest.x - xy * rest.y,
+                        rest.y - xy * rest.x - yy * rest.y,
+                    ],
+                );
+            }
             let pose = Pose {
                 targets: b.targets.clone(),
                 start,
@@ -558,6 +590,7 @@ impl Rig {
                         || k.translation.iter().any(|v| !finite(*v))
                         || !k.scale.is_finite()
                         || !(0.01..=100.).contains(&k.scale)
+                        || !(0.1..=10.).contains(&k.stretch)
                         || !k.curve.valid()
                 })
             {

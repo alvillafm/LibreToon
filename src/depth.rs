@@ -822,7 +822,9 @@ impl Editor {
         result
     }
     pub(crate) fn depth_hit(&self, layer: usize, mark: &Mark, point: Pos2, tolerance: f32) -> bool {
-        if mark.style.raster_tile {
+        if mark.style.raster_tile
+            || !crate::features::object_visible(&self.doc.layers[layer], mark, self.frame)
+        {
             return false;
         }
         crate::folder_groups::layer_active(&self.doc, &self.doc.layers[layer], self.frame)

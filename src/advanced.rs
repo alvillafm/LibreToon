@@ -427,6 +427,26 @@ impl Editor {
                 .instance
                 .clone()
             {
+                if self.doc.layers[l].frames[self.frame][m]
+                    .style
+                    .symbol_pivot
+                    .is_some()
+                    && design::button(
+                        ui,
+                        Icon::Undo,
+                        "Reset symbol pivot",
+                        "",
+                        false,
+                        !self.doc.layers[l].options.locked,
+                    )
+                    .clicked()
+                {
+                    let selection = self.canvas.selected.clone();
+                    self.checkpoint();
+                    self.doc.layers[l].frames[self.frame][m].style.symbol_pivot = None;
+                    self.canvas.selected = selection;
+                    self.recover();
+                }
                 if self.lip_instance_properties(ui, l, m, instance.symbol) {
                     return;
                 }

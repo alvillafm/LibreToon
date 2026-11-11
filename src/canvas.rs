@@ -256,6 +256,24 @@ impl Canvas {
         self.pan = Vec2::ZERO;
         self.angle = 0.;
     }
+    fn transform_pivot(&self, editor: &Editor, bounds: SelectionBox) -> Pos2 {
+        self.pivot
+            .or_else(|| {
+                let &[(layer, index)] = self.selected.as_slice() else {
+                    return None;
+                };
+                let marks = crate::animation::marks(&editor.doc.layers[layer], editor.frame);
+                let mark = marks.get(index)?;
+                let instance = mark.style.instance.as_ref()?;
+                let local = crate::vector::pos(mark.style.symbol_pivot?);
+                Some(editor.depth_point(
+                    crate::rig::point(instance.matrix, local),
+                    layer,
+                    editor.layer,
+                ))
+            })
+            .unwrap_or_else(|| bounds.center())
+    }
     fn bounds(&self, e: &Editor) -> Option<SelectionBox> {
         let mut r = Rect::NOTHING;
         let mut evaluated = std::collections::HashMap::new();
@@ -1077,7 +1095,9 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                self.begin_pen(&mut state, world, view);
+                if state.pen.is_some() || !self.grab_selected_node(&mut state, world, view) {
+                    self.begin_pen(&mut state, world, view);
+                }
             } else if !self.playing
                 && tool == Tool::Bucket
                 && self.doc.layers[self.layer].visible
@@ -1178,7 +1198,7 @@ impl Editor {
                 let force_marquee = command && tool == Tool::Select;
                 let mut op = None;
                 if let Some(bounds) = state.bounds(self).filter(|_| !force_marquee) {
-                    let pivot = state.pivot.unwrap_or(bounds.center());
+                    let pivot = state.transform_pivot(self, bounds);
                     state.pivot = Some(pivot);
                     if tool == Tool::Transform {
                         if screen.distance(view.screen(pivot)) < 10. {
@@ -1237,46 +1257,60 @@ impl Editor {
                     }
                     if let Some(mut id) = found {
                         if tool == Tool::Object {
-                            self.select_connected_object(&mut state, id, shift);
-                        }
-                        if tool == Tool::Select
-                            && !state.selected.contains(&id)
-                            && self.doc.layers[id.0].frames[self.frame][id.1]
-                                .style
-                                .instance
-                                .is_none()
-                            && self.doc.layers[id.0].frames[self.frame][id.1]
-                                .style
-                                .media_image
-                                .is_none()
-                        {
-                            let wants_stroke = stroke_hit(
-                                &self.doc.layers[id.0].frames[self.frame][id.1],
-                                world,
-                                6. / view.scale,
-                            );
-                            id = self.separate_component(&mut state, id, wants_stroke);
-                            if wants_stroke {
-                                id = self.split_clicked_crossing(&mut state, id, world);
+                            if shift && state.selected.contains(&id) {
+                                let mut connected = Canvas::default();
+                                self.select_connected_object(&mut connected, id, false);
+                                state
+                                    .selected
+                                    .retain(|item| !connected.selected.contains(item));
                             } else {
-                                id = self.split_fill_face(&mut state, id, world);
+                                self.select_connected_object(&mut state, id, shift);
+                                self.layer = id.0;
+                                if !shift {
+                                    op = Some(Operation::Move);
+                                }
                             }
-                        }
-                        if shift && state.selected.contains(&id) {
-                            state.selected.retain(|x| *x != id);
-                            state.partial.remove(&id);
-                            state.pivot = state.bounds(self).map(|b| b.center());
+                            state.pivot = None;
                         } else {
-                            if !shift && !state.selected.contains(&id) {
-                                state.selected.clear();
-                                state.partial.clear();
+                            if tool == Tool::Select
+                                && !state.selected.contains(&id)
+                                && self.doc.layers[id.0].frames[self.frame][id.1]
+                                    .style
+                                    .instance
+                                    .is_none()
+                                && self.doc.layers[id.0].frames[self.frame][id.1]
+                                    .style
+                                    .media_image
+                                    .is_none()
+                            {
+                                let wants_stroke = stroke_hit(
+                                    &self.doc.layers[id.0].frames[self.frame][id.1],
+                                    world,
+                                    6. / view.scale,
+                                );
+                                id = self.separate_component(&mut state, id, wants_stroke);
+                                if wants_stroke {
+                                    id = self.split_clicked_crossing(&mut state, id, world);
+                                } else {
+                                    id = self.split_fill_face(&mut state, id, world);
+                                }
                             }
-                            if !state.selected.contains(&id) {
-                                state.selected.push(id);
+                            if shift && state.selected.contains(&id) {
+                                state.selected.retain(|x| *x != id);
+                                state.partial.remove(&id);
+                                state.pivot = state.bounds(self).map(|b| b.center());
+                            } else {
+                                if !shift && !state.selected.contains(&id) {
+                                    state.selected.clear();
+                                    state.partial.clear();
+                                }
+                                if !state.selected.contains(&id) {
+                                    state.selected.push(id);
+                                }
+                                self.layer = id.0;
+                                state.pivot = None;
+                                op = Some(Operation::Move);
                             }
-                            self.layer = id.0;
-                            state.pivot = state.bounds(self).map(|b| b.center());
-                            op = Some(Operation::Move);
                         }
                     } else {
                         if !shift {
@@ -1291,7 +1325,7 @@ impl Editor {
                 }
                 if let (Some(operation), Some(bounds)) = (op, state.bounds(self)) {
                     self.prepare_snapping(&state.selected);
-                    let pivot = state.pivot.unwrap_or(bounds.center());
+                    let pivot = state.transform_pivot(self, bounds);
                     let originals = state
                         .selected
                         .iter()
@@ -1770,6 +1804,22 @@ impl Editor {
                         }
                     }
                     if released || !primary_down {
+                        if d.changed
+                            && matches!(d.operation, Operation::Pivot)
+                            && let [((layer, index), original)] = d.originals.as_slice()
+                            && let Some(instance) = &original.style.instance
+                            && let Some(inverse) = crate::rig::inverse(instance.matrix)
+                            && let Some(pivot) = state.pivot
+                        {
+                            let pivot = self.depth_point(pivot, self.layer, *layer);
+                            let local = crate::rig::point(inverse, pivot);
+                            if local.is_finite() {
+                                self.checkpoint();
+                                self.doc.layers[*layer].frames[self.frame][*index]
+                                    .style
+                                    .symbol_pivot = Some(crate::vector::xy(local));
+                            }
+                        }
                         if d.changed {
                             self.recover();
                         }
@@ -1996,7 +2046,7 @@ impl Editor {
                 paint_width_handles(&painter, &self.doc.layers[l].frames[self.frame][m], view);
             }
         }
-        if matches!(tool, Tool::Node | Tool::Select) {
+        if matches!(tool, Tool::Node | Tool::Select) || tool == Tool::Pen && state.pen.is_none() {
             for &(l, m) in &state.selected {
                 let mark = &self.doc.layers[l].frames[self.frame][m];
                 if tool == Tool::Select && (!mark.stroke || mark.nodes.is_empty()) {
@@ -2135,7 +2185,7 @@ impl Editor {
             painter.line_segment([top, rot], Stroke::new(1., crate::themes::accent()));
             painter.circle_filled(rot, 5., Color32::from_rgb(32, 36, 43));
             painter.circle_stroke(rot, 5., Stroke::new(1.5, crate::themes::accent()));
-            let pivot = view.screen(state.pivot.unwrap_or(bounds.center()));
+            let pivot = view.screen(state.transform_pivot(self, bounds));
             painter.circle_filled(pivot, 5., Color32::from_gray(28));
             painter.circle_stroke(pivot, 5., Stroke::new(1.5, crate::themes::accent()));
             painter.line_segment(
@@ -2766,7 +2816,7 @@ impl Editor {
         }
         self.status="Pluma: clic crea esquina · arrastrar crea curva · primer nodo cierra · Enter termina · Esc cancela".into();
     }
-    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+    fn grab_selected_node(&self, state: &mut Canvas, world: Pos2, view: View) -> bool {
         let mut found = None;
         let mut best = 8.;
         for &(l, m) in &state.selected {
@@ -2800,6 +2850,12 @@ impl Editor {
                 original: self.doc.layers[id.0].frames[self.frame][id.1].clone(),
                 changed: false,
             }));
+            return true;
+        }
+        false
+    }
+    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+        if self.grab_selected_node(state, world, view) {
             return;
         }
         'layers: for (l, layer) in self
@@ -3553,6 +3609,49 @@ mod new_tool_regressions {
         tick(ctx, e, vec![egui::Event::PointerMoved(p), button(p, true)]);
         tick(ctx, e, vec![button(p, false)]);
     }
+    #[test]
+    fn symbol_pivot_survives_deselection_and_serialization_without_moving_art() {
+        run(|ctx, editor| {
+            editor.doc.layers[0].frames[0].push(rect(
+                [200., 160.],
+                [360., 320.],
+                [20, 60, 90, 255],
+            ));
+            editor.canvas.selected = vec![(0, 0)];
+            editor.convert_symbol();
+            editor.tool = Tool::Transform;
+            let before = editor.doc.layers[0].frames[0][0]
+                .style
+                .instance
+                .as_ref()
+                .unwrap()
+                .matrix;
+            let v = view(editor);
+            let bounds = editor.canvas.bounds(editor).unwrap();
+            let from = v.screen(bounds.center());
+            let to = from + Vec2::new(35., 15.);
+            tick(
+                ctx,
+                editor,
+                vec![egui::Event::PointerMoved(from), button(from, true)],
+            );
+            tick(ctx, editor, vec![egui::Event::PointerMoved(to)]);
+            tick(ctx, editor, vec![button(to, false)]);
+            let mark = &editor.doc.layers[0].frames[0][0];
+            assert_eq!(mark.style.instance.as_ref().unwrap().matrix, before);
+            assert!(mark.style.symbol_pivot.is_some());
+            editor.doc = serde_json::from_slice(&serde_json::to_vec(&editor.doc).unwrap()).unwrap();
+            editor.canvas.clear_selection();
+            editor.canvas.selected.push((0, 0));
+            let bounds = editor.canvas.bounds(editor).unwrap();
+            assert!(
+                v.screen(editor.canvas.transform_pivot(editor, bounds))
+                    .distance(to)
+                    < 0.01
+            );
+        });
+    }
+
     #[test]
     fn camera_drag_moves_art_with_pointer_and_records_local_key() {
         run(|ctx, e| {

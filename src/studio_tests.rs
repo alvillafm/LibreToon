@@ -24,6 +24,60 @@ fn ink() -> Mark {
 }
 
 #[test]
+fn switch_object_folder_uses_the_keyed_child_and_survives_save() {
+    use crate::features::{ObjectFolder, ObjectFolderMode};
+    let mut editor = editor();
+    let layer = &mut editor.doc.layers[0];
+    let mut first = ink();
+    first.style.object_folder = Some([1, 10]);
+    let mut second = ink();
+    second.style.object_folder = Some([1, 11]);
+    second.fill = Some([200, 0, 0, 255]);
+    layer.frames[0] = vec![first, second].into();
+    layer.frames[1] = layer.frames[0].clone();
+    layer.options.object_folders.push(ObjectFolder {
+        id: 1,
+        name: "Mouths".into(),
+        mode: ObjectFolderMode::Switch,
+        choices: vec![(0, 10), (1, 11)].into(),
+    });
+    let restored: crate::Document =
+        serde_json::from_slice(&serde_json::to_vec(&editor.doc).unwrap()).unwrap();
+    for (frame, object) in [(0, 0), (1, 1)] {
+        let marks = crate::features::resolve(&restored, frame, false);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].1, object);
+    }
+}
+
+#[test]
+fn cut_and_paste_vector_and_symbol_to_another_layer() {
+    let mut editor = editor();
+    editor.doc.layers[0].frames[0].push(ink());
+    editor.canvas.selected = vec![(0, 0)];
+    editor.convert_symbol();
+    editor.doc.layers[0].frames[0].push(ink());
+    let mut target = editor.doc.layers[0].clone();
+    for cel in &mut target.frames {
+        cel.clear();
+    }
+    editor.doc.layers.push(target);
+    editor.canvas.selected = vec![(0, 0), (0, 1)];
+    editor.copy_selection(false);
+    editor.layer = 1;
+    editor.paste_selection();
+    assert_eq!(editor.doc.layers[0].frames[0].len(), 2);
+    assert_eq!(editor.doc.layers[1].frames[0].len(), 2);
+    assert!(editor.doc.layers[1].frames[0][0].style.instance.is_some());
+    editor.canvas.selected = vec![(0, 0), (0, 1)];
+    editor.copy_selection(true);
+    editor.layer = 1;
+    editor.paste_selection();
+    assert!(editor.doc.layers[0].frames[0].is_empty());
+    assert_eq!(editor.doc.layers[1].frames[0].len(), 4);
+}
+
+#[test]
 fn document_switch_preserves_art_history_view_and_symbol_context() {
     let mut e = editor();
     e.add_document(crate::fresh_document(), None);

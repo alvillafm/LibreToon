@@ -134,6 +134,16 @@ pub fn valid_routes(routes: &[Route]) -> bool {
         })
 }
 
+pub(crate) fn has_mouth_key(mark: &crate::Mark, frame: usize) -> bool {
+    let contains = |keys: &[Key]| keys.binary_search_by_key(&frame, |key| key.frame).is_ok();
+    contains(&mark.style.mouth_keys)
+        || mark
+            .style
+            .mouth_routes
+            .iter()
+            .any(|route| contains(&route.keys))
+}
+
 pub(crate) struct RouteScope<'a> {
     routes: &'a [Route],
     frame: usize,
@@ -878,6 +888,7 @@ impl Editor {
             .mouth_keys
             .binary_search_by_key(&self.frame, |k| k.frame)
             .is_ok();
+        let has_generated = mark.style.mouth_keys.iter().any(|key| !key.manual);
         let unlocked = !self.doc.layers[l].options.locked;
         design::category(ui, "LIPSYNC");
         if design::button(ui, Icon::Node, "Editar símbolo", "", false, true).clicked() {
@@ -942,6 +953,18 @@ impl Editor {
                     });
                 }
             });
+            if design::button(
+                ui,
+                Icon::Trash,
+                "Clear generated mouth keys",
+                "",
+                false,
+                has_generated,
+            )
+            .clicked()
+            {
+                self.change_mouth_keys(l, m, self.frame, |keys| keys.retain(|key| key.manual));
+            }
             let audio = self.doc.extras.media.dialogue_clips();
             design::category(ui, "AUTOMATED SYNC");
             ui.small(tr(
@@ -976,6 +999,139 @@ impl Editor {
             }
         });
         true
+    }
+
+    pub(crate) fn mouth_timeline_menu(&mut self, ui: &mut egui::Ui, layer: usize, frame: usize) {
+        if self.doc.layers[layer].options.locked {
+            return;
+        }
+        let mut channels = Vec::new();
+        for (index, mark) in self.doc.layers[layer].frames[frame].iter().enumerate() {
+            let Some(instance) = &mark.style.instance else {
+                continue;
+            };
+            let name = self
+                .doc
+                .extras
+                .symbols
+                .iter()
+                .find(|symbol| symbol.id == instance.symbol)
+                .map_or("Symbol", |symbol| symbol.name.as_str());
+            let mut targets = Vec::new();
+            let root = Slot {
+                layer,
+                mark: index,
+                symbol: instance.symbol,
+                track: mark.style.track,
+            };
+            collect_targets(
+                &self.doc,
+                root,
+                instance,
+                &mut Vec::new(),
+                name,
+                frame,
+                &mut targets,
+                &mut 256,
+            );
+            for (channel, path, keys) in std::iter::once((0, &[][..], &mark.style.mouth_keys))
+                .chain(
+                    mark.style
+                        .mouth_routes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, route)| (i + 1, route.path.as_slice(), &route.keys)),
+                )
+            {
+                if let Ok(at) = keys.binary_search_by_key(&frame, |key| key.frame) {
+                    let poses = targets
+                        .iter()
+                        .find(|target| target.path == path)
+                        .map(|target| target.poses.clone());
+                    channels.push((
+                        index,
+                        channel,
+                        name.to_owned(),
+                        path.to_vec(),
+                        keys.clone(),
+                        keys[at].pose,
+                        poses,
+                    ));
+                }
+            }
+        }
+        for (index, channel, name, path, keys, pose, poses) in channels {
+            let label = format!("{} · {} · {}", tr("Lip Sync"), name, channel + 1);
+            ui.menu_button(label, |ui| {
+                if let Some(poses) = poses {
+                    ui.menu_button(tr("Set mouth pose"), |ui| {
+                        for (choice, drawing) in poses.iter().enumerate() {
+                            if design::button(
+                                ui,
+                                Icon::Mouth,
+                                &drawing.name,
+                                "",
+                                choice == pose,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.change_mouth_channel(layer, index, frame, &path, |keys| {
+                                    keys.retain(|key| key.frame != frame);
+                                    keys.push(Key {
+                                        frame,
+                                        pose: choice,
+                                        manual: true,
+                                    });
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                for (icon, label, target) in [
+                    (Icon::Previous, "Move mouth key left", frame.checked_sub(1)),
+                    (
+                        Icon::Next,
+                        "Move mouth key right",
+                        (frame + 1 < self.doc.layers[layer].frames.len()).then_some(frame + 1),
+                    ),
+                    (Icon::Trash, "Delete mouth key", None),
+                ] {
+                    let delete = label == "Delete mouth key";
+                    let enabled =
+                        delete || target.is_some_and(|to| !keys.iter().any(|key| key.frame == to));
+                    if design::button(ui, icon, label, "", false, enabled).clicked() {
+                        self.change_mouth_channel(layer, index, frame, &path, |keys| {
+                            keys.retain(|key| key.frame != frame);
+                            if let Some(to) = target {
+                                keys.push(Key {
+                                    frame: to,
+                                    pose,
+                                    manual: true,
+                                });
+                            }
+                        });
+                        ui.close();
+                    }
+                }
+                if design::button(
+                    ui,
+                    Icon::Trash,
+                    "Clear generated mouth keys",
+                    "",
+                    false,
+                    keys.iter().any(|key| !key.manual),
+                )
+                .clicked()
+                {
+                    self.change_mouth_channel(layer, index, frame, &path, |keys| {
+                        keys.retain(|key| key.manual)
+                    });
+                    ui.close();
+                }
+            });
+        }
     }
 
     fn change_mouth_keys(

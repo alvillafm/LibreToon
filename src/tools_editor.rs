@@ -534,6 +534,11 @@ impl Editor {
                 .clone();
             for j in 0..marks.len() {
                 if visited[j]
+                    || !crate::features::object_visible(
+                        &self.doc.layers[seed.0],
+                        &marks[j],
+                        self.frame,
+                    )
                     || !bounds.intersects(
                         crate::vector::control_bounds(&marks[j]).expand(marks[j].width * 2. + 0.1),
                     )

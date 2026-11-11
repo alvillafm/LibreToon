@@ -31,6 +31,198 @@ fn file_submenu(ui: &mut egui::Ui, icon: Icon, label: &str, content: impl FnOnce
 }
 
 impl Editor {
+    fn layer_objects_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::features::ObjectFolderMode;
+        let layer = &self.doc.layers[self.layer];
+        let marks = &layer.frames[self.frame];
+        let editable = layer.visible && !layer.options.locked && !layer.options.raster;
+        let selection: Vec<_> = self
+            .canvas
+            .selected
+            .iter()
+            .filter_map(|&(index, mark)| {
+                (index == self.layer && marks.get(mark).is_some_and(|mark| !mark.style.raster_tile))
+                    .then_some(mark)
+            })
+            .collect();
+        crate::design::category(ui, "Layer objects");
+        ui.label(&layer.name);
+        let mut create = None;
+        ui.add_enabled_ui(
+            editable && !selection.is_empty() && layer.options.object_folders.len() < 200,
+            |ui| {
+                ui.menu_button(crate::i18n::tr("Group selected objects"), |ui| {
+                    for (mode, label) in [
+                        (ObjectFolderMode::Normal, "Folder"),
+                        (ObjectFolderMode::Switch, "Switch folder"),
+                        (ObjectFolderMode::Solo, "Solo folder"),
+                    ] {
+                        if button(ui, Icon::FolderPlus, label, "", false, true).clicked() {
+                            create = Some((mode, crate::i18n::tr(label).to_owned()));
+                            ui.close();
+                        }
+                    }
+                });
+            },
+        );
+        let mut selected = None;
+        let mut choose = None;
+        let mut remove = None;
+        let label = |index: usize, mark: &crate::Mark| {
+            let (icon, name) = if let Some(instance) = &mark.style.instance {
+                (
+                    Icon::Symbol,
+                    self.doc
+                        .extras
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.id == instance.symbol)
+                        .map_or(crate::i18n::tr("Símbolo"), |symbol| symbol.name.as_str()),
+                )
+            } else {
+                (Icon::Object, crate::i18n::tr("Artwork"))
+            };
+            (icon, format!("{name} · {}", index + 1))
+        };
+        let folders = &layer.options.object_folders;
+        let mut rows_by_folder = std::collections::HashMap::<u64, Vec<usize>>::new();
+        let mut ungrouped = Vec::new();
+        let folder_ids: std::collections::HashSet<_> =
+            folders.iter().map(|folder| folder.id).collect();
+        for (index, mark) in marks
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, mark)| !mark.style.raster_tile)
+        {
+            if let Some([id, _]) = mark.style.object_folder
+                && folder_ids.contains(&id)
+            {
+                rows_by_folder.entry(id).or_default().push(index);
+            } else {
+                ungrouped.push(index);
+            }
+        }
+        let mut rows = Vec::with_capacity(folders.len() + marks.len());
+        for folder in folders {
+            rows.push((Some(folder), None));
+            if let Some(children) = rows_by_folder.get(&folder.id) {
+                rows.extend(children.iter().map(|&index| (Some(folder), Some(index))));
+            }
+        }
+        rows.extend(ungrouped.into_iter().map(|index| (None, Some(index))));
+        egui::ScrollArea::vertical().show_rows(ui, 30., rows.len(), |ui, visible| {
+            for row in visible {
+                let (folder, index) = rows[row];
+                ui.push_id(row, |ui| {
+                    ui.horizontal(|ui| {
+                        if let Some(index) = index {
+                            let mark = &marks[index];
+                            if let Some(folder) = folder {
+                                ui.add_space(12.);
+                                if folder.mode != ObjectFolderMode::Normal
+                                    && let Some([id, object]) = mark.style.object_folder
+                                    && button(
+                                        ui,
+                                        Icon::Eye,
+                                        "",
+                                        "Show this object",
+                                        folder.choice(self.frame) == Some(object),
+                                        editable,
+                                    )
+                                    .clicked()
+                                {
+                                    choose = Some((id, object));
+                                }
+                            }
+                            let (icon, name) = label(index, mark);
+                            if button(ui, icon, &name, "", selection.contains(&index), editable)
+                                .clicked()
+                            {
+                                selected = Some(index);
+                            }
+                        } else if let Some(folder) = folder {
+                            if button(ui, Icon::Trash, "", "Delete object folder", false, editable)
+                                .clicked()
+                            {
+                                remove = Some(folder.id);
+                            }
+                            ui.label(&folder.name);
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(index) = selected {
+            if ui.input(|input| input.modifiers.command) {
+                let id = (self.layer, index);
+                if self.canvas.selected.contains(&id) {
+                    self.canvas.selected.retain(|&item| item != id);
+                } else {
+                    self.canvas.selected.push(id);
+                }
+                self.canvas.pivot = None;
+            } else {
+                self.canvas.clear_selection();
+                self.canvas.selected.push((self.layer, index));
+            }
+            self.frame_clipboard.focus = false;
+        }
+        if create.is_some() || choose.is_some() || remove.is_some() {
+            let selected = self.canvas.selected.clone();
+            self.checkpoint();
+            let layer = &mut self.doc.layers[self.layer];
+            if let Some((mode, name)) = create {
+                let id = crate::features::id();
+                let mut first = None;
+                for index in selection {
+                    let object = crate::features::id();
+                    first.get_or_insert(object);
+                    layer.frames[self.frame][index].style.object_folder = Some([id, object]);
+                }
+                let choices = first
+                    .into_iter()
+                    .map(|object| (self.frame, object))
+                    .collect();
+                let number = layer.options.object_folders.len() + 1;
+                layer
+                    .options
+                    .object_folders
+                    .push(crate::features::ObjectFolder {
+                        id,
+                        name: format!("{name} {number}"),
+                        mode,
+                        choices,
+                    });
+            } else if let Some((id, object)) = choose
+                && let Some(folder) = layer
+                    .options
+                    .object_folders
+                    .iter_mut()
+                    .find(|folder| folder.id == id)
+            {
+                if folder.mode == ObjectFolderMode::Solo {
+                    folder.choices = vec![(0, object)].into();
+                } else {
+                    match folder
+                        .choices
+                        .binary_search_by_key(&self.frame, |key| key.0)
+                    {
+                        Ok(index) => folder.choices[index].1 = object,
+                        Err(index) => folder.choices.insert(index, (self.frame, object)),
+                    }
+                }
+            } else if let Some(id) = remove {
+                layer
+                    .options
+                    .object_folders
+                    .retain(|folder| folder.id != id);
+            }
+            self.canvas.selected = selected;
+            self.recover();
+        }
+    }
+
     pub fn workspace(&mut self, ui: &mut egui::Ui) {
         self.animation.thumbnail_cache.begin_frame();
         let ctx = ui.ctx().clone();
@@ -496,9 +688,27 @@ impl Editor {
                             .color(crate::themes::muted()),
                     );
                     ui.separator();
+                    if button(
+                        ui,
+                        Icon::Layers,
+                        "",
+                        "Layer objects",
+                        self.studio.layer_objects_open,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.studio.layer_objects_open = !self.studio.layer_objects_open;
+                    }
                     self.color_swatches(ui);
                 });
             });
+        if self.studio.layer_objects_open {
+            egui::Panel::left("layer-objects")
+                .default_size(200.)
+                .min_size(140.)
+                .show(ui, |ui| self.layer_objects_ui(ui));
+        }
         egui::Panel::right("properties")
             .default_size(370.)
             .min_size(245.)

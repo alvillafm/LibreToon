@@ -128,6 +128,10 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_pivot: Option<[f32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_folder: Option<[u64; 2]>,
     #[serde(skip_serializing_if = "SharedVec::is_empty")]
     pub mouth_keys: SharedVec<crate::lip::Key>,
     #[serde(skip_serializing_if = "SharedVec::is_empty")]
@@ -158,6 +162,38 @@ pub struct MarkStyle {
     pub end_cap: Cap,
     pub instance: Option<Instance>,
 }
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub enum ObjectFolderMode {
+    #[default]
+    Normal,
+    Switch,
+    Solo,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectFolder {
+    pub id: u64,
+    pub name: String,
+    pub mode: ObjectFolderMode,
+    pub choices: SharedVec<(usize, u64)>,
+}
+
+impl ObjectFolder {
+    pub fn choice(&self, frame: usize) -> Option<u64> {
+        match self.mode {
+            ObjectFolderMode::Normal => None,
+            ObjectFolderMode::Solo => self.choices.last().map(|choice| choice.1),
+            ObjectFolderMode::Switch => self
+                .choices
+                .iter()
+                .rev()
+                .find(|choice| choice.0 <= frame)
+                .or_else(|| self.choices.first())
+                .map(|choice| choice.1),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
@@ -188,6 +224,8 @@ pub struct LayerOptions {
     pub masked_by: Option<u64>,
     pub folder: Option<u64>,
     pub keys: SharedVec<bool>,
+    #[serde(skip_serializing_if = "SharedVec::is_empty")]
+    pub object_folders: SharedVec<ObjectFolder>,
 }
 impl Default for LayerOptions {
     fn default() -> Self {
@@ -211,9 +249,23 @@ impl Default for LayerOptions {
             masked_by: None,
             folder: None,
             keys: Default::default(),
+            object_folders: Default::default(),
         }
     }
 }
+pub(crate) fn object_visible(layer: &Layer, mark: &Mark, frame: usize) -> bool {
+    let Some([folder, object]) = mark.style.object_folder else {
+        return true;
+    };
+    layer
+        .options
+        .object_folders
+        .iter()
+        .find(|item| item.id == folder)
+        .and_then(|item| item.choice(frame))
+        .is_none_or(|choice| choice == object)
+}
+
 pub fn default_style(style: &MarkStyle) -> bool {
     *style == MarkStyle::default()
 }
@@ -644,6 +696,9 @@ fn resolve_internal(
                     for mark in
                         crate::animation::marks(source, frame.min(source.frames.len() - 1)).iter()
                     {
+                        if !object_visible(source, mark, frame) {
+                            continue;
+                        }
                         expand(
                             doc, mark, frame, rig_frame, depth, &mut marks, false, clock, &poses,
                             None, false, 0,
@@ -681,6 +736,9 @@ fn resolve_internal(
             .iter()
             .enumerate()
         {
+            if !object_visible(layer, mark, frame) {
+                continue;
+            }
             let mut expanded = vec![];
             expand(
                 doc,
@@ -810,7 +868,8 @@ pub fn baked(doc: &Document) -> Document {
         && doc.extras.symbols.is_empty()
         && doc.extras.cameras.is_empty()
         && doc.layers.iter().all(|l| {
-            l.options.composition == crate::folder_groups::LayerGroup::default()
+            l.options.object_folders.is_empty()
+                && l.options.composition == crate::folder_groups::LayerGroup::default()
                 && l.options.tweens.is_empty()
                 && l.options.tweens.is_empty()
                 && l.options.mannequin.is_none()
@@ -1061,6 +1120,22 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
     fn layers(layers: &[Layer], symbols: &[Symbol]) -> Result<(), String> {
         let mut checked = std::collections::HashSet::new();
         for layer in layers {
+            let mut folder_ids = std::collections::HashSet::new();
+            if layer.options.object_folders.len() > 200
+                || layer.options.object_folders.iter().any(|folder| {
+                    folder.id == 0
+                        || !folder_ids.insert(folder.id)
+                        || folder.name.len() > 256
+                        || folder.choices.len() > 10000
+                        || folder
+                            .choices
+                            .iter()
+                            .any(|&(frame, object)| frame >= 10000 || object == 0)
+                        || folder.choices.windows(2).any(|keys| keys[0].0 >= keys[1].0)
+                })
+            {
+                return Err("Invalid object folders".into());
+            }
             if !layer.options.composition.valid() {
                 return Err("Invalid layer composition".into());
             }
