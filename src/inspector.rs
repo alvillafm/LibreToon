@@ -273,6 +273,19 @@ impl Editor {
                 self.light_properties(ui);
                 return;
             }
+            if !self.playing
+                && !self.doc.layers[self.layer].options.locked
+                && self
+                    .feature
+                    .frame_selection
+                    .is_some_and(|(layer, _, frame)| (layer, frame) == (self.layer, self.frame))
+                && self.doc.layers[self.layer].frames[self.frame]
+                    .iter()
+                    .any(|mark| crate::lip::has_mouth_key(mark, self.frame))
+            {
+                design::category(ui, "LIPSYNC");
+                self.mouth_timeline_menu(ui, self.layer, self.frame, true);
+            }
             self.lip_pose_properties(ui);
             self.height_guide_properties(ui);
             if self.doc.layers[self.layer].options.light_mask {

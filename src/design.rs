@@ -9,6 +9,7 @@ pub enum Icon {
     Fx,
     Bulb,
     Mouth,
+    CommandHelper,
     Minus,
     Pin,
     Tag,
@@ -1004,6 +1005,20 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             ] {
                 circle(x, y, 1.5);
             }
+        }
+        Icon::CommandHelper => {
+            rect(1., 4., 18., 12.);
+            line((4., 8.), (8., 8.));
+            line((4., 11.), (8., 11.));
+            path(&[
+                (11., 8.),
+                (12., 6.5),
+                (15., 6.5),
+                (16., 8.),
+                (14., 10.),
+                (14., 11.),
+            ]);
+            line((14., 13.), (14.1, 13.));
         }
         Icon::Info => {
             circle(10., 10., 8.);

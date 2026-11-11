@@ -1001,7 +1001,13 @@ impl Editor {
         true
     }
 
-    pub(crate) fn mouth_timeline_menu(&mut self, ui: &mut egui::Ui, layer: usize, frame: usize) {
+    pub(crate) fn mouth_timeline_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        layer: usize,
+        frame: usize,
+        inspector: bool,
+    ) {
         if self.doc.layers[layer].options.locked {
             return;
         }
@@ -1062,9 +1068,9 @@ impl Editor {
         }
         for (index, channel, name, path, keys, pose, poses) in channels {
             let label = format!("{} · {} · {}", tr("Lip Sync"), name, channel + 1);
-            ui.menu_button(label, |ui| {
+            let actions = |ui: &mut egui::Ui| {
                 if let Some(poses) = poses {
-                    ui.menu_button(tr("Set mouth pose"), |ui| {
+                    let choose_pose = |ui: &mut egui::Ui| {
                         for (choice, drawing) in poses.iter().enumerate() {
                             if design::button(
                                 ui,
@@ -1087,7 +1093,18 @@ impl Editor {
                                 ui.close();
                             }
                         }
-                    });
+                    };
+                    if inspector {
+                        egui::ComboBox::from_id_salt(("timeline-mouth-pose", index, channel))
+                            .selected_text(
+                                poses
+                                    .get(pose)
+                                    .map_or(tr("Set mouth pose"), |p| p.name.as_str()),
+                            )
+                            .show_ui(ui, choose_pose);
+                    } else {
+                        ui.menu_button(tr("Set mouth pose"), choose_pose);
+                    }
                 }
                 for (icon, label, target) in [
                     (Icon::Previous, "Move mouth key left", frame.checked_sub(1)),
@@ -1112,7 +1129,13 @@ impl Editor {
                                 });
                             }
                         });
-                        ui.close();
+                        if let Some(to) = target {
+                            self.frame = to;
+                            self.feature.frame_selection = Some((layer, to, to));
+                        }
+                        if !inspector {
+                            ui.close();
+                        }
                     }
                 }
                 if design::button(
@@ -1128,9 +1151,19 @@ impl Editor {
                     self.change_mouth_channel(layer, index, frame, &path, |keys| {
                         keys.retain(|key| key.manual)
                     });
-                    ui.close();
+                    if !inspector {
+                        ui.close();
+                    }
                 }
-            });
+            };
+            if inspector {
+                ui.label(label);
+                actions(ui);
+            } else {
+                let button =
+                    design::button(ui, Icon::Mouth, &format!("{label}  ›"), "", false, true);
+                egui::containers::menu::SubMenu::new().show(ui, &button, actions);
+            }
         }
     }
 

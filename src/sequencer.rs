@@ -494,11 +494,14 @@ impl Editor {
             .max_size(700.)
             .resizable(true)
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(tr("TIMELINE"))
-                        .size(10.)
-                        .color(crate::themes::muted()),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr("TIMELINE")).size(10.).color(crate::themes::muted()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if button(ui, Icon::CommandHelper, "COMMAND HELPER", "Show tool shortcuts", self.studio.command_helper, true).clicked() {
+                            self.studio.command_helper = !self.studio.command_helper;
+                        }
+                    });
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     if button(
@@ -633,7 +636,7 @@ impl Editor {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.;
-                        ui.set_width(137.);
+                        ui.set_width(150.);
                         ui.label(egui::RichText::new(tr("CAPAS")).small().color(crate::themes::muted()));
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -676,6 +679,10 @@ impl Editor {
                                 self.recover();
                             }
                             if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
+                            if button(ui, Icon::Layers, "", "Layer objects", self.studio.layer_objects_open, true).clicked() {
+                                self.studio.layer_objects_open = !self.studio.layer_objects_open;
+                                ui.ctx().request_repaint();
+                            }
                         });
                     });
                     let (divider, _) = ui.allocate_exact_size(Vec2::new(1., 49.), Sense::hover());
@@ -1471,6 +1478,11 @@ impl Editor {
                                                 .filter(|s| s.0 == l).map_or(f, |s| s.1.min(count - 1));
                                             self.feature.frame_selection = Some((l,
                                                 if ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
+                                            if has_mouth_key && response.clicked() {
+                                                self.feature.library = false;
+                                                self.clips.open = false;
+                                                ui.ctx().request_repaint();
+                                            }
                                         }
                                         if response.drag_started_by(egui::PointerButton::Primary) && editable && self.feature.exposure_drag.is_none() {
                                             let (mut a, mut b) = self.feature.frame_selection
@@ -1512,11 +1524,11 @@ impl Editor {
                                                 ));
                                                 ui.separator();
                                                 if has_mouth_key {
-                                                    self.mouth_timeline_menu(ui, l, f);
+                                                    self.mouth_timeline_menu(ui, l, f, false);
                                                     ui.separator();
                                                 }
                                                 if button(ui,Icon::Copy,"Copy frames","Copy frames",false,true).clicked(){
-                                                    self.frame_clipboard_context(l,f);self.copy_timeline_frames();ui.close();
+                                                    self.frame_clipboard_context(l,f);self.copy_frames_to_clipboard(ui.ctx());ui.close();
                                                 }
                                                 if button(ui,Icon::Paste,"Paste frames","Paste frames",false,self.frame_clipboard.has_frames()&&!self.doc.layers[l].options.locked).clicked(){
                                                     self.frame_clipboard_context(l,f);self.paste_timeline_frames();ui.close();

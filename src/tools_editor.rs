@@ -439,26 +439,22 @@ impl Editor {
         self.feature.library = false;
         self.tool = tool;
     }
-    pub fn split_clicked_crossing(
-        &mut self,
-        state: &mut Canvas,
+    pub(crate) fn preview_stroke_segment(
+        &self,
         id: (usize, usize),
         point: Pos2,
-    ) -> (usize, usize) {
-        let marks = &self.doc.layers[id.0].frames[self.frame];
+    ) -> Option<(Vec<Mark>, Vec<Mark>)> {
+        let marks = crate::animation::marks(&self.doc.layers[id.0], self.frame);
         let mark = &marks[id.1];
-        if !mark.stroke {
-            return id;
-        }
         let others: Vec<Mark> = marks
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != id.1)
             .map(|(_, m)| m.clone())
             .collect();
-        let parts = crate::editing::crossing_parts(mark, &others);
+        let mut parts = crate::editing::crossing_parts(mark, &others);
         if parts.len() < 2 {
-            return id;
+            return None;
         }
         let closest = parts
             .iter()
@@ -467,22 +463,9 @@ impl Editor {
                 crate::canvas::axis_distance(a, point)
                     .total_cmp(&crate::canvas::axis_distance(b, point))
             })
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let count = parts.len();
-        self.checkpoint();
-        let frame = &mut self.doc.layers[id.0].frames[self.frame];
-        frame.remove(id.1);
-        for (i, part) in parts.into_iter().enumerate() {
-            frame.insert(id.1 + i, part);
-        }
-        for (l, m) in &mut state.selected {
-            if *l == id.0 && *m > id.1 {
-                *m += count - 1;
-            }
-        }
-        self.recover();
-        (id.0, id.1 + closest)
+            .map(|(i, _)| i)?;
+        let selected = parts.remove(closest);
+        Some((parts, vec![selected]))
     }
     pub(crate) fn prepare_paint_key(&mut self, layer: usize, frame: usize) {
         if self.studio.prefs.auto_key_paint && !self.doc.layers[layer].key(frame) {
@@ -508,10 +491,24 @@ impl Editor {
         self.doc.layers[layer].frames[frame] = composed.into();
     }
     pub fn select_connected_object(&self, state: &mut Canvas, seed: (usize, usize), add: bool) {
+        self.select_connected_marks(state, seed, add, false);
+    }
+
+    pub(crate) fn select_connected_strokes(&self, state: &mut Canvas, seed: (usize, usize)) {
+        self.select_connected_marks(state, seed, false, true);
+    }
+
+    fn select_connected_marks(
+        &self,
+        state: &mut Canvas,
+        seed: (usize, usize),
+        add: bool,
+        strokes_only: bool,
+    ) {
         use geo::{BooleanOps, Intersects};
         let marks = &self.doc.layers[seed.0].frames[self.frame];
         let ink = |mark: &Mark| {
-            let mut area = if mark.fill.is_some() {
+            let mut area = if !strokes_only && mark.fill.is_some() {
                 geo::MultiPolygon(vec![crate::vector::polygon(mark)])
             } else {
                 geo::MultiPolygon(vec![])
@@ -534,6 +531,7 @@ impl Editor {
                 .clone();
             for j in 0..marks.len() {
                 if visited[j]
+                    || (strokes_only && !marks[j].stroke)
                     || !crate::features::object_visible(
                         &self.doc.layers[seed.0],
                         &marks[j],

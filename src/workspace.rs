@@ -451,7 +451,7 @@ impl Editor {
                         )
                         .clicked()
                         {
-                            self.copy_timeline_frames();
+                            self.copy_frames_to_clipboard(ui.ctx());
                             ui.close();
                         }
                         if button(
@@ -479,7 +479,7 @@ impl Editor {
                         )
                         .clicked()
                         {
-                            self.copy_selection(false);
+                            self.copy_canvas_to_clipboard(ui.ctx(), false);
                             ui.close();
                         }
                         if button(
@@ -492,7 +492,7 @@ impl Editor {
                         )
                         .clicked()
                         {
-                            self.copy_selection(true);
+                            self.copy_canvas_to_clipboard(ui.ctx(), true);
                             ui.close();
                         }
                         if button(

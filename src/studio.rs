@@ -227,6 +227,7 @@ pub struct Studio {
     preference_category: usize,
     pub stage_only: bool,
     pub(crate) layer_objects_open: bool,
+    pub(crate) command_helper: bool,
     pub onion_before: usize,
     pub onion_after: usize,
     pub clipboard: Vec<Mark>,
@@ -294,6 +295,7 @@ impl Studio {
             preference_category: 0,
             stage_only: false,
             layer_objects_open: false,
+            command_helper: false,
             onion_before: 1,
             onion_after: 1,
             clipboard: vec![],
@@ -551,29 +553,149 @@ impl Editor {
             || self.animation.picker.is_some()
             || self.studio.preferences_open
             || self.studio.export.is_some()
+            || self.document_settings.is_some()
             || self.view_options.draft.is_some()
             || self.folder_groups.dialog.is_some()
         {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)) {
+        // egui-winit delivers native clipboard events for these shortcuts.
+        let (mut copy, mut cut, mut paste) = (false, false, false);
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                match event {
+                    egui::Event::Copy => copy = true,
+                    egui::Event::Cut => cut = true,
+                    egui::Event::Paste(_) | egui::Event::PasteImage(_) => paste = true,
+                    _ => return true,
+                }
+                false
+            });
+            copy |= input.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+            cut |= input.consume_key(egui::Modifiers::COMMAND, egui::Key::X);
+            paste |= input.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+        });
+        if copy {
             if self.frame_clipboard.focus {
-                self.copy_timeline_frames();
+                self.copy_frames_to_clipboard(ctx);
             } else {
-                self.copy_selection(false);
+                self.copy_canvas_to_clipboard(ctx, false);
             }
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X)) {
-            self.copy_selection(true);
+        if cut {
+            self.copy_canvas_to_clipboard(ctx, true);
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)) {
+        if paste {
             if self.frame_clipboard.focus && self.frame_clipboard.has_frames() {
                 self.paste_timeline_frames();
-            } else if !self.paste_media_image() {
-                self.paste_selection();
+            } else {
+                self.paste_canvas_clipboard();
             }
         }
     }
+    pub(crate) fn command_helper_ui(&self, ui: &mut egui::Ui, area: egui::Rect) {
+        if !self.studio.command_helper {
+            return;
+        }
+        let tool = self.tool;
+        let tr = crate::i18n::tr;
+        let command = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        let modifiers: &[(&str, &str)] = match tool {
+            Tool::Bones if self.rigging.paint => &[
+                ("Drag", "Paint bone weights"),
+                ("{cmd} + drag", "Remove bone weights"),
+                ("Shift + drag", "Smooth bone weights"),
+            ],
+            Tool::Bones => &[
+                ("Shift + drag", "Move bone anchor"),
+                ("Alt + drag", "Scale bone"),
+                ("{cmd} + drag", "Stretch or squash bone"),
+                ("{cmd} + Shift + drag", "Move bone pose"),
+            ],
+            Tool::Puppet => &[("Shift + drag", "Move pin anchor")],
+            Tool::Select | Tool::Object => &[
+                ("Shift + click", "Add or remove from selection"),
+                ("Double-click a stroke", "Select connected strokes"),
+                ("Double-click a symbol", "Edit symbol"),
+                ("{cmd} + C / X / V", "Copy / Cut / Paste"),
+            ],
+            Tool::Lasso | Tool::PolygonSelect | Tool::Wand => &[("Shift", "Add to selection")],
+            Tool::Rectangle | Tool::Ellipse | Tool::Polygon | Tool::Line => &[
+                ("Shift + drag", "Constrain proportions or angle"),
+                ("Alt + drag", "Ignore snapping"),
+            ],
+            Tool::Pen | Tool::Node => &[("Alt + drag", "Edit one handle independently")],
+            Tool::Zoom => &[("Alt + click", "Reverse zoom direction")],
+            Tool::Transform => &[
+                ("Shift + drag corner", "Keep proportions"),
+                ("Shift + drag rotation handle", "Snap rotation to 15°"),
+                ("Alt + drag", "Ignore snapping"),
+                ("{cmd} + C / X / V", "Copy / Cut / Paste"),
+            ],
+            Tool::Brush if self.doc.layers[self.layer].options.light_mask => &[
+                ("Click or drag", "Paint light mask"),
+                ("{cmd} + click or drag", "Remove from light mask"),
+            ],
+            _ => &[],
+        };
+        let shortcut = TOOLS
+            .iter()
+            .position(|&candidate| candidate == tool)
+            .and_then(|index| self.studio.prefs.bindings.get(index))
+            .map(Binding::label)
+            .unwrap_or_default();
+        egui::Area::new(egui::Id::unique("tool-command-helper"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(area.right_bottom() - egui::vec2(8., 8.))
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(tool.name());
+                        if !shortcut.is_empty() {
+                            ui.label(egui::RichText::new(shortcut).monospace().weak());
+                        }
+                    });
+                    for (gesture, action) in modifiers {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(tr(gesture).replace("{cmd}", command))
+                                    .monospace(),
+                            );
+                            ui.small(tr(action));
+                        });
+                    }
+                    ui.small(tr("Middle mouse drag · Pan canvas"));
+                });
+            });
+    }
+
+    pub(crate) fn copy_frames_to_clipboard(&mut self, ctx: &egui::Context) {
+        if self.copy_timeline_frames() {
+            ctx.copy_text("LibreToon frames".to_owned());
+        }
+    }
+
+    pub(crate) fn copy_canvas_to_clipboard(&mut self, ctx: &egui::Context, cut: bool) {
+        if !self.canvas.selected.is_empty() {
+            self.copy_selection(cut);
+            if !self.studio.clipboard.is_empty() {
+                ctx.copy_text("LibreToon artwork".to_owned());
+            }
+        }
+    }
+
+    pub(crate) fn paste_canvas_clipboard(&mut self) {
+        if !self.paste_media_image() {
+            self.paste_selection();
+        }
+    }
+
     pub fn copy_selection(&mut self, cut: bool) {
         let mut ids = self.canvas.selected.clone();
         ids.sort_unstable();
@@ -596,12 +718,6 @@ impl Editor {
             {
                 self.studio.clipboard.push(mark.clone());
             }
-        }
-        #[cfg(not(test))]
-        if !self.studio.clipboard.is_empty() {
-            // Replace an older system image when the user copies vector artwork.
-            let _ = arboard::Clipboard::new()
-                .and_then(|mut clipboard| clipboard.set_text("LibreToon vector selection"));
         }
         if cut {
             let mut state = std::mem::take(&mut self.canvas);

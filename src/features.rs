@@ -128,6 +128,8 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primitive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_pivot: Option<[f32; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -925,7 +925,7 @@ mod tests {
         assert!(e.doc.validate().is_ok());
     }
     #[test]
-    fn timeline_keyboard_copy_paste_keeps_the_canvas_clipboard_behavior() {
+    fn native_timeline_clipboard_events_keep_the_canvas_clipboard_behavior() {
         let mut e = editor();
         e.doc.layers[0].frames[0] = vec![ink([200, 0, 0, 255], 0.)].into();
         e.frame_clipboard.focus = true;
@@ -933,13 +933,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
-                events: vec![egui::Event::Key {
-                    key: egui::Key::C,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::COMMAND,
-                }],
+                events: vec![egui::Event::Copy],
                 ..Default::default()
             },
             |ui| {
@@ -952,13 +946,7 @@ mod tests {
         e.frame = 4;
         let mut output = ctx.run_ui(
             egui::RawInput {
-                events: vec![egui::Event::Key {
-                    key: egui::Key::V,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::COMMAND,
-                }],
+                events: vec![egui::Event::Paste("LibreToon frames".into())],
                 ..Default::default()
             },
             |ui| {

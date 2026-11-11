@@ -809,6 +809,18 @@ impl Editor {
                 self.weight_overlay(p, view, id, &poses);
             }
         }
+        if let Some(Gesture::ReanchorBone { id, grab, .. }) = &self.rigging.drag
+            && let Some(pose) = poses.get(id)
+            && let Some(pointer) = p.ctx().input(|i| i.pointer.interact_pos())
+        {
+            let offset = pointer - view.screen(*grab);
+            let start = view.screen(pose.start) + offset;
+            let end = view.screen(pose.end) + offset;
+            let color = Color32::from_rgb(255, 197, 86);
+            p.line_segment([start, end], Stroke::new(2., color));
+            p.circle_stroke(start, 6., Stroke::new(2., color));
+            p.circle_stroke(end, 4., Stroke::new(1., color));
+        }
         if self.tool == Tool::Bones {
             for b in &self.doc.extras.rig.bones {
                 let Some(pose) = poses.get(&b.id) else {

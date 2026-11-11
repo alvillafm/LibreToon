@@ -285,7 +285,7 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
                 continue;
             }
             touched = true;
-            if color == old_color && new.style == old.style {
+            if !new.style.primitive && color == old_color && new.style == old.style {
                 region = region.union(&poly);
             } else {
                 next.extend(crate::features::styled(
@@ -300,7 +300,7 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
                 next.push(contour);
             }
         }
-        if !touched {
+        if !touched || new.style.primitive {
             next.push(new);
         } else {
             next.extend(crate::features::styled(region, color, &new.style));
@@ -422,6 +422,17 @@ mod tests {
                 .abs()
                 < 0.1
         );
+    }
+    #[test]
+    fn overlapping_primitive_keeps_its_fill_and_closed_stroke_in_one_mark() {
+        let mut shape = rect(50., [30, 50, 70, 255]);
+        shape.stroke = true;
+        shape.style.primitive = true;
+        let marks = compose(&[rect(0., [30, 50, 70, 255])], vec![shape.clone()]);
+        let last = marks.last().unwrap();
+        assert_eq!(last.points, shape.points);
+        assert_eq!(last.fill, shape.fill);
+        assert!(last.stroke && last.style.primitive);
     }
     #[test]
     fn polygon_selection_preserves_area_and_exact_curve_endpoints() {
