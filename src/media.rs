@@ -2286,6 +2286,10 @@ fn overlaps(clip: &Clip, start: usize, length: usize) -> bool {
 }
 
 impl MediaLibrary {
+    pub(crate) fn has_video_tracks(&self) -> bool {
+        self.tracks.iter().any(|track| track.kind == Kind::Video)
+    }
+
     fn active_videos(&self, frame: usize, layers: usize) -> impl Iterator<Item = (&Track, &Clip)> {
         let mut videos: Vec<_> = self
             .tracks

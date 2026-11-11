@@ -295,14 +295,21 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
                 continue;
             }
             touched = true;
-            if !new.style.primitive && color == old_color && new.style == old.style {
+            if !new.style.primitive
+                && color == old_color
+                && new.style == old.style
+                && new.bucket == old.bucket
+            {
                 region = region.union(&poly);
             } else {
-                next.extend(crate::features::styled(
-                    poly.difference(&region),
-                    old_color,
-                    &old.style,
-                ));
+                next.extend(
+                    crate::features::styled(poly.difference(&region), old_color, &old.style)
+                        .into_iter()
+                        .map(|mut part| {
+                            part.bucket = old.bucket;
+                            part
+                        }),
+                );
             }
             if old.stroke {
                 if !new.stroke {
@@ -317,7 +324,14 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
         if !touched || new.style.primitive {
             paint.push(new);
         } else {
-            paint.extend(crate::features::styled(region, color, &new.style));
+            paint.extend(
+                crate::features::styled(region, color, &new.style)
+                    .into_iter()
+                    .map(|mut part| {
+                        part.bucket = new.bucket;
+                        part
+                    }),
+            );
             if new.stroke {
                 let mut contour = new;
                 contour.fill = None;

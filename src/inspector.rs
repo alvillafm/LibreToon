@@ -485,6 +485,9 @@ impl Editor {
             if self.tool == Tool::Bucket {
                 design::category(ui, "RELLENO");
                 ui.label(crate::i18n::tr("Cierre de huecos"));
+                ui.small(crate::i18n::tr(
+                    "Shift + click to recalculate an existing fill",
+                ));
                 egui::ComboBox::from_id_salt("bucket-gap")
                     .selected_text(self.gap.label())
                     .show_ui(ui, |ui| {

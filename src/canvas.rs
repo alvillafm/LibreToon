@@ -509,6 +509,25 @@ impl Editor {
         hit(mark, point, tolerance)
     }
 
+    fn canvas_edit_view(&self, stage: View) -> View {
+        let camera = self.camera_view(stage);
+        if self.tool == Tool::Camera {
+            camera
+        } else {
+            self.camera_depth_view(camera, self.layer)
+        }
+    }
+
+    fn zoom_canvas_at(&self, state: &mut Canvas, area: Rect, screen: Pos2, zoom: f32) -> View {
+        let anchor = self.canvas_edit_view(state.view(area)).world(screen);
+        state.zoom = zoom;
+        let mut view = self.canvas_edit_view(state.view(area));
+        let correction = screen - view.screen(anchor);
+        state.pan += correction;
+        view.center += correction;
+        view
+    }
+
     pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
         let tool = if self.drawing.pen.eraser() {
             Tool::Eraser
@@ -572,12 +591,20 @@ impl Editor {
         };
         let ruler_painter = painter.clone();
         let painter = painter.with_clip_rect(area);
-        let fit = fit_scale(area, state.stage_size);
-        let stage_view = state.view(area);
-        let mut view = self.camera_depth_view(self.camera_view(stage_view), self.layer);
-        if self.tool == Tool::Camera {
-            view = self.camera_view(stage_view);
+        if response.contains_pointer()
+            && state.drag.is_none()
+            && let Some((screen, scroll)) = ui.input(|i| {
+                let screen = i.pointer.hover_pos()?;
+                let scroll = i.smooth_scroll_delta().y;
+                (area.contains(screen) && scroll != 0. && !i.pointer.primary_down())
+                    .then_some((screen, scroll))
+            })
+        {
+            let zoom = (state.zoom * (scroll * 0.0025).exp()).clamp(0.08, 24.);
+            self.zoom_canvas_at(&mut state, area, screen, zoom);
         }
+        let stage_view = state.view(area);
+        let mut view = self.canvas_edit_view(stage_view);
         let ctx = ui.ctx().clone();
         if egui::DragAndDrop::has_payload_of_type::<crate::media::MediaDrag>(&ctx)
             && let Some(id) = response.dnd_release_payload::<crate::media::MediaDrag>()
@@ -646,7 +673,6 @@ impl Editor {
             released,
             space,
             shift,
-            scroll,
             escape,
         ) = ctx.input(|i| {
             (
@@ -658,7 +684,6 @@ impl Editor {
                 i.pointer.button_released(PointerButton::Primary),
                 i.key_down(egui::Key::Space) && !wants_keyboard,
                 i.modifiers.shift,
-                i.smooth_scroll_delta().y,
                 i.key_pressed(egui::Key::Escape),
             )
         });
@@ -954,14 +979,6 @@ impl Editor {
                 self.recover();
             }
         }
-        if over && scroll != 0. && state.drag.is_none() {
-            let p = pointer.unwrap();
-            let before = view.world(p);
-            state.zoom = (state.zoom * (scroll * 0.0025).exp()).clamp(0.08, 24.);
-            view.scale = fit * state.zoom;
-            state.pan += p - view.screen(before);
-            view.center = area.center() + state.pan;
-        }
         if escape {
             self.cancel_guide_drag();
             let canceled = state.drag.take();
@@ -1086,12 +1103,9 @@ impl Editor {
             if middle_pressed || (pressed && (space || tool == Tool::Pan)) {
                 state.drag = Some(Drag::Pan(screen));
             } else if tool == Tool::Zoom {
-                let old = view.world(screen);
-                state.zoom =
+                let zoom =
                     (state.zoom * if self.zoom_out ^ alt { 0.8 } else { 1.25 }).clamp(0.05, 32.);
-                view = self.camera_depth_view(self.camera_view(state.view(area)), self.layer);
-                state.pan += screen - view.screen(old);
-                view = self.camera_depth_view(self.camera_view(state.view(area)), self.layer);
+                view = self.zoom_canvas_at(&mut state, area, screen, zoom);
             } else if !self.playing
                 && tool == Tool::Text
                 && !self.doc.layers[self.layer].options.locked
@@ -1163,7 +1177,7 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                self.bucket_at(&mut state, world);
+                self.bucket_at(&mut state, world, shift);
             } else if !self.playing && tool == Tool::Width {
                 self.start_width_drag(&mut state, world, view);
             } else if !self.playing && tool == Tool::Node {
@@ -1206,7 +1220,7 @@ impl Editor {
                 } else {
                     world
                 };
-                self.drawing.start(world);
+                self.drawing.start(world, tool);
                 self.draft = Some(Mark {
                     points: vec![[world.x, world.y]].into(),
                     width: self.width,
@@ -1653,19 +1667,32 @@ impl Editor {
                                 } else {
                                     0
                                 };
-                                i.events[first..]
-                                    .iter()
-                                    .filter_map(|e| match e {
-                                        egui::Event::PointerMoved(p) => Some(*p),
+                                let mut samples = Vec::new();
+                                for event in &i.events[first..] {
+                                    match event {
+                                        egui::Event::PointerMoved(p) if p.is_finite() => {
+                                            samples.push(*p)
+                                        }
                                         egui::Event::PointerButton {
                                             pos,
                                             button: PointerButton::Primary,
                                             pressed: false,
                                             ..
-                                        } => Some(*pos),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
+                                        } => {
+                                            if pos.is_finite() {
+                                                samples.push(*pos);
+                                            }
+                                            break;
+                                        }
+                                        egui::Event::PointerGone
+                                        | egui::Event::Touch {
+                                            phase: egui::TouchPhase::End | egui::TouchPhase::Cancel,
+                                            ..
+                                        } => break,
+                                        _ => {}
+                                    }
+                                }
+                                samples
                             });
                             for screen in samples {
                                 let p = crate::vector::xy(view.world(screen));
@@ -1960,6 +1987,7 @@ impl Editor {
                 CursorIcon::Default
             });
         }
+        let stage_view = state.view(area);
         let corners = [
             Pos2::ZERO,
             Pos2::new(state.stage_size.x, 0.),
@@ -3248,6 +3276,51 @@ mod vector_gesture_tests {
         });
     }
     #[test]
+    fn vector_brush_records_two_document_pixels_at_different_zooms() {
+        use geo::BoundingRect;
+        run(|ctx, e| {
+            e.tool = Tool::VectorBrush;
+            e.width = 2.;
+            let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.));
+            let draw = |editor: &mut Editor, zoom, pressure| {
+                editor.canvas.zoom = zoom;
+                editor.drawing.pen.test_pressure(Some(pressure));
+                let view = editor.canvas.view(area);
+                let a = view.screen(Pos2::new(420., 270.));
+                let b = view.screen(Pos2::new(540., 270.));
+                tick(
+                    ctx,
+                    editor,
+                    vec![egui::Event::PointerMoved(a), button(a, true)],
+                );
+                tick(ctx, editor, vec![egui::Event::PointerMoved(b)]);
+                tick(
+                    ctx,
+                    editor,
+                    vec![
+                        button(b, false),
+                        egui::Event::PointerMoved(b + Vec2::Y * 20.),
+                    ],
+                );
+            };
+            draw(e, 0.5, 0.2);
+            draw(e, 2., 0.7);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            for mark in &e.doc.layers[0].frames[0] {
+                assert_eq!(mark.width, 2.);
+                assert!(mark.width_profile.is_empty());
+                let outline = crate::width::outline(mark).bounding_rect().unwrap();
+                assert!((outline.height() - 2.).abs() < 0.001, "{outline:?}");
+            }
+            e.drawing.vector_pressure = true;
+            draw(e, 2., 0.5);
+            let mark = &e.doc.layers[0].frames[0][2];
+            let outline = crate::width::outline(mark).bounding_rect().unwrap();
+            assert!((outline.height() - 1.).abs() < 0.001, "{outline:?}");
+        });
+    }
+
+    #[test]
     fn all_pointer_samples_in_one_frame_survive_vector_brush_completion() {
         run(|ctx, e| {
             e.tool = Tool::VectorBrush;
@@ -3456,7 +3529,7 @@ impl Editor {
             }));
         }
     }
-    fn bucket_at(&mut self, state: &mut Canvas, world: Pos2) {
+    fn bucket_at(&mut self, state: &mut Canvas, world: Pos2, recalculate: bool) {
         if !self.fill_enabled {
             self.status = "Activa un color de relleno".into();
             return;
@@ -3469,20 +3542,43 @@ impl Editor {
                 && !mark.style.guide
                 && crate::vector::contains_fill(mark, world)
         });
-        let rebuild = existing.is_none_or(|index| marks[index].bucket);
-        let new_faces = rebuild
-            .then(|| crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array()));
+        let rebuild = recalculate || existing.is_none_or(|index| marks[index].bucket);
+        let new_faces = rebuild.then(|| {
+            if let Some(index) = existing.filter(|&index| recalculate && !marks[index].bucket) {
+                let mut contours = marks.to_vec();
+                if contours[index].stroke {
+                    contours[index].fill = None;
+                } else {
+                    contours.remove(index);
+                }
+                crate::bucket::fill(&contours, world, self.gap, self.fill_color.to_array())
+            } else {
+                crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array())
+            }
+        });
         if let Some(Ok(shapes)) = new_faces.as_ref() {
-            let replaced = crate::bucket::covered_bucket_fills(marks, shapes);
+            let mut replaced = crate::bucket::covered_bucket_fills(marks, shapes);
+            let keep_outline = existing.is_some_and(|index| marks[index].stroke);
+            if let Some(index) = existing
+                && !keep_outline
+                && !replaced.contains(&index)
+            {
+                replaced.push(index);
+                replaced.sort_unstable();
+            }
             let shapes = self.prepare_style(shapes.clone());
             self.checkpoint();
             self.prepare_paint_key(self.layer, self.frame);
             let frame = &mut self.doc.layers[self.layer].frames[self.frame];
+            if let Some(index) = existing.filter(|_| keep_outline) {
+                frame[index].fill = None;
+                frame[index].style.gradient = None;
+            }
             for index in replaced.into_iter().rev() {
                 frame.remove(index);
             }
             frame.splice(0..0, shapes);
-        } else if let Some(index) = existing {
+        } else if let Some(index) = existing.filter(|_| !recalculate) {
             let mut mark = marks[index].clone();
             mark.fill = Some(self.fill_color.to_array());
             mark.style.gradient = self.feature.gradient_on.then(|| {
@@ -3795,6 +3891,49 @@ mod new_tool_regressions {
             assert!(e.project_document().validate().is_ok());
         });
     }
+    #[test]
+    fn wheel_zoom_keeps_camera_and_parallax_art_anchored_to_cursor() {
+        run(|ctx, e| {
+            e.doc = crate::fresh_document();
+            e.add_camera();
+            let camera = &mut e.doc.extras.cameras[0];
+            camera.zoom = 2.5;
+            camera.center = [1100., 600.];
+            camera.angle = 0.4;
+            e.doc.layers[0].options.depth.distance = 450.;
+            e.doc.layers[0].options.depth.keep_size = false;
+            let camera_before = serde_json::to_value(&e.doc.extras.cameras).unwrap();
+            let pointer = Pos2::new(730., 240.);
+            for tool in [Tool::Camera, Tool::Select] {
+                e.tool = tool;
+                e.studio.stage_only = tool == Tool::Select;
+                e.canvas.fit();
+                tick(ctx, e, vec![egui::Event::PointerMoved(pointer)]);
+                let anchor = e.canvas_edit_view(view(e)).world(pointer);
+                for _ in 0..3 {
+                    let zoom_before = e.canvas.zoom;
+                    tick(
+                        ctx,
+                        e,
+                        vec![egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            phase: egui::TouchPhase::Move,
+                            source: egui::MouseWheelSource::Unknown,
+                            delta: Vec2::new(0., 110.),
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                    );
+                    assert!(e.canvas.zoom > zoom_before);
+                    assert!(e.canvas_edit_view(view(e)).screen(anchor).distance(pointer) < 0.01);
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(&e.doc.extras.cameras).unwrap(),
+                camera_before
+            );
+        });
+    }
+
     #[test]
     fn moving_held_art_edits_exposure_without_creating_motion() {
         run(|ctx, e| {

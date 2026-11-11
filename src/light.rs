@@ -314,28 +314,99 @@ impl Light {
         height_map: Option<&[u8]>,
         mask: Option<&[u8]>,
     ) {
-        let settings = self.at(frame);
-        if settings.intensity == 0. || opacity == 0. {
-            return;
-        }
         let center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
-        let mut point = crate::vector::pos(settings.position);
-        let mut zoom = 1.;
-        let mut angle = settings.angle.to_radians();
+        let mut point = crate::vector::pos(self.at(frame).position);
+        let (mut zoom, mut angle) = (1., 0.);
         if camera && let Some(camera) = crate::depth::camera(doc, frame) {
             let pose = crate::animation::camera_at(camera, frame);
             zoom = pose.zoom;
-            angle -= pose.angle;
+            angle = -pose.angle;
             point = center
-                + egui::emath::Rot2::from_angle(-pose.angle)
+                + egui::emath::Rot2::from_angle(angle)
                     * (point - crate::vector::pos(pose.center))
                     * zoom;
         }
         let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
         let (w, h) = (w + padding * 2, h + padding * 2);
-        let x = (point.x - center.x) * scale + w as f32 * 0.5;
-        let y = (point.y - center.y) * scale + h as f32 * 0.5;
-        let radius = (settings.radius * zoom * scale).max(1.);
+        let point = Pos2::new(w as f32 * 0.5, h as f32 * 0.5) + (point - center) * scale;
+        self.shade(
+            pixels,
+            w,
+            h,
+            frame,
+            point,
+            scale * zoom,
+            angle,
+            opacity,
+            height_map,
+            mask,
+            None,
+        );
+    }
+
+    pub(crate) fn shade_region(
+        &self,
+        pixels: &mut [u8],
+        size: [u32; 2],
+        view: crate::canvas::View,
+        surface_step: usize,
+        frame: usize,
+        opacity: f32,
+        height_map: Option<&[u8]>,
+        mask: Option<&[u8]>,
+    ) {
+        let point = view.screen(crate::vector::pos(self.at(frame).position));
+        self.shade(
+            pixels,
+            size[0],
+            size[1],
+            frame,
+            point,
+            view.scale,
+            0.,
+            opacity,
+            height_map,
+            mask,
+            Some(surface_step),
+        );
+    }
+
+    pub(crate) fn region_padding(&self, frame: usize, scale: f32, step: usize) -> f32 {
+        let settings = self.at(frame);
+        let relief = if settings.relief > 0. && self.kind != Kind::Ambient {
+            settings.bevel * scale + 27. * step as f32
+        } else {
+            0.
+        };
+        let feather = if self.uses_mask() {
+            (self.mask_feather * scale).min(128.) * 3.
+        } else {
+            0.
+        };
+        relief.max(feather)
+    }
+
+    fn shade(
+        &self,
+        pixels: &mut [u8],
+        w: u32,
+        h: u32,
+        frame: usize,
+        point: Pos2,
+        scale: f32,
+        angle: f32,
+        opacity: f32,
+        height_map: Option<&[u8]>,
+        mask: Option<&[u8]>,
+        surface_step: Option<usize>,
+    ) {
+        let settings = self.at(frame);
+        if settings.intensity == 0. || opacity == 0. {
+            return;
+        }
+        let Pos2 { x, y } = point;
+        let angle = settings.angle.to_radians() + angle;
+        let radius = (settings.radius * scale).max(1.);
         let (left, top, right, bottom) = match self.kind {
             Kind::Point => (
                 (x - radius).max(0.) as usize,
@@ -355,7 +426,7 @@ impl Light {
                 matte.to_vec(),
                 w,
                 h,
-                (self.mask_feather * scale * zoom).min(128.),
+                (self.mask_feather * scale).min(128.),
                 &crate::depth::Optics::default(),
             )
         });
@@ -365,9 +436,10 @@ impl Light {
                 pixels,
                 width,
                 h as usize,
-                settings.bevel * scale * zoom,
+                settings.bevel * scale,
                 settings.texture_relief,
                 height_map,
+                surface_step.unwrap_or_else(|| width.max(h as usize).div_ceil(1024).max(1)),
             )
         });
         let elevation = settings.elevation.to_radians();
@@ -488,8 +560,8 @@ impl Surface {
         bevel: f32,
         texture: f32,
         height_map: Option<&[u8]>,
+        step: usize,
     ) -> Self {
-        let step = width.max(height).div_ceil(1024).max(1);
         let w = width.div_ceil(step);
         let h = height.div_ceil(step);
         let limit = (bevel / step as f32).max(1.);
@@ -1802,7 +1874,7 @@ mod tests {
                     rgba[(y * width + x) * 4 + 3] = if x == 16 { coverage } else { 255 };
                 }
             }
-            Surface::new(&rgba, width, height, 18., 0., None)
+            Surface::new(&rgba, width, height, 18., 0., None, 1)
         };
         for alpha in [31, 63, 95, 127, 159, 191, 223, 254] {
             let before = surface(alpha);
@@ -1818,7 +1890,7 @@ mod tests {
     fn fully_opaque_artwork_has_no_bevel_at_camera_crop() {
         let (width, height) = (32, 32);
         let pixels = vec![255; width * height * 4];
-        let surface = Surface::new(&pixels, width, height, 12., 0., None);
+        let surface = Surface::new(&pixels, width, height, 12., 0., None, 1);
         for y in 0..height {
             for x in 0..width {
                 assert_eq!(surface.slope(x, y), Vec2::ZERO);
@@ -1836,7 +1908,7 @@ mod tests {
                 p.copy_from_slice(&[90, 90, 90, 255]);
             }
         }
-        let surface = Surface::new(&pixels, width, height, 20., 0., None);
+        let surface = Surface::new(&pixels, width, height, 20., 0., None, 2);
         assert_eq!(surface.step, 2);
         let a = surface.slope(16, 16);
         let b = surface.slope(18, 16);

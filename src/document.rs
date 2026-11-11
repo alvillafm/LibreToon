@@ -107,6 +107,7 @@ pub struct Layer {
     pub options: crate::features::LayerOptions,
     pub name: String,
     pub visible: bool,
+    #[serde(with = "crate::native_project::cels")]
     pub frames: SharedVec<SharedVec<Mark>>,
 }
 #[derive(Clone, Serialize, Deserialize)]

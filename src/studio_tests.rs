@@ -402,11 +402,11 @@ fn tool_properties_and_reference_canvas_render_without_panics() {
 fn real_pressure_changes_the_saved_width_profile_and_mouse_stays_constant() {
     let mut d = crate::drawing::Drawing::default();
     d.pen.test_pressure(None);
-    d.start(Pos2::ZERO);
+    d.start(Pos2::ZERO, Tool::Brush);
     d.sample(Pos2::new(40., 0.));
     assert!(d.profile(&[]).is_empty());
     d.pen.test_pressure(Some(0.2));
-    d.start(Pos2::ZERO);
+    d.start(Pos2::ZERO, Tool::Brush);
     d.pen.test_pressure(Some(0.8));
     d.sample(Pos2::new(40., 0.));
     // Releasing the pen must not erase pressure collected during the stroke.
@@ -415,6 +415,7 @@ fn real_pressure_changes_the_saved_width_profile_and_mouse_stays_constant() {
     assert!((profile[0].width - 0.2).abs() < 0.001);
     assert!((profile[127].width - 0.8).abs() < 0.001);
     d.pressure = false;
+    d.start(Pos2::ZERO, Tool::Brush);
     assert!(d.profile(&[]).is_empty());
     let mark = Mark {
         points: vec![[0., 0.], [40., 0.]].into(),

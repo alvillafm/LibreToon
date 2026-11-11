@@ -265,3 +265,11 @@ El recorte calcula intersecciones al cambiar de contorno objetivo o invalidarse 
 
 ## Clave automática al pintar
 El conmutador A, desactivado inicialmente y guardado en preferencias, crea una clave en el fotograma actual al confirmar un trazo sobre una exposición. Conserva la pose existente con datos compartidos y usa la misma entrada de historial del trazo. No inserta fotogramas, no desplaza claves y no avanza el cabezal. Si ya existe una clave, la reutiliza. El estado desactivado conserva la edición habitual de la exposición completa.
+
+## Caché de previsualización de composición
+
+La vista conserva hasta 32 texturas de fotogramas, con un presupuesto de 96 MiB para la caché. En pausa, prepara hasta 12 fotogramas siguientes según la memoria disponible, con una sola tarea activa y prioridad para el cabezal. Los proyectos con pistas de vídeo usan la ruta de decodificación bajo demanda. Las claves distinguen el tiempo de los símbolos independientes, la resolución y la generación del documento. Una edición invalida las texturas de la generación anterior.
+
+Medición local en Windows x64, perfil release, con los dos primeros fotogramas de DBGT-Rebuild-v1 a 1920 × 1080 y las luces activas. Preparar ambos llevó 3,07 s. Alternar entre sus texturas 100 veces llevó 0,42 ms de CPU en la prueba de interfaz, sin renderizados ni subidas de textura durante esa fase. No mide FPS en una ventana real, latencia de presentación ni el coste de fotogramas que aún no están en caché.
+
+Para repetirla, establece la variable `LIBRETOON_BENCHMARK_PROJECT` con la ruta del proyecto y ejecuta `cargo test --release --locked benchmark_dbgt_preview_cache -- --ignored --nocapture`.

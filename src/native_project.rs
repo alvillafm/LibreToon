@@ -5,6 +5,11 @@ const MANIFEST: &str = "LIBRETOON/manifest.json";
 pub const EXTENSION: &str = "ltoon";
 pub const LIMIT: usize = 256 * 1024 * 1024;
 const MANIFEST_V1: &[u8] = br#"{"format":"LibreToon","version":1}"#;
+const MANIFEST_V2: &[u8] = br#"{"format":"LibreToon","version":2}"#;
+const LEGACY_DOCUMENT_LIMIT: usize = 64 * 1024 * 1024;
+// Switch before the legacy ceiling so there is room for continued editing.
+const COMPACT_THRESHOLD: usize = 16 * 1024 * 1024;
+const COMPACT_DOCUMENT_LIMIT: usize = 128 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
 struct Manifest {
@@ -21,10 +26,19 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
     let mut snapshot = doc.clone();
     crate::raster::prune(&mut snapshot);
     snapshot.validate()?;
-    pack(&snapshot, vec![(MANIFEST, MANIFEST_V1)])
+    let metadata = without_media_payloads(&snapshot);
+    let (manifest, native) = match bounded_json(&metadata, COMPACT_THRESHOLD)? {
+        Some(native) => (MANIFEST_V1, native),
+        None => {
+            let native = cels::compact(|| bounded_json(&metadata, COMPACT_DOCUMENT_LIMIT))?
+                .ok_or("Los datos del proyecto superan el límite de 128 MiB incluso sin repetir fotogramas")?;
+            (MANIFEST_V2, native)
+        }
+    };
+    pack_document(&snapshot, vec![(MANIFEST, manifest)], &native)
 }
 
-pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>, String> {
+fn without_media_payloads(doc: &Document) -> Document {
     let mut metadata = doc.clone();
     for asset in &mut metadata.extras.media.assets {
         asset.data = Default::default();
@@ -32,10 +46,51 @@ pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>
     for reference in &mut metadata.extras.references {
         reference.data = Default::default();
     }
-    let native = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
-    if native.len() > 64 * 1024 * 1024 {
-        return Err("Proyecto demasiado grande para el contenedor de proyecto".into());
+    metadata
+}
+
+fn bounded_json(doc: &Document, limit: usize) -> Result<Option<Vec<u8>>, String> {
+    struct Output {
+        bytes: Vec<u8>,
+        limit: usize,
+        overflow: bool,
     }
+    impl std::io::Write for Output {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if data.len() > self.limit - self.bytes.len() {
+                self.overflow = true;
+                return Err(std::io::Error::other("Project metadata limit exceeded"));
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut output = Output {
+        bytes: Vec::new(),
+        limit,
+        overflow: false,
+    };
+    match serde_json::to_writer(&mut output, doc) {
+        Ok(()) => Ok(Some(output.bytes)),
+        Err(_) if output.overflow => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>, String> {
+    let native = bounded_json(&without_media_payloads(doc), LEGACY_DOCUMENT_LIMIT)?
+        .ok_or("Proyecto demasiado grande para el contenedor de proyecto")?;
+    pack_document(doc, header, &native)
+}
+
+fn pack_document(
+    doc: &Document,
+    header: Vec<(&str, &[u8])>,
+    native: &[u8],
+) -> Result<Vec<u8>, String> {
     let names: Vec<_> = doc
         .extras
         .media
@@ -45,7 +100,7 @@ pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>
         .collect();
     let mut entries = Vec::new();
     entries.extend(header);
-    entries.push((DOCUMENT, native.as_slice()));
+    entries.push((DOCUMENT, native));
     entries.extend(
         names
             .iter()
@@ -92,14 +147,19 @@ pub fn decode_if_native(bytes: &[u8]) -> Result<Option<Document>, String> {
     }
     let manifest: Manifest =
         serde_json::from_slice(&manifest).map_err(|error| error.to_string())?;
-    if manifest.format != "LibreToon" || manifest.version != 1 {
+    if manifest.format != "LibreToon" || !matches!(manifest.version, 1 | 2) {
         return Err(format!(
             "Unsupported LibreToon project format or version ({})",
             manifest.version
         ));
     }
+    let limit = if manifest.version == 1 {
+        LEGACY_DOCUMENT_LIMIT
+    } else {
+        COMPACT_DOCUMENT_LIMIT
+    };
     let document = archive
-        .entry(DOCUMENT.as_bytes())?
+        .entry_limited(DOCUMENT.as_bytes(), limit)?
         .ok_or("Missing LibreToon document")?;
     restore(&archive, &document).map(Some)
 }
@@ -129,6 +189,105 @@ pub(crate) fn restore(archive: &Archive<'_>, bytes: &[u8]) -> Result<Document, S
     }
     doc.validate()?;
     Ok(doc)
+}
+
+pub(crate) mod cels {
+    use crate::{Mark, shared::SharedVec};
+    use serde::{
+        Deserialize, Deserializer, Serialize, Serializer,
+        de::{self, MapAccess, SeqAccess, Visitor, value},
+        ser::SerializeStruct,
+    };
+    use std::{cell::Cell, collections::HashMap, fmt};
+
+    type Cel = SharedVec<Mark>;
+    type Frames = SharedVec<Cel>;
+
+    thread_local! { static COMPACT: Cell<bool> = const { Cell::new(false) }; }
+
+    pub(super) fn compact<T>(f: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COMPACT.set(self.0);
+            }
+        }
+        let _reset = Reset(COMPACT.replace(true));
+        f()
+    }
+
+    pub(crate) fn serialize<S: Serializer>(
+        frames: &Frames,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if !COMPACT.get() {
+            return frames.serialize(serializer);
+        }
+        let mut indices = HashMap::new();
+        let mut unique = Vec::new();
+        let mut exposures = Vec::with_capacity(frames.len());
+        let mut previous: Option<(&Cel, usize)> = None;
+        for frame in frames {
+            let index = *indices.entry(frame.identity()).or_insert_with(|| {
+                if let Some((last, index)) = previous
+                    && last == frame
+                {
+                    return index;
+                }
+                let index = unique.len();
+                unique.push(frame);
+                index
+            });
+            exposures.push(index);
+            previous = Some((frame, index));
+        }
+        let mut encoded = serializer.serialize_struct("Cels", 2)?;
+        encoded.serialize_field("cels", &unique)?;
+        encoded.serialize_field("exposures", &exposures)?;
+        encoded.end()
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Frames, D::Error> {
+        struct FrameVisitor;
+
+        impl<'de> Visitor<'de> for FrameVisitor {
+            type Value = Frames;
+
+            fn expecting(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt.write_str("a frame array or a cel table with exposure indices")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Frames, A::Error> {
+                Frames::deserialize(value::SeqAccessDeserializer::new(seq))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Frames, A::Error> {
+                #[derive(Deserialize)]
+                struct Table {
+                    cels: Vec<Cel>,
+                    exposures: Vec<usize>,
+                }
+                let table = Table::deserialize(value::MapAccessDeserializer::new(map))?;
+                if table.cels.len() > 10000 || table.exposures.len() > 10000 {
+                    return Err(de::Error::custom("Project contains too many exposures"));
+                }
+                table
+                    .exposures
+                    .into_iter()
+                    .map(|index| {
+                        table
+                            .cels
+                            .get(index)
+                            .cloned()
+                            .ok_or_else(|| de::Error::custom("Invalid project cel index"))
+                    })
+                    .collect()
+            }
+        }
+        deserializer.deserialize_any(FrameVisitor)
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +350,32 @@ mod tests {
             let restored = decode_if_native(&bytes).unwrap().unwrap();
             assert_eq!(serde_json::to_vec(&restored).unwrap(), json);
         }
+    }
+
+    #[test]
+    fn large_projects_store_repeated_exposures_once_and_open_losslessly() {
+        let mut doc = crate::fresh_document();
+        let cel: crate::shared::SharedVec<_> = (0..8_000)
+            .map(|i| crate::Mark {
+                points: vec![[10., (i % 500) as f32], [150., (i % 500) as f32 + 1.]].into(),
+                ..Default::default()
+            })
+            .collect();
+        doc.layers[0].frames = vec![cel; 96].into();
+        doc.layers[0].options.keys = Default::default();
+        doc.layers[0].init_keys();
+        let bytes = encode(&doc).unwrap();
+        let archive = Archive::new(&bytes).unwrap();
+        assert_eq!(
+            archive.entry(MANIFEST.as_bytes()).unwrap().unwrap(),
+            MANIFEST_V2
+        );
+        assert!(archive.entry(DOCUMENT.as_bytes()).unwrap().unwrap().len() < 2 * 1024 * 1024);
+        let reopened = decode_if_native(&bytes).unwrap().unwrap();
+        let frames = &reopened.layers[0].frames;
+        assert_eq!(frames.len(), 96);
+        assert!(frames[0] == doc.layers[0].frames[0]);
+        assert_eq!(frames[0].identity(), frames[95].identity());
     }
 
     #[test]

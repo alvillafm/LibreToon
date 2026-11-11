@@ -613,12 +613,20 @@ impl Editor {
             .max_size(700.)
             .resizable(true)
             .show(ui, |ui| {
+                let viewport_id = ui.scope_id().with("timeline-viewport");
+                let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
+                let previous_cell = viewport.cell;
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tr("TIMELINE")).size(10.).color(crate::themes::muted()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if button(ui, Icon::CommandHelper, "COMMAND HELPER", "Show tool shortcuts", self.studio.command_helper, true).clicked() {
                             self.studio.command_helper = !self.studio.command_helper;
                         }
+                        ui.separator();
+                        let zoom_label = ui.label(tr("Zoom"));
+                        ui.spacing_mut().slider_width = 85.;
+                        ui.add(egui::Slider::new(&mut viewport.cell, 6.0..=66.0).logarithmic(true).show_value(false))
+                            .labelled_by(zoom_label.id);
                     });
                 });
                 ui.separator();
@@ -979,15 +987,12 @@ impl Editor {
                 if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
                 let mut target = None;
                 let mut camera_target = None;
-                let viewport_id = ui.scope_id().with("timeline-viewport");
-                let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
                 let label_w = 300.;
                 let mut scroll = egui::ScrollArea::both().id_salt("timeline-scroll").auto_shrink([false, false])
                     .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
                 let mut offset = viewport.offset;
-                let (hover, delta, wheel, middle_pressed, middle_down) = ui.input(|i| (
+                let (hover, delta, middle_pressed, middle_down) = ui.input(|i| (
                     i.pointer.hover_pos(), i.pointer.delta().x,
-                    if i.modifiers.shift { 0. } else { i.smooth_scroll_delta().y },
                     i.pointer.button_pressed(egui::PointerButton::Middle),
                     i.pointer.button_down(egui::PointerButton::Middle),
                 ));
@@ -998,15 +1003,10 @@ impl Editor {
                     offset -= delta;
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 }
-                if over && wheel != 0. {
-                    let x = hover.unwrap().x - viewport.area.left();
-                    let old = viewport.cell;
-                    viewport.cell = (old * (wheel * 0.004).exp()).clamp(6., 66.);
-                    let frame = ((offset + x - label_w) / old).max(0.);
-                    offset += frame * (viewport.cell - old);
-                    ui.input_mut(|i| i.smooth_scroll_delta.y = 0.);
+                if viewport.cell != previous_cell {
+                    offset *= viewport.cell / previous_cell;
                 }
-                if viewport.panning || (over && wheel != 0.) {
+                if viewport.panning || viewport.cell != previous_cell {
                     scroll = scroll.horizontal_scroll_offset(offset.max(0.));
                 }
                 let original_style = ui.style().clone();
@@ -1035,7 +1035,11 @@ impl Editor {
                             Sense::hover(),
                         );
                         let painter = ui.painter().clone();
-                        let clip = ui.clip_rect();
+                        let viewport_clip = ui.clip_rect();
+                        let header_top = viewport_clip.top();
+                        let header_bottom = (header_top + header_height).min(viewport_clip.bottom());
+                        let header_clip = viewport_clip.with_max_y(header_bottom);
+                        let clip = viewport_clip.with_min_y(header_bottom);
                         let label_left = clip.left();
                         let labels_clip = Rect::from_min_max(clip.min, Pos2::new((label_left + label_w).min(clip.right()), clip.bottom()));
                         let grid_clip = Rect::from_min_max(Pos2::new((label_left + label_w).min(clip.right()), clip.top()), clip.max);
@@ -1053,78 +1057,88 @@ impl Editor {
                             clip.top(),
                             clip.bottom(),
                         );
-                        let header = Rect::from_min_size(r.min, Vec2::new(r.width(), header_height));
-                        painter.rect_filled(
-                            header,
-                            0.,
-                            crate::themes::color(Color32::from_gray(31)),
-                        );
-                        painter.text(
-                            Pos2::new(label_left + 60., r.top() + 12.),
-                            egui::Align2::LEFT_CENTER,
-                            tr("Nombre de capa"),
-                            egui::FontId::proportional(10.),
-                            crate::themes::muted(),
-                        );
-                        if Rect::from_min_size(Pos2::new(label_left, r.top()), Vec2::new(label_w, 24.))
-                            .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
                         {
-                            target = Some((false, usize::MAX, DropSide::Above));
-                        }
-                        ui.set_clip_rect(grid_clip);
-                        let scrub = ui.interact(
-                            Rect::from_min_max(Pos2::new(grid_clip.left(), r.top()), Pos2::new(header.right(), r.top()+24.)),
-                            ui.scope_id().with("scrub"),
-                            Sense::click_and_drag(),
-                        );
-                        if scrub.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) {
-                            if let Some(p) = scrub.interact_pointer_pos() {
-                                self.frame = (((p.x - r.left() - label_w) / cell).floor().max(0.)
-                                    as usize)
-                                    .min(count - 1);
-                                self.playing = false;
+                            let header = Rect::from_min_max(header_clip.min, Pos2::new(r.right().max(grid_clip.left()), header_bottom));
+                            let ruler_clip = header_clip.with_min_x(grid_clip.left());
+                            let painter = painter.with_clip_rect(header_clip);
+                            painter.rect_filled(
+                                header,
+                                0.,
+                                crate::themes::color(Color32::from_gray(31)),
+                            );
+                            painter.text(
+                                Pos2::new(label_left + 60., header_top + 12.),
+                                egui::Align2::LEFT_CENTER,
+                                tr("Nombre de capa"),
+                                egui::FontId::proportional(10.),
+                                crate::themes::muted(),
+                            );
+                            if Rect::from_min_size(Pos2::new(label_left, header_top), Vec2::new(label_w, 24.))
+                                .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
+                            {
+                                target = Some((false, usize::MAX, DropSide::Above));
+                            }
+                            ui.set_clip_rect(ruler_clip);
+                            let scrub = ui.interact(
+                                Rect::from_min_max(Pos2::new(ruler_clip.left(), header_top), Pos2::new(header.right(), header_top+24.)),
+                                ui.scope_id().with("scrub"),
+                                Sense::click_and_drag(),
+                            );
+                            if scrub.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()) {
+                                if let Some(p) = scrub.interact_pointer_pos() {
+                                    self.frame = (((p.x - r.left() - label_w) / cell).floor().max(0.)
+                                        as usize)
+                                        .min(count - 1);
+                                    self.playing = false;
+                                }
+                            }
+                            self.timeline_marker_menu(ui, &scrub, r.left() + label_w, cell, count);
+                            if tag_height > 0. {
+                                self.draw_animation_tags(ui,r.left()+label_w,header_top+24.,cell,ruler_clip,count);
+                            }
+                            for marker in self.doc.extras.markers.iter().filter(|marker| frames.contains(&marker.frame)) {
+                                let x = r.left() + label_w + (marker.frame as f32 + 0.5) * cell;
+                                let y = header_top;
+                                let [red,green,blue] = marker.color;
+                                let color = Color32::from_rgb(red,green,blue);
+                                painter.with_clip_rect(ruler_clip).add(egui::Shape::convex_polygon(
+                                    vec![Pos2::new(x - 4., y + 1.), Pos2::new(x + 4., y + 1.), Pos2::new(x, y + 7.)],
+                                    color, Stroke::NONE,
+                                ));
+                                if cell >= 20. {
+                                    painter.with_clip_rect(ruler_clip).text(Pos2::new(x + 5., y + 1.), egui::Align2::LEFT_TOP,
+                                        &marker.name, egui::FontId::proportional(9.), color);
+                                }
+                            }
+                            for f in self.depth.ready_frames(&self.doc).filter(|f| frames.contains(f)) {
+                                let x = r.left() + label_w + f as f32 * cell;
+                                let strip = Rect::from_min_size(Pos2::new(x, header_top + 22.), Vec2::new(cell, 2.));
+                                painter.with_clip_rect(ruler_clip).rect_filled(strip, 0., Color32::from_rgb(78, 192, 130));
+                            }
+                            for f in frames.clone() {
+                                let pose_label = self.lip_frame_label(f);
+                                if f == 0 || (f + 1) % 5 == 0 || pose_label.is_some() {
+                                    let label_clip = if pose_label.is_some() {
+                                        let left = r.left() + label_w + f as f32 * cell;
+                                        ruler_clip.intersect(Rect::from_min_max(Pos2::new(left, header_top), Pos2::new(left + cell, header_top+24.)))
+                                    } else {
+                                        ruler_clip
+                                    };
+                                    let size = pose_label.as_ref().map_or(10., |name| (cell / (name.chars().count().max(1) as f32 * 0.62)).clamp(6., 10.));
+                                    painter.with_clip_rect(label_clip).text(
+                                        Pos2::new(
+                                            r.left() + label_w + (f as f32 + 0.5) * cell,
+                                            header_top + 12.,
+                                        ),
+                                        egui::Align2::CENTER_CENTER,
+                                        pose_label.unwrap_or_else(|| (f + 1).to_string()),
+                                        egui::FontId::monospace(size),
+                                        crate::themes::muted(),
+                                    );
+                                }
                             }
                         }
-                        self.timeline_marker_menu(ui, &scrub, r.left() + label_w, cell, count);
-                        if tag_height > 0. {
-                            self.draw_animation_tags(ui,r.left()+label_w,r.top()+24.,cell,grid_clip,count);
-                        }
-                        for marker in self.doc.extras.markers.iter().filter(|marker| frames.contains(&marker.frame)) {
-                            let x = r.left() + label_w + (marker.frame as f32 + 0.5) * cell;
-                            let y = r.top();
-                            let [red,green,blue] = marker.color;
-                            let color = Color32::from_rgb(red,green,blue);
-                            painter.with_clip_rect(grid_clip).add(egui::Shape::convex_polygon(
-                                vec![Pos2::new(x - 4., y + 1.), Pos2::new(x + 4., y + 1.), Pos2::new(x, y + 7.)],
-                                color, Stroke::NONE,
-                            ));
-                            if cell >= 20. {
-                                painter.with_clip_rect(grid_clip).text(Pos2::new(x + 5., y + 1.), egui::Align2::LEFT_TOP,
-                                    &marker.name, egui::FontId::proportional(9.), color);
-                            }
-                        }
-                        for f in frames.clone() {
-                            let pose_label = self.lip_frame_label(f);
-                            if f == 0 || (f + 1) % 5 == 0 || pose_label.is_some() {
-                                let label_clip = if pose_label.is_some() {
-                                    let left = r.left() + label_w + f as f32 * cell;
-                                    grid_clip.intersect(Rect::from_min_max(Pos2::new(left, r.top()), Pos2::new(left + cell, r.top()+24.)))
-                                } else {
-                                    grid_clip
-                                };
-                                let size = pose_label.as_ref().map_or(10., |name| (cell / (name.chars().count().max(1) as f32 * 0.62)).clamp(6., 10.));
-                                painter.with_clip_rect(label_clip).text(
-                                    Pos2::new(
-                                        r.left() + label_w + (f as f32 + 0.5) * cell,
-                                        r.top() + 12.,
-                                    ),
-                                    egui::Align2::CENTER_CENTER,
-                                    pose_label.unwrap_or_else(|| (f + 1).to_string()),
-                                    egui::FontId::monospace(size),
-                                    crate::themes::muted(),
-                                );
-                            }
-                        }
+                        let painter = painter.with_clip_rect(clip);
                         for row in visible {
                             ui.set_clip_rect(labels_clip);
                             let painter = ui.painter().with_clip_rect(labels_clip);
@@ -1185,7 +1199,7 @@ impl Editor {
                                     if response.drag_started_by(egui::PointerButton::Primary) {
                                         self.feature.row_drag = Some((true, index));
                                     }
-                                    if label.contains(
+                                    if label.intersect(labels_clip).contains(
                                         ui.input(|i| {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         }),
@@ -1422,7 +1436,7 @@ impl Editor {
                                         self.doc.layers[l].options.opacity = opacity / 100.;
                                         self.recover();
                                     }
-                                    if label.contains(
+                                    if label.intersect(labels_clip).contains(
                                         ui.input(|i| {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         }),
@@ -1464,7 +1478,7 @@ impl Editor {
                                                 }
                                                 if response.drag_stopped_by(egui::PointerButton::Primary) && has_key
                                                     && let Some(pos) = response.interact_pointer_pos()
-                                                    && (animation_row.top()..=animation_row.bottom()).contains(&pos.y)
+                                                    && animation_row.intersect(grid_clip).contains(pos)
                                                 {
                                                     let dest = ((pos.x - origin) / cell).floor() as usize;
                                                     if dest < count { edit = Some((f, Some(dest))); }
@@ -1985,7 +1999,7 @@ impl Editor {
                                         if response.dragged_by(egui::PointerButton::Primary)
                                             && let Some(from) = ui.data(|data| data.get_temp::<usize>(key_drag))
                                             && let Some(pos) = response.interact_pointer_pos()
-                                            && rect.contains(pos)
+                                            && rect.intersect(grid_clip).contains(pos)
                                         {
                                             let to = local_at(pos);
                                             let dest = Rect::from_min_size(Pos2::new(rect.left() + to as f32 * cell, rect.top()), Vec2::new(cell, rect.height()));
@@ -1995,12 +2009,12 @@ impl Editor {
                                         if response.drag_stopped_by(egui::PointerButton::Primary) {
                                             let source = ui.data_mut(|data| data.remove_temp::<usize>(key_drag));
                                             if let (Some(from), Some(pos)) = (source, response.interact_pointer_pos())
-                                                && rect.contains(pos)
+                                                && rect.intersect(grid_clip).contains(pos)
                                             {
                                                 self.move_camera_key(c.id, from, local_at(pos));
                                             }
                                         }
-                                        if rect.contains(ui.input(|i| {
+                                        if rect.intersect(grid_clip).contains(ui.input(|i| {
                                             i.pointer.interact_pos().unwrap_or(Pos2::ZERO)
                                         })) {
                                             camera_target = Some(index);
@@ -2151,10 +2165,11 @@ impl Editor {
                         let empty_top=r.top()+header_height+all.len() as f32*row_h;
                         self.animation_drop_target(ui,Rect::from_min_max(Pos2::new(r.left()+label_w,empty_top),r.max),r.left()+label_w,cell,None);
                         let x = r.left() + label_w + (self.frame as f32 + 0.5) * cell;
-                        painter.with_clip_rect(grid_clip).line_segment(
-                            [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
+                        ui.painter().with_clip_rect(viewport_clip.with_min_x(grid_clip.left())).line_segment(
+                            [Pos2::new(x, header_top), Pos2::new(x, r.bottom())],
                             Stroke::new(1., crate::themes::accent()),
                         );
+                        ui.set_clip_rect(viewport_clip);
                     })
                 }).inner;
                 if let Some(pos)=ui.input(|i|if i.pointer.any_pressed(){i.pointer.interact_pos()}else{None}) {
@@ -2648,10 +2663,15 @@ mod viewport_input_tests {
     use super::*;
 
     #[test]
-    fn wheel_zooms_at_the_pointer_and_middle_drag_pans_without_scrubbing() {
+    fn slider_zooms_middle_drag_pans_and_wheel_scrolls_below_fixed_ruler() {
         let ctx = egui::Context::default();
         let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         editor.doc.layers[0].frames.resize(100, Default::default());
+        for number in 2..=20 {
+            let mut layer = editor.doc.layers[0].clone();
+            layer.name = format!("Layer {number}");
+            editor.doc.layers.push(layer);
+        }
         let mut time = 0.;
         let mut render = |editor: &mut Editor, events| {
             time += 1. / 60.;
@@ -2672,7 +2692,7 @@ mod viewport_input_tests {
                     .find_map(|shape| {
                         if let egui::Shape::Text(text) = &shape.shape
                             && text.galley.job.text == number
-                            && text.pos.y > 520.
+                            && (number == "Zoom" || text.pos.y > 520.)
                         {
                             return Some(text.visual_bounding_rect().center());
                         }
@@ -2680,25 +2700,28 @@ mod viewport_input_tests {
                     })
                     .unwrap_or_else(|| panic!("timeline ruler label {number} missing"))
             };
-            [label("5"), label("10"), label("Layer 1")]
+            [label("5"), label("10"), label("Layer 17"), label("Zoom")]
         };
         render(&mut editor, vec![]);
         let before = render(&mut editor, vec![]);
-        let pointer = before[0];
-        let zoomed = render(
+        let scrolled = render(
             &mut editor,
             vec![
-                egui::Event::PointerMoved(pointer),
+                egui::Event::PointerMoved(before[2]),
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     phase: egui::TouchPhase::Move,
                     source: egui::MouseWheelSource::Unknown,
-                    delta: Vec2::new(0., 120.),
+                    delta: Vec2::new(0., -45.),
                     modifiers: egui::Modifiers::NONE,
                 },
             ],
         );
-        assert!(zoomed[1].x - zoomed[0].x > before[1].x - before[0].x);
+        let settled = render(&mut editor, vec![]);
+        assert_eq!(scrolled[0], before[0]);
+        assert_eq!(settled[0], before[0]);
+        assert!(settled[2].y < before[2].y);
+        let pointer = before[0];
         let press = egui::Event::PointerButton {
             pos: pointer,
             button: egui::PointerButton::Middle,
@@ -2715,6 +2738,26 @@ mod viewport_input_tests {
             (panned[2].x - before_pan[2].x).abs() < 1.,
             "layer labels must stay pinned while frames move"
         );
+        render(
+            &mut editor,
+            vec![egui::Event::PointerButton {
+                pos: pointer - Vec2::new(40., 0.),
+                button: egui::PointerButton::Middle,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let zoom = before[3] - Vec2::new(35., 0.);
+        render(&mut editor, vec![egui::Event::PointerMoved(zoom)]);
+        let slider_press = |pressed| egui::Event::PointerButton {
+            pos: zoom,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(&mut editor, vec![slider_press(true)]);
+        let zoomed = render(&mut editor, vec![slider_press(false)]);
+        assert!(((zoomed[1].x - zoomed[0].x) - (panned[1].x - panned[0].x)).abs() > 5.);
         assert_eq!(editor.frame, 0);
     }
 }

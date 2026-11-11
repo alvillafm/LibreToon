@@ -3,7 +3,7 @@
 use crate::{document::Mark, vector, width};
 use eframe::egui::{Pos2, Rect};
 use geo::{
-    BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Polygon,
+    Area, BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Polygon,
     algorithm::buffer::{BufferStyle, LineCap, LineJoin},
 };
 
@@ -46,9 +46,30 @@ fn line(points: impl IntoIterator<Item = Pos2>) -> LineString<f64> {
     )
 }
 pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec<Mark>, String> {
-    let mut result = Err("No se encontró una zona cerrada en la capa activa".into());
+    let exact = fill_at_level(marks, click, Gap::None, color);
+    if gap == Gap::None {
+        return exact;
+    }
+    if let Ok(original) = exact {
+        // A bounded region can still leak into a tiny neighbouring tip.
+        // Keep only local closures that trim a small part of the original face.
+        if let Ok(closed) = fill_at_level(marks, click, gap, color) {
+            let polygons =
+                |marks: &[Mark]| MultiPolygon(marks.iter().map(vector::polygon).collect());
+            let before = polygons(&original);
+            let after = polygons(&closed);
+            let area = before.unsigned_area();
+            let overlap = before.intersection(&after).unsigned_area();
+            if overlap >= area * 0.95 && after.unsigned_area() - overlap <= area * 0.005 {
+                return Ok(closed);
+            }
+        }
+        return Ok(original);
+    }
+    let mut result = exact;
     for level in Gap::ALL
         .into_iter()
+        .skip(1)
         .take_while(|level| level.distance() <= gap.distance())
     {
         result = fill_at_level(marks, click, level, color);
@@ -76,7 +97,7 @@ fn fill_at_level(
             && m.style.instance.is_none()
             && (m.stroke || m.fill.is_some_and(|color| color[3] > 0))
     }) {
-        let points = vector::flatten(mark, 0.12);
+        let points = vector::flatten(mark, 0.04);
         if points.len() < 2 {
             continue;
         }
@@ -84,7 +105,7 @@ fn fill_at_level(
             bounds.extend_with(*p);
         }
         let thickness = if mark.stroke {
-            mark.width.max(0.5)
+            mark.width.max(0.01)
         } else {
             0.5
         };
@@ -121,6 +142,8 @@ fn fill_at_level(
     if obstacles.is_empty() {
         return Err("No se encontró una zona cerrada en la capa activa".into());
     }
+    let real_ink = geo::algorithm::bool_ops::unary_union(&obstacles);
+    let mut bridges = Vec::new();
     if gap != Gap::None {
         let threshold = gap.distance();
         for (owner, (path, thickness, closed)) in paths.iter().enumerate() {
@@ -136,7 +159,8 @@ fn fill_at_level(
                 };
                 let outward = (endpoint - adjacent).normalized();
                 let mut nearest: Option<(Pos2, f32)> = None;
-                for (other, (other_path, _, _)) in paths.iter().enumerate() {
+                let mut joined = false;
+                'neighbors: for (other, (other_path, _, _)) in paths.iter().enumerate() {
                     for (segment, pair) in other_path.windows(2).enumerate() {
                         if other == owner {
                             let distance_along = if at_end {
@@ -153,6 +177,10 @@ fn fill_at_level(
                             ((endpoint - pair[0]).dot(d) / d.length_sq().max(1e-12)).clamp(0., 1.);
                         let target = pair[0] + d * t;
                         let distance = endpoint.distance(target);
+                        if other != owner && distance <= 0.08 {
+                            joined = true;
+                            break 'neighbors;
+                        }
                         if distance > 0.001
                             && distance <= threshold
                             && (target - endpoint).dot(outward) > distance * 0.12
@@ -162,8 +190,8 @@ fn fill_at_level(
                         }
                     }
                 }
-                if let Some((target, _)) = nearest {
-                    obstacles.push(
+                if !joined && let Some((target, _)) = nearest {
+                    bridges.push(
                         line([endpoint, target]).buffer_with_style(
                             BufferStyle::new(f64::from(*thickness).min(1.) / 2.)
                                 .line_cap(LineCap::Square),
@@ -185,7 +213,11 @@ fn fill_at_level(
         ]),
         vec![],
     );
-    let ink = geo::algorithm::bool_ops::unary_union(&obstacles);
+    let ink = if bridges.is_empty() {
+        real_ink.clone()
+    } else {
+        real_ink.union(&geo::algorithm::bool_ops::unary_union(&bridges))
+    };
     let region = match bounded_face(&outer, &ink, guard, click) {
         Ok(region) => region,
         Err(error) if gap != Gap::None && !silhouettes.is_empty() => {
@@ -203,7 +235,7 @@ fn fill_at_level(
     };
     // Overlap real ink to cover antialiasing seams. Virtual bridges stay flat.
     let face = MultiPolygon(vec![region]);
-    let underpaint = face.buffer(0.35).intersection(&ink);
+    let underpaint = face.buffer(0.35).intersection(&real_ink);
     let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
     for shape in &mut shapes {
         shape.bucket = true;
@@ -212,7 +244,6 @@ fn fill_at_level(
 }
 
 pub(crate) fn covered_bucket_fills(marks: &[Mark], replacement: &[Mark]) -> Vec<usize> {
-    use geo::Area;
     let faces: Vec<_> = replacement.iter().map(vector::polygon).collect();
     let replacement = geo::algorithm::bool_ops::unary_union(&faces);
     marks
@@ -380,6 +411,48 @@ mod tests {
         assert!(fill(&marks, Pos2::new(12., 70.), Gap::Large, [0, 0, 0, 255]).is_err());
     }
 
+    #[test]
+    fn closing_gaps_keeps_paint_out_of_a_small_tip_connected_to_a_bounded_face() {
+        let marks = [
+            Mark {
+                closed: true,
+                ..contour(0.)
+            },
+            Mark {
+                points: vec![[10., 0.], [10., 8.], [2., 10.]].into(),
+                width: 1.,
+                ..Default::default()
+            },
+        ];
+        let click = Pos2::new(50., 50.);
+        let tip = Pos2::new(5., 4.);
+        assert!(
+            fill(&marks, click, Gap::None, [255; 4])
+                .unwrap()
+                .iter()
+                .any(|m| vector::contains_fill(m, tip))
+        );
+        assert!(
+            !fill(&marks, click, Gap::Medium, [255; 4])
+                .unwrap()
+                .iter()
+                .any(|m| vector::contains_fill(m, tip))
+        );
+    }
+    #[test]
+    fn fill_overlap_covers_ink_without_painting_over_a_virtual_bridge() {
+        let shapes = fill(&[contour(8.)], Pos2::new(50., 50.), Gap::Medium, [255; 4]).unwrap();
+        assert!(
+            shapes
+                .iter()
+                .any(|mark| vector::contains_fill(mark, Pos2::new(0.75, 4.)))
+        );
+        assert!(
+            !shapes
+                .iter()
+                .any(|mark| vector::contains_fill(mark, Pos2::new(0.25, 4.)))
+        );
+    }
     #[test]
     fn gap_levels_close_only_gaps_within_their_threshold() {
         let m = contour(8.);

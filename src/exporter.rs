@@ -708,6 +708,8 @@ pub(crate) fn run_export(
                 true,
                 true,
                 true,
+                true,
+                None,
             );
             for pixel in rgba.chunks_exact_mut(4) {
                 let alpha = u32::from(pixel[3]);
@@ -939,7 +941,7 @@ pub(crate) fn raster_with_video(
         local,
     );
     raster_composited(
-        doc, frame, w, h, ctx, cache, video, resolved, local, false, true, true, true,
+        doc, frame, w, h, ctx, cache, video, resolved, local, false, true, true, true, true, None,
     )
 }
 pub(crate) fn raster_preview(
@@ -954,10 +956,26 @@ pub(crate) fn raster_preview(
     camera: bool,
     post: bool,
     blur: bool,
+    full_quality: bool,
+    cancel: Option<&AtomicBool>,
 ) -> Vec<u8> {
     let resolved = crate::features::resolve_preview(doc, frame, camera, clock);
     raster_composited(
-        doc, frame, w, h, ctx, cache, video, resolved, clock, false, post, blur, camera,
+        doc,
+        frame,
+        w,
+        h,
+        ctx,
+        cache,
+        video,
+        resolved,
+        clock,
+        false,
+        post,
+        blur,
+        camera,
+        full_quality,
+        cancel,
     )
 }
 // Keep a single shaded image per receiver layer. Keys own their shared mark
@@ -966,6 +984,7 @@ pub(crate) fn raster_preview(
 struct LitPlaneKey {
     layer: usize,
     dimensions: [u32; 5],
+    region: Option<LitRegion>,
     artwork: Vec<(usize, usize, crate::Mark)>,
     lights: Vec<(crate::light::ShadingKey, f32)>,
     guide: bool,
@@ -1038,7 +1057,13 @@ fn raster_composited(
     post: bool,
     camera_blur: bool,
     camera: bool,
+    full_quality: bool,
+    cancel: Option<&AtomicBool>,
 ) -> Vec<u8> {
+    let canceled = || cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+    if canceled() {
+        return Vec::new();
+    }
     cache.begin_frame();
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
@@ -1127,8 +1152,21 @@ fn raster_composited(
             } else {
                 pad
             };
+            let region = if full_quality && use_world {
+                camera_track.and_then(|track| {
+                    let output = lit_output_view(&scene, local, Some(track), plane, w, h, pad);
+                    LitRegion::new(output, scale, [pw, ph], |source_scale, step| {
+                        target_lights
+                            .clone()
+                            .map(|(_, light, _)| light.region_padding(local, source_scale, step))
+                            .fold(0., f32::max)
+                    })
+                })
+            } else {
+                None
+            };
             let render_art = |cache: &mut crate::paint::RenderCache, subset: RenderSubset| {
-                raster_flat(
+                raster_flat_in_view(
                     doc,
                     w,
                     h,
@@ -1139,6 +1177,7 @@ fn raster_composited(
                     artwork,
                     source_pad,
                     true,
+                    region.map(|r| (r.size, r.view())),
                 )
             };
             let mut raw = if let Some(layer) = layer {
@@ -1167,6 +1206,7 @@ fn raster_composited(
                 let key = use_world.then(|| LitPlaneKey {
                     layer: subset.1,
                     dimensions: [doc.width, doc.height, w, h, source_pad],
+                    region,
                     artwork: artwork
                         .iter()
                         .filter(|(index, _, mark)| {
@@ -1207,10 +1247,10 @@ fn raster_composited(
                         h,
                         source_pad,
                         pad,
+                        region,
                         &pixels,
                     )
                 } else {
-                    let mut raw = render_art(cache, RenderSubset::Single(false, subset.1));
                     let height =
                         has_local_guide.then(|| render_art(cache, RenderSubset::Height(subset.1)));
                     let scene_mask =
@@ -1247,6 +1287,19 @@ fn raster_composited(
                     }
                     let shade = |image: &mut Vec<u8>, mask: Option<&[u8]>| {
                         for (_, light, opacity) in target_lights.clone() {
+                            if let Some(region) = region {
+                                light.shade_region(
+                                    image,
+                                    region.size,
+                                    region.view(),
+                                    region.surface_step,
+                                    local,
+                                    *opacity,
+                                    height.as_deref(),
+                                    mask,
+                                );
+                                continue;
+                            }
                             light.apply_padded(
                                 image,
                                 w,
@@ -1261,11 +1314,17 @@ fn raster_composited(
                             );
                         }
                     };
+                    let mut raw;
                     if pieces.len() > 1 || masked {
-                        raw.fill(0);
+                        let [sw, sh] =
+                            region.map_or([w + source_pad * 2, h + source_pad * 2], |r| r.size);
+                        raw = vec![0; sw as usize * sh as usize * 4];
                         let mut last_root = None;
                         let mut mask = None;
                         for (root, piece) in pieces {
+                            if canceled() {
+                                return;
+                            }
                             if root != last_root {
                                 mask = root.filter(|root| mask_roots.contains(root)).map(|root| {
                                     render_art(cache, RenderSubset::LightMask(subset.1, root))
@@ -1283,6 +1342,7 @@ fn raster_composited(
                             composite(&mut raw, &image, 4);
                         }
                     } else {
+                        raw = render_art(cache, RenderSubset::Single(false, subset.1));
                         shade(&mut raw, scene_mask.as_deref());
                     }
                     if let Some(key) = key {
@@ -1296,6 +1356,7 @@ fn raster_composited(
                             h,
                             source_pad,
                             pad,
+                            region,
                             &pixels,
                         );
                         cache.lit_planes.insert(LitPlane {
@@ -1376,6 +1437,9 @@ fn raster_composited(
             }
         };
         for layer in 0..=scene.layers.len() {
+            if canceled() {
+                return Vec::new();
+            }
             while clips.peek().is_some_and(|(_, c)| c.slot <= layer) {
                 let (i, clip) = clips.next().unwrap();
                 render(&mut result, (true, i), &clip.depth);
@@ -1403,6 +1467,9 @@ fn raster_composited(
                 }
             }
         }
+        if canceled() {
+            return Vec::new();
+        }
         return if adjust {
             finish_adjusted(result, transparent)
         } else {
@@ -1413,6 +1480,9 @@ fn raster_composited(
         let mut result = vec![0; (w * h * 4) as usize];
         let mut start = 0;
         for (index, layer) in scene.layers.iter().enumerate() {
+            if canceled() {
+                return Vec::new();
+            }
             if !crate::post::visible_effects_at(layer, local)
                 || !crate::folder_groups::layer_active(&scene, layer, local)
             {
@@ -1465,8 +1535,83 @@ fn raster_composited(
         transparent,
     )
 }
-// The light is baked on the scene's pixel grid. The camera samples that
-// premultiplied texture, so subpixel camera motion never rebuilds the relief.
+#[derive(Clone, Copy, PartialEq)]
+struct LitRegion {
+    origin: Vec2,
+    size: [u32; 2],
+    scale: f32,
+    surface_step: usize,
+}
+
+impl LitRegion {
+    fn new(
+        output: View,
+        stage_scale: f32,
+        size: [u32; 2],
+        padding: impl FnOnce(f32, usize) -> f32,
+    ) -> Option<Self> {
+        let zoom = output.scale / stage_scale;
+        if zoom <= 1. {
+            return None;
+        }
+        // Use a world-aligned grid with at least one source sample per output pixel.
+        // Quantizing the density lets adjacent camera poses share the same grid.
+        let scale = (stage_scale * zoom.ceil()).max(output.scale);
+        let surface_step = size[0].max(size[1]).div_ceil(1024) as usize;
+        let tile = (surface_step * 16) as f32;
+        let corners = [
+            Pos2::ZERO,
+            Pos2::new(size[0] as f32, 0.),
+            Pos2::new(0., size[1] as f32),
+            Pos2::new(size[0] as f32, size[1] as f32),
+        ];
+        let bounds = Rect::from_points(&corners.map(|p| output.world(p) * scale))
+            .expand(padding(scale, surface_step).min(512.) + 2.);
+        let min = (bounds.min.to_vec2() / tile).floor() * tile;
+        let max = (bounds.max.to_vec2() / tile).ceil() * tile;
+        let extent = max - min;
+        Some(Self {
+            origin: min,
+            size: [extent.x as u32, extent.y as u32],
+            scale,
+            surface_step,
+        })
+    }
+
+    fn view(self) -> View {
+        View {
+            center: Pos2::ZERO - self.origin,
+            stage_center: Pos2::ZERO,
+            angle: 0.,
+            scale: self.scale,
+        }
+    }
+}
+
+fn lit_output_view(
+    doc: &Document,
+    frame: usize,
+    camera: Option<&crate::features::Camera>,
+    plane: &crate::depth::LayerDepth,
+    w: u32,
+    h: u32,
+    pad: u32,
+) -> View {
+    let pose = camera.map(|camera| crate::animation::camera_at(camera, frame));
+    let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
+    let view = View {
+        center: Pos2::new(w as f32 * 0.5 + pad as f32, h as f32 * 0.5 + pad as f32),
+        stage_center: Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5),
+        angle: pose.as_ref().map_or(0., |pose| -pose.angle),
+        scale: scale * pose.as_ref().map_or(1., |pose| pose.zoom),
+    };
+    if camera.is_some() {
+        crate::depth::view_for_plane(doc, frame, plane, view)
+    } else {
+        view
+    }
+}
+
 fn project_lit_plane(
     doc: &Document,
     frame: usize,
@@ -1476,22 +1621,17 @@ fn project_lit_plane(
     h: u32,
     source_pad: u32,
     output_pad: u32,
+    region: Option<LitRegion>,
     source: &[u8],
 ) -> Vec<u8> {
-    let pose = camera.map(|camera| crate::animation::camera_at(camera, frame));
-    let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
-    let center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
-    let source_w = w + source_pad * 2;
-    let source_h = h + source_pad * 2;
     let output_w = w + output_pad * 2;
     let output_h = h + output_pad * 2;
-    let view = View {
-        center: Pos2::new(output_w as f32 * 0.5, output_h as f32 * 0.5),
-        stage_center: center,
-        angle: pose.as_ref().map_or(0., |pose| -pose.angle),
-        scale: scale * pose.as_ref().map_or(1., |pose| pose.zoom),
+    let ([source_w, source_h], source_view) = if let Some(region) = region {
+        (region.size, region.view())
+    } else {
+        stage_raster_view(doc, w, h, source_pad)
     };
-    if pose.is_none() && source_pad >= output_pad {
+    if camera.is_none() && region.is_none() && source_pad >= output_pad {
         let inset = (source_pad - output_pad) as usize;
         return source
             .chunks_exact(source_w as usize * 4)
@@ -1504,15 +1644,10 @@ fn project_lit_plane(
             })
             .collect();
     }
-    let output = if camera.is_some() {
-        crate::depth::view_for_plane(doc, frame, plane, view)
-    } else {
-        view
-    };
-    let source_center = Vec2::new(source_w as f32 * 0.5 - 0.5, source_h as f32 * 0.5 - 0.5);
-    let start = (output.world(Pos2::new(0.5, 0.5)) - center) * scale + source_center;
-    let dx = crate::canvas::rotate(Vec2::X * (scale / output.scale), -output.angle);
-    let dy = crate::canvas::rotate(Vec2::Y * (scale / output.scale), -output.angle);
+    let output = lit_output_view(doc, frame, camera, plane, w, h, output_pad);
+    let start = source_view.screen(output.world(Pos2::new(0.5, 0.5))) - Vec2::splat(0.5);
+    let dx = crate::canvas::rotate(Vec2::X * (source_view.scale / output.scale), -output.angle);
+    let dy = crate::canvas::rotate(Vec2::Y * (source_view.scale / output.scale), -output.angle);
     let mut pixels = vec![0; output_w as usize * output_h as usize * 4];
     let sample = |x: i32, y: i32| -> [u8; 4] {
         if x < 0 || y < 0 || x >= source_w as i32 || y >= source_h as i32 {
@@ -1627,6 +1762,45 @@ fn raster_flat(
     padding: u32,
     transparent: bool,
 ) -> Vec<u8> {
+    raster_flat_in_view(
+        doc,
+        w,
+        h,
+        ctx,
+        cache,
+        video,
+        subset,
+        resolved,
+        padding,
+        transparent,
+        None,
+    )
+}
+
+fn stage_raster_view(doc: &Document, w: u32, h: u32, padding: u32) -> ([u32; 2], View) {
+    let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
+    let size = [w + padding * 2, h + padding * 2];
+    let view = View {
+        center: Pos2::new(size[0] as f32 * 0.5, size[1] as f32 * 0.5),
+        scale,
+        angle: 0.,
+        stage_center: Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5),
+    };
+    (size, view)
+}
+fn raster_flat_in_view(
+    doc: &Document,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+    subset: Option<RenderSubset>,
+    resolved: &[(usize, usize, crate::Mark)],
+    padding: u32,
+    transparent: bool,
+    source: Option<([u32; 2], View)>,
+) -> Vec<u8> {
     let height_only = subset.is_some_and(RenderSubset::height_only);
     let mask_root = match subset {
         Some(RenderSubset::LightMask(_, root)) => Some(root),
@@ -1636,15 +1810,8 @@ fn raster_flat(
         Some(RenderSubset::SceneLightMask(id)) => Some(id),
         _ => None,
     };
-    let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
-    let (w, h) = (w + padding * 2, h + padding * 2);
+    let ([w, h], view) = source.unwrap_or_else(|| stage_raster_view(doc, w, h, padding));
     let size = Vec2::new(w as f32, h as f32);
-    let view = View {
-        center: Pos2::ZERO + size / 2.,
-        scale,
-        angle: 0.,
-        stage_center: Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.),
-    };
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
@@ -1950,6 +2117,91 @@ mod tests {
             let row = y * 96 * 3;
             assert_eq!(&first[row + 21..row + 96 * 3], &second[row..row + 89 * 3]);
         }
+    }
+
+    #[test]
+    fn export_rasterizes_lit_vector_edges_at_camera_resolution() {
+        let mut doc = Document::default();
+        doc.width = 96;
+        doc.height = 64;
+        doc.layers[0].frames[0].push(crate::Mark {
+            points: vec![[48.2, 10.], [75., 54.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([0, 0, 0, 255]),
+            stroke: false,
+            ..Default::default()
+        });
+        let mut lighting = doc.layers[0].clone();
+        lighting.frames[0].clear();
+        lighting.options.light = Some(crate::light::Light::new(
+            96,
+            64,
+            crate::light::Kind::Ambient,
+        ));
+        lighting.options.opacity = 0.;
+        doc.layers.push(lighting);
+        doc.extras.cameras.push(crate::features::Camera {
+            id: 1,
+            name: "Camera".into(),
+            start: 0,
+            duration: 1,
+            center: [48., 32.],
+            zoom: 4.,
+            angle: 0.,
+            optics: Default::default(),
+            animation: Default::default(),
+        });
+        let ctx = egui::Context::default();
+        let mut cache = crate::paint::RenderCache::default();
+        let fast = raster_preview(
+            &doc,
+            0,
+            0,
+            96,
+            64,
+            &ctx,
+            &mut cache,
+            &[],
+            true,
+            true,
+            false,
+            false,
+            None,
+        );
+        let full = raster(&doc, 0, 96, 64, &ctx, &mut cache);
+        let preview = raster_preview(
+            &doc,
+            0,
+            0,
+            96,
+            64,
+            &ctx,
+            &mut cache,
+            &[],
+            true,
+            true,
+            false,
+            true,
+            None,
+        );
+        assert_eq!(preview, full);
+        assert_eq!(full.len(), 96 * 64 * 3);
+        doc.layers.pop();
+        let direct = raster(&doc, 0, 96, 64, &ctx, &mut cache);
+        let error = |image: &[u8]| {
+            image
+                .iter()
+                .zip(&direct)
+                .map(|(p, q)| u64::from(p.abs_diff(*q)))
+                .sum::<u64>()
+        };
+        assert!(
+            error(&full) * 2 < error(&fast),
+            "full {}, fast {}",
+            error(&full),
+            error(&fast)
+        );
     }
 
     #[test]
