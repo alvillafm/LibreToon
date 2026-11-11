@@ -2,7 +2,10 @@
 //! actual ink. Gap bridges are temporary and never change the user's contours.
 use crate::{document::Mark, vector, width};
 use eframe::egui::{Pos2, Rect};
-use geo::{BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Polygon};
+use geo::{
+    BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Polygon,
+    algorithm::buffer::{BufferStyle, LineCap, LineJoin},
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Gap {
@@ -43,15 +46,36 @@ fn line(points: impl IntoIterator<Item = Pos2>) -> LineString<f64> {
     )
 }
 pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec<Mark>, String> {
-    if gap != Gap::None
-        && let Ok(shapes) = fill(marks, click, Gap::None, color)
+    let mut result = Err("No se encontró una zona cerrada en la capa activa".into());
+    for level in Gap::ALL
+        .into_iter()
+        .take_while(|level| level.distance() <= gap.distance())
     {
-        return Ok(shapes);
+        result = fill_at_level(marks, click, level, color);
+        if result.is_ok() {
+            break;
+        }
     }
+    result
+}
+
+fn fill_at_level(
+    marks: &[Mark],
+    click: Pos2,
+    gap: Gap,
+    color: [u8; 4],
+) -> Result<Vec<Mark>, String> {
     let mut paths: Vec<(Vec<Pos2>, f32, bool)> = vec![];
     let mut obstacles: Vec<MultiPolygon<f64>> = vec![];
+    let mut silhouettes = Vec::new();
     let mut bounds = Rect::from_min_max(click, click);
-    for mark in marks.iter().filter(|m| !m.bucket) {
+    for mark in marks.iter().filter(|m| {
+        !m.bucket
+            && !m.style.guide
+            && m.style.media_image.is_none()
+            && m.style.instance.is_none()
+            && (m.stroke || m.fill.is_some_and(|color| color[3] > 0))
+    }) {
         let points = vector::flatten(mark, 0.12);
         if points.len() < 2 {
             continue;
@@ -75,11 +99,15 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         } else if mark.fill.is_some() {
             // Filled brush silhouettes already describe the real ink boundary.
             // Buffering their edge creates an artificial white gutter inside it.
-            obstacles.push(MultiPolygon(vec![vector::polygon(mark)]));
+            let polygon = vector::polygon(mark);
+            silhouettes.push(polygon.clone());
+            obstacles.push(MultiPolygon(vec![polygon]));
         }
-        if mark.stroke || mark.fill.is_some() {
-            paths.push((points, thickness, mark.closed || mark.rectangle));
-        }
+        paths.push((
+            points,
+            thickness,
+            !mark.stroke || mark.closed || mark.rectangle,
+        ));
         for hole in &mark.holes {
             let points: Vec<_> = hole.iter().copied().map(vector::pos).collect();
             if points.len() > 2 {
@@ -135,8 +163,12 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
                     }
                 }
                 if let Some((target, _)) = nearest {
-                    obstacles
-                        .push(line([endpoint, target]).buffer(f64::from(*thickness).min(1.) / 2.));
+                    obstacles.push(
+                        line([endpoint, target]).buffer_with_style(
+                            BufferStyle::new(f64::from(*thickness).min(1.) / 2.)
+                                .line_cap(LineCap::Square),
+                        ),
+                    );
                 }
             }
         }
@@ -153,17 +185,58 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
         ]),
         vec![],
     );
-    let mut ink = geo::algorithm::bool_ops::unary_union(&obstacles);
-    if gap != Gap::None
-        && marks
-            .iter()
-            .any(|mark| !mark.bucket && !mark.stroke && mark.fill.is_some())
-    {
-        let radius = gap.distance() as f64 / 2.;
-        let closed = ink.buffer(radius).buffer(-radius);
-        ink = ink.union(&closed);
+    let ink = geo::algorithm::bool_ops::unary_union(&obstacles);
+    let region = match bounded_face(&outer, &ink, guard, click) {
+        Ok(region) => region,
+        Err(error) if gap != Gap::None && !silhouettes.is_empty() => {
+            // Filled brush paths have no centerline endpoints. Close their silhouettes
+            // separately so a filled mark cannot round the corners of every stroke.
+            let radius = f64::from(gap.distance()) / 2.;
+            let silhouettes = geo::algorithm::bool_ops::unary_union(&silhouettes);
+            let closed = silhouettes
+                .buffer_with_style(BufferStyle::new(radius).line_join(LineJoin::Miter(2.)))
+                .buffer_with_style(BufferStyle::new(-radius).line_join(LineJoin::Miter(2.)));
+            let closed_ink = ink.union(&closed);
+            bounded_face(&outer, &closed_ink, guard, click).map_err(|_| error)?
+        }
+        Err(error) => return Err(error),
+    };
+    // Overlap real ink to cover antialiasing seams. Virtual bridges stay flat.
+    let face = MultiPolygon(vec![region]);
+    let underpaint = face.buffer(0.35).intersection(&ink);
+    let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
+    for shape in &mut shapes {
+        shape.bucket = true;
     }
-    let free = outer.difference(&ink);
+    Ok(shapes)
+}
+
+pub(crate) fn covered_bucket_fills(marks: &[Mark], replacement: &[Mark]) -> Vec<usize> {
+    use geo::Area;
+    let faces: Vec<_> = replacement.iter().map(vector::polygon).collect();
+    let replacement = geo::algorithm::bool_ops::unary_union(&faces);
+    marks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, mark)| {
+            if !mark.bucket || mark.fill.is_none() {
+                return None;
+            }
+            let old = vector::polygon(mark);
+            let area = old.unsigned_area();
+            (area > 0. && replacement.intersection(&old).unsigned_area() >= area * 0.8)
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn bounded_face(
+    outer: &Polygon<f64>,
+    ink: &MultiPolygon<f64>,
+    guard: Rect,
+    click: Pos2,
+) -> Result<Polygon<f64>, String> {
+    let free = outer.difference(ink);
     let point = geo::Point::new(click.x as f64, click.y as f64);
     let region = free
         .0
@@ -178,16 +251,7 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
     {
         return Err("La zona está abierta. Prueba otro nivel de cierre de huecos".into());
     }
-    // Tuck a small overlap beneath existing ink to cover tessellation/AA seams.
-    // Intersect with ink so expansion cannot spill into any neighbouring face,
-    // even through thin outlines. Bucket marks are inserted behind the contours.
-    let face = MultiPolygon(vec![region]);
-    let underpaint = face.buffer(0.35).intersection(&ink);
-    let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
-    for shape in &mut shapes {
-        shape.bucket = true;
-    }
-    Ok(shapes)
+    Ok(region)
 }
 
 #[cfg(test)]
@@ -277,6 +341,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unrelated_fill_does_not_round_a_narrow_channel_with_a_line_gap() {
+        let wall = Mark {
+            points: vec![[0., 0.], [80., 0.], [80., 8.], [0., 8.], [0., 5.]].into(),
+            width: 1.,
+            ..Default::default()
+        };
+        let decoration = Mark {
+            points: vec![[120., 0.], [140., 15.]].into(),
+            rectangle: true,
+            fill: Some([40, 40, 40, 255]),
+            stroke: false,
+            ..Default::default()
+        };
+        let shapes = fill(&[wall, decoration], Pos2::new(20., 4.), Gap::Large, [20; 4]).unwrap();
+        for point in [Pos2::new(1., 4.), Pos2::new(40., 1.), Pos2::new(79., 7.)] {
+            assert!(
+                shapes.iter().any(|mark| vector::contains_fill(mark, point)),
+                "{point:?}"
+            );
+        }
+        assert!(
+            !shapes
+                .iter()
+                .any(|mark| vector::contains_fill(mark, Pos2::new(-1., 4.)))
+        );
+    }
     #[test]
     fn large_gap_does_not_create_a_face_from_open_parallel_strokes() {
         let make = |x| Mark {

@@ -387,24 +387,7 @@ impl Editor {
         }
     }
     pub fn sample_apply_at(&mut self, ids: &[(usize, usize)], p: Pos2, tolerance: f32) {
-        let source = self
-            .doc
-            .layers
-            .iter()
-            .rev()
-            .filter(|l| l.visible)
-            .find_map(|l| {
-                crate::animation::marks(l, self.frame)
-                    .iter()
-                    .rev()
-                    .find(|m| {
-                        crate::vector::contains_fill(m, p)
-                            && !crate::canvas::stroke_hit(m, p, tolerance)
-                    })
-                    .cloned()
-            });
-        self.sample_at(p, tolerance);
-        if let Some(source) = source {
+        if let Some(source) = self.sample_at(p, tolerance, None) {
             self.feature.gradient_on = source.style.gradient.is_some();
             if let Some(g) = &source.style.gradient {
                 self.feature.gradient = g.clone();

@@ -198,6 +198,7 @@ impl Editor {
     pub fn color_swatches(&mut self, ui: &mut egui::Ui) {
         let old_fill = self.fill_color;
         let old_stroke = self.color;
+        self.studio.color_picker = None;
         let (r, _) = ui.allocate_exact_size(Vec2::new(65., 58.), Sense::hover());
         ui.scope_builder(
             egui::UiBuilder::new().max_rect(Rect::from_min_size(
@@ -206,11 +207,18 @@ impl Editor {
             )),
             |ui| {
                 ui.spacing_mut().interact_size = Vec2::splat(32.);
+                let popup = ui.auto_id_with("popup");
+                let was_open = egui::Popup::is_id_open(ui.ctx(), popup);
                 let response = ui
                     .color_edit_button_srgba(&mut self.color)
                     .on_hover_text(crate::i18n::tr("Contorno"));
                 ui.painter()
                     .rect_filled(response.rect.shrink(5.), 0., crate::themes::panel());
+                if egui::Popup::is_id_open(ui.ctx(), popup)
+                    || (was_open && ui.input(|i| i.pointer.primary_pressed()))
+                {
+                    self.studio.color_picker = Some((popup, false));
+                }
                 if response.clicked() {
                     self.color = self.color.to_opaque();
                     self.active_fill = false;
@@ -221,11 +229,17 @@ impl Editor {
             egui::UiBuilder::new().max_rect(Rect::from_min_size(r.min, Vec2::splat(30.))),
             |ui| {
                 ui.spacing_mut().interact_size = Vec2::splat(32.);
-                if ui
+                let popup = ui.auto_id_with("popup");
+                let was_open = egui::Popup::is_id_open(ui.ctx(), popup);
+                let response = ui
                     .color_edit_button_srgba(&mut self.fill_color)
-                    .on_hover_text(crate::i18n::tr("Relleno"))
-                    .clicked()
+                    .on_hover_text(crate::i18n::tr("Relleno"));
+                if egui::Popup::is_id_open(ui.ctx(), popup)
+                    || (was_open && ui.input(|i| i.pointer.primary_pressed()))
                 {
+                    self.studio.color_picker = Some((popup, true));
+                }
+                if response.clicked() {
                     self.fill_color = self.fill_color.to_opaque();
                     self.active_fill = true;
                 }
@@ -266,6 +280,18 @@ impl Editor {
             }
         });
     }
+    pub(crate) fn apply_picker_color(&mut self, color: Color32, fill: bool) {
+        if fill {
+            self.fill_color = color;
+            self.fill_enabled = true;
+            self.feature.gradient_on = false;
+        } else {
+            self.color = color;
+            self.stroke_enabled = true;
+        }
+        self.active_fill = fill;
+    }
+
     pub fn properties_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.);

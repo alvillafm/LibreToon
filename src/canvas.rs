@@ -530,6 +530,7 @@ impl Editor {
         } else {
             tool
         };
+        let picker = self.studio.color_picker;
         let mut state = std::mem::take(&mut self.canvas);
         state.stage_size = Vec2::new(self.doc.width as f32, self.doc.height as f32);
         if state.pen.as_ref().is_some_and(|p| {
@@ -598,14 +599,32 @@ impl Editor {
                 state = std::mem::take(&mut self.canvas);
             }
         }
-        let light_input = self.light_gizmo(ui, self.camera_view(stage_view), true);
-        let trim_input = !light_input
+        let press_position = ctx.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            })
+        });
+        let picker_click = picker.is_some()
+            && press_position.is_some_and(|pos| {
+                area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
+            });
+        let light_input = !picker_click && self.light_gizmo(ui, self.camera_view(stage_view), true);
+        let trim_input = !picker_click
+            && !light_input
             && !self.raster_active()
             && self.vector_trim_input(ui, area, self.camera_view(stage_view));
-        let folder_input = !light_input
+        let folder_input = !picker_click
+            && !light_input
             && !trim_input
             && self.folder_canvas_input(ui, area, self.camera_view(stage_view));
-        let video_input = !light_input
+        let video_input = !picker_click
+            && !light_input
             && !folder_input
             && self.video_transform_input(ui, area, self.camera_view(stage_view));
         if video_input {
@@ -632,7 +651,7 @@ impl Editor {
         ) = ctx.input(|i| {
             (
                 i.pointer.interact_pos(),
-                !video_input && i.pointer.button_pressed(PointerButton::Primary),
+                !picker_click && !video_input && i.pointer.button_pressed(PointerButton::Primary),
                 i.pointer.button_pressed(PointerButton::Middle),
                 i.pointer.button_down(PointerButton::Primary),
                 i.pointer.button_down(PointerButton::Middle),
@@ -676,30 +695,30 @@ impl Editor {
                 }
             }
         }
-        let press_position = ctx.input(|i| {
-            i.events.iter().rev().find_map(|event| match event {
-                egui::Event::PointerButton {
-                    pos,
-                    button: PointerButton::Primary,
-                    pressed: true,
-                    ..
-                } => Some(*pos),
-                _ => None,
-            })
-        });
-        let visual_handled = self.visual_canvas_input(ui, area, view, &state.selected);
-        let mut guide_handled = if (self.adjustment_active()
-            && !space
-            && !middle_down
-            && !matches!(
-                tool,
-                Tool::Pan
-                    | Tool::Zoom
-                    | Tool::RotateView
-                    | Tool::Select
-                    | Tool::Object
-                    | Tool::Transform
-            ))
+        if let Some((popup, fill)) = picker.filter(|_| picker_click) {
+            let _ = self.sample_at(
+                view.world(press_position.unwrap()),
+                3. / view.scale,
+                Some(fill),
+            );
+            self.studio.color_picker = None;
+            egui::Popup::close_id(&ctx, popup);
+        }
+        let visual_handled =
+            !picker_click && self.visual_canvas_input(ui, area, view, &state.selected);
+        let mut guide_handled = if picker_click
+            || (self.adjustment_active()
+                && !space
+                && !middle_down
+                && !matches!(
+                    tool,
+                    Tool::Pan
+                        | Tool::Zoom
+                        | Tool::RotateView
+                        | Tool::Select
+                        | Tool::Object
+                        | Tool::Transform
+                ))
             || light_input
             || trim_input
             || folder_input
@@ -851,7 +870,8 @@ impl Editor {
             state = std::mem::take(&mut self.canvas);
             ctx.request_repaint();
         }
-        if !video_input
+        if !picker_click
+            && !video_input
             && !light_input
             && over
             && ctx.input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
@@ -1909,7 +1929,9 @@ impl Editor {
             }
         }
         if over {
-            ctx.set_cursor_icon(if matches!(state.drag, Some(Drag::Pan(_))) {
+            ctx.set_cursor_icon(if picker.is_some() {
+                CursorIcon::Crosshair
+            } else if matches!(state.drag, Some(Drag::Pan(_))) {
                 CursorIcon::Grabbing
             } else if space || tool == Tool::Pan {
                 CursorIcon::Grab
@@ -3444,7 +3466,20 @@ impl Editor {
                 && !mark.style.guide
                 && crate::vector::contains_fill(mark, world)
         });
-        if let Some(index) = existing {
+        let rebuild = existing.is_none_or(|index| marks[index].bucket);
+        let new_faces = rebuild
+            .then(|| crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array()));
+        if let Some(Ok(shapes)) = new_faces.as_ref() {
+            let replaced = crate::bucket::covered_bucket_fills(marks, shapes);
+            let shapes = self.prepare_style(shapes.clone());
+            self.checkpoint();
+            self.prepare_paint_key(self.layer, self.frame);
+            let frame = &mut self.doc.layers[self.layer].frames[self.frame];
+            for index in replaced.into_iter().rev() {
+                frame.remove(index);
+            }
+            frame.splice(0..0, shapes);
+        } else if let Some(index) = existing {
             let mut mark = marks[index].clone();
             mark.fill = Some(self.fill_color.to_array());
             mark.style.gradient = self.feature.gradient_on.then(|| {
@@ -3458,17 +3493,10 @@ impl Editor {
             self.prepare_paint_key(self.layer, self.frame);
             self.doc.layers[self.layer].frames[self.frame][index] = mark;
         } else {
-            let shapes =
-                match crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array()) {
-                    Ok(shapes) => self.prepare_style(shapes),
-                    Err(error) => {
-                        self.status = error;
-                        return;
-                    }
-                };
-            self.checkpoint();
-            self.prepare_paint_key(self.layer, self.frame);
-            self.doc.layers[self.layer].frames[self.frame].splice(0..0, shapes);
+            if let Some(Err(error)) = new_faces {
+                self.status = error;
+            }
+            return;
         }
         state.clear_selection();
         self.recover();
@@ -3595,6 +3623,9 @@ mod styling_gesture_tests {
             tick(ctx, e, vec![button(point, false)]);
             assert_eq!(e.doc.layers[0].frames[0].len(), 2);
             assert!(e.doc.layers[0].frames[0][0].bucket);
+            // A legacy fill may stop short of the real contour.
+            e.doc.layers[0].frames[0][0].points = vec![[250., 225.], [350., 275.]].into();
+            e.doc.layers[0].frames[0][0].rectangle = true;
             e.fill_color = Color32::RED;
             tick(ctx, e, vec![button(point, true)]);
             tick(ctx, e, vec![button(point, false)]);
@@ -3603,6 +3634,10 @@ mod styling_gesture_tests {
                 e.doc.layers[0].frames[0][0].fill,
                 Some(Color32::RED.to_array())
             );
+            assert!(crate::vector::contains_fill(
+                &e.doc.layers[0].frames[0][0],
+                Pos2::new(225., 250.),
+            ));
         });
     }
 }
@@ -4226,6 +4261,43 @@ mod new_tool_regressions {
                 let copy = crate::fla::decode(&crate::fla::encode(&e.doc).unwrap()).unwrap();
                 assert_eq!(copy.layers[0].frames[0][0].nodes, m.nodes);
             }
+        });
+    }
+    #[test]
+    fn eyedropper_samples_transformed_bitmap_and_ignores_transparent_pixels() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0].push(rect([100., 100.], [300., 300.], [30, 40, 50, 255]));
+            let asset = crate::media::bitmap(
+                vec![210, 20, 40, 255, 0, 200, 0, 0],
+                2,
+                1,
+                "Pasted image".into(),
+            );
+            let mut image = Mark {
+                points: vec![[240., 120.], [240., 260.], [120., 260.], [120., 120.]].into(),
+                fill: Some([0; 4]),
+                stroke: false,
+                closed: true,
+                ..Mark::default()
+            };
+            image.style.media_image = Some(asset.id);
+            e.doc.extras.media.assets.push(asset);
+            e.doc.layers[0].frames[0].push(image);
+            e.activate_tool(Tool::Eyedropper);
+            let view = view(e);
+            click(ctx, e, view.screen(Pos2::new(180., 150.)));
+            assert_eq!(e.fill_color, Color32::from_rgb(210, 20, 40));
+            click(ctx, e, view.screen(Pos2::new(180., 230.)));
+            assert_eq!(e.fill_color, Color32::from_rgb(30, 40, 50));
+
+            e.activate_tool(Tool::Brush);
+            let fill = e.fill_color;
+            e.studio.color_picker = Some((egui::Id::unique("stroke-picker-test"), false));
+            click(ctx, e, view.screen(Pos2::new(180., 150.)));
+            assert_eq!(e.color, Color32::from_rgb(210, 20, 40));
+            assert_eq!(e.fill_color, fill);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            assert!(e.undo.is_empty());
         });
     }
     #[test]

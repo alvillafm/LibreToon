@@ -188,19 +188,49 @@ impl Editor {
         }
         changed
     }
-    pub fn sample_at(&mut self, point: Pos2, tolerance: f32) {
-        for layer in self.doc.layers.iter().rev().filter(|l| l.visible) {
-            for mark in layer.frames[self.frame].iter().rev() {
+    pub(crate) fn sample_at(
+        &mut self,
+        point: Pos2,
+        tolerance: f32,
+        picker: Option<bool>,
+    ) -> Option<Mark> {
+        for (layer_index, layer) in self.doc.layers.iter().enumerate().rev().filter(|(_, l)| {
+            l.visible && crate::folder_groups::layer_active(&self.doc, l, self.frame)
+        }) {
+            let point = self.depth_point(point, self.layer, layer_index);
+            let marks = crate::animation::marks(layer, self.frame);
+            for mark in marks
+                .iter()
+                .rev()
+                .filter(|mark| crate::features::object_visible(layer, mark, self.frame))
+            {
+                if mark.style.media_image.is_some() {
+                    if let Some([r, g, b, _]) = self.doc.extras.media.image_pixel(mark, point) {
+                        let color = Color32::from_rgb(r, g, b);
+                        if picker.is_none() {
+                            self.color = color;
+                            self.stroke_enabled = true;
+                        }
+                        self.apply_picker_color(color, picker.unwrap_or(true));
+                        return None;
+                    }
+                    continue;
+                }
                 let stroke = crate::canvas::stroke_hit(mark, point, tolerance);
                 if stroke {
                     let c = mark.color;
-                    self.color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                    if let Some(fill) = picker {
+                        self.apply_picker_color(color, fill);
+                        return None;
+                    }
+                    self.color = color;
                     self.stroke_enabled = true;
                     self.active_fill = false;
                     self.width = mark.width;
                     self.width_profile = mark.width_profile.clone();
                     self.width_preset = crate::width::Preset::Custom;
-                    return;
+                    return None;
                 }
                 if crate::vector::contains_fill(mark, point) {
                     let c = mark
@@ -208,13 +238,15 @@ impl Editor {
                         .gradient
                         .as_ref()
                         .map_or_else(|| mark.fill.unwrap(), |g| g.color(point));
-                    self.fill_color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-                    self.fill_enabled = true;
-                    self.active_fill = true;
-                    return;
+                    self.apply_picker_color(
+                        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+                        picker.unwrap_or(true),
+                    );
+                    return picker.is_none().then(|| mark.clone());
                 }
             }
         }
+        None
     }
     pub fn wand_select(&mut self, state: &mut Canvas, point: Pos2, add: bool) {
         let found = self

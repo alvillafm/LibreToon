@@ -1999,6 +1999,31 @@ impl MediaLibrary {
         Ok(())
     }
 
+    pub(crate) fn image_pixel(&self, mark: &crate::Mark, point: Pos2) -> Option<[u8; 4]> {
+        let (size, pixels) = self.pixels(mark.style.media_image?)?;
+        if mark.color[3] == 0 || !crate::vector::contains_fill(mark, point) {
+            return None;
+        }
+        let [origin, right, bottom] = if let Some(basis) = mark.style.texture_basis {
+            basis.map(crate::vector::pos)
+        } else {
+            let corners = crate::canvas::vertices(mark);
+            [*corners.first()?, *corners.get(1)?, *corners.get(3)?]
+        };
+        let (x, y, d) = (right - origin, bottom - origin, point - origin);
+        let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
+        let det = cross(x, y);
+        if det.abs() < 1e-8 || !det.is_finite() {
+            return None;
+        }
+        let u = (cross(d, y) / det).clamp(0., 1.);
+        let v = (cross(x, d) / det).clamp(0., 1.);
+        let x = ((u * size[0] as f32) as usize).min(size[0] - 1);
+        let y = ((v * size[1] as f32) as usize).min(size[1] - 1);
+        let pixel: [u8; 4] = pixels[(y * size[0] + x) * 4..][..4].try_into().ok()?;
+        (pixel[3] != 0).then_some(pixel)
+    }
+
     pub(crate) fn pixels(&self, id: u64) -> Option<([usize; 2], &[u8])> {
         let asset = self
             .assets
