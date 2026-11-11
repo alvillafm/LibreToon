@@ -24,6 +24,37 @@ fn ink() -> Mark {
 }
 
 #[test]
+fn inspecting_transform_does_not_modify_thin_strokes_on_later_frames() {
+    let mut editor = editor();
+    let ctx = egui::Context::default();
+    editor.frame = 2;
+    let reference = Mark {
+        points: vec![[10., 100.], [10.001, 100.], [10.001, 200.]].into(),
+        ..Mark::default()
+    };
+    let stroke = Mark {
+        points: vec![[100., 100.], [500., 100.], [500., 100.]].into(),
+        ..Mark::default()
+    };
+    for track in [0, 1] {
+        let mut reference = reference.clone();
+        let mut stroke = stroke.clone();
+        reference.style.track = track;
+        stroke.style.track = track;
+        editor.doc.layers[0].frames[0] = vec![reference].into();
+        editor.doc.layers[0].frames[2] = vec![stroke.clone()].into();
+        editor.canvas.selected = vec![(0, 0)];
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            editor.motion_transform_ui(ui)
+        })
+        .textures_delta
+        .clear();
+        assert!(editor.doc.layers[0].frames[2][0] == stroke);
+        assert!(editor.undo.is_empty());
+    }
+}
+
+#[test]
 fn switch_object_folder_uses_the_keyed_child_and_survives_save() {
     use crate::features::{ObjectFolder, ObjectFolderMode};
     let mut editor = editor();
