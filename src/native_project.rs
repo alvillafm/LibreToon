@@ -72,7 +72,7 @@ pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>
     if entries.len() > u16::MAX as usize || size.is_none_or(|size| size > LIMIT) {
         return Err("El proyecto supera el límite de 256 MiB".into());
     }
-    Ok(crate::fla_zip::pack_slices(&entries))
+    crate::fla_zip::pack_compressed(&entries).map_err(|error| error.to_string())
 }
 
 fn media_entry(id: u64) -> String {
@@ -165,6 +165,32 @@ mod tests {
             serde_json::to_vec(&restored).unwrap(),
             serde_json::to_vec(&document).unwrap()
         );
+    }
+
+    #[test]
+    fn repeated_cels_compress_losslessly_and_legacy_archives_still_open() {
+        let mut doc = crate::fresh_document();
+        let mut cel = Vec::new();
+        for y in 0..120 {
+            cel.push(crate::Mark {
+                points: vec![[10., y as f32], [150., y as f32 + 1.]].into(),
+                ..Default::default()
+            });
+        }
+        doc.layers[0].frames = vec![cel.into(); 24].into();
+        let json = serde_json::to_vec(&doc).unwrap();
+        let legacy = crate::fla_zip::pack_slices(&[(MANIFEST, MANIFEST_V1), (DOCUMENT, &json)]);
+        let compact = encode(&doc).unwrap();
+        assert!(compact.len() * 4 < legacy.len());
+        println!(
+            "Uncompressed archive: {} bytes; compressed archive: {} bytes",
+            legacy.len(),
+            compact.len()
+        );
+        for bytes in [legacy, compact] {
+            let restored = decode_if_native(&bytes).unwrap().unwrap();
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), json);
+        }
     }
 
     #[test]

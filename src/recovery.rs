@@ -1,7 +1,8 @@
-//! One background writer and one pending snapshot. Rapid edits replace the
-//! pending snapshot; shutdown flushes the last edit before joining the worker.
+//! One background writer, with the latest pending snapshot per document.
+//! Shutdown flushes every pending document before joining the worker.
 use crate::{document::Document, write_document};
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
@@ -10,7 +11,7 @@ use std::{
 
 #[derive(Default)]
 struct State {
-    pending: Option<(PathBuf, Document)>,
+    pending: HashMap<PathBuf, Document>,
     shutdown: bool,
     error: Option<String>,
 }
@@ -27,7 +28,7 @@ impl RecoveryWriter {
                 let (lock, wake) = &*shared;
                 loop {
                     let mut state = lock.lock().unwrap();
-                    while state.pending.is_none() && !state.shutdown {
+                    while state.pending.is_empty() && !state.shutdown {
                         state = wake.wait(state).unwrap();
                     }
                     if !state.shutdown {
@@ -40,10 +41,10 @@ impl RecoveryWriter {
                             .unwrap()
                             .0;
                     }
-                    let pending = state.pending.take();
+                    let pending = std::mem::take(&mut state.pending);
                     let shutdown = state.shutdown;
                     drop(state);
-                    if let Some((path, doc)) = pending {
+                    for (path, doc) in pending {
                         let result = path
                             .parent()
                             .map_or(Ok(()), std::fs::create_dir_all)
@@ -59,7 +60,7 @@ impl RecoveryWriter {
                 }
             }));
         }
-        self.shared.0.lock().unwrap().pending = Some((path, document));
+        self.shared.0.lock().unwrap().pending.insert(path, document);
         self.shared.1.notify_one();
     }
     pub fn take_error(&self) -> Option<String> {
@@ -100,6 +101,27 @@ mod tests {
         assert_eq!(restored.fps, 60);
         assert!(restored.validate().is_ok());
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn closing_flushes_recovery_for_each_open_project() {
+        let dir =
+            std::env::temp_dir().join(format!("libretoon-recovery-tabs-{}", crate::features::id()));
+        let a = dir.join("a.ltoon");
+        let b = dir.join("b.ltoon");
+        {
+            let mut writer = RecoveryWriter::default();
+            let mut doc = Document::default();
+            writer.submit(a.clone(), doc.clone());
+            doc.fps = 30;
+            writer.submit(b.clone(), doc.clone());
+            doc.fps = 48;
+            writer.submit(a.clone(), doc);
+        }
+        assert_eq!(crate::documents::read_project(&a).unwrap().fps, 48);
+        assert_eq!(crate::documents::read_project(&b).unwrap().fps, 30);
+        std::fs::remove_file(a).unwrap();
+        std::fs::remove_file(b).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
     #[test]
     fn write_failures_are_reported() {

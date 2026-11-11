@@ -25,30 +25,54 @@ pub fn pack(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
         .collect();
     pack_slices(&entries)
 }
+#[cfg(test)]
 pub fn pack_slices(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pack_entries(entries, false).unwrap()
+}
+
+pub(crate) fn pack_compressed(entries: &[(&str, &[u8])]) -> std::io::Result<Vec<u8>> {
+    pack_entries(entries, true)
+}
+
+fn pack_entries(entries: &[(&str, &[u8])], compress: bool) -> std::io::Result<Vec<u8>> {
+    use std::io::Write;
     let mut out = vec![];
     let mut central = vec![];
     for (name, data) in entries {
         let offset = out.len() as u32;
         let crc = crc32fast::hash(data);
         let size = data.len() as u32;
+        let compressed = if compress && data.len() >= 256 {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(data)?;
+            encoder.finish()?
+        } else {
+            Vec::new()
+        };
+        let (method, payload) = if !compressed.is_empty() && compressed.len() < data.len() {
+            (8, compressed.as_slice())
+        } else {
+            (0, *data)
+        };
+        let packed_size = payload.len() as u32;
         push32(&mut out, 0x04034b50);
-        for n in [20, 0x800, 0, 0, 33] {
+        for n in [20, 0x800, method, 0, 33] {
             push16(&mut out, n);
         }
         push32(&mut out, crc);
-        push32(&mut out, size);
+        push32(&mut out, packed_size);
         push32(&mut out, size);
         push16(&mut out, name.len() as u16);
         push16(&mut out, 0);
         out.extend(name.as_bytes());
-        out.extend_from_slice(data);
+        out.extend_from_slice(payload);
         push32(&mut central, 0x02014b50);
-        for n in [20, 20, 0x800, 0, 0, 33] {
+        for n in [20, 20, 0x800, method, 0, 33] {
             push16(&mut central, n);
         }
         push32(&mut central, crc);
-        push32(&mut central, size);
+        push32(&mut central, packed_size);
         push32(&mut central, size);
         push16(&mut central, name.len() as u16);
         for _ in 0..4 {
@@ -69,7 +93,7 @@ pub fn pack_slices(entries: &[(&str, &[u8])]) -> Vec<u8> {
     push32(&mut out, size);
     push32(&mut out, start);
     push16(&mut out, 0);
-    out
+    Ok(out)
 }
 pub fn document(bytes: &[u8]) -> Result<String, String> {
     xml_text(entry(bytes, b"DOMDocument.xml")?.ok_or("No se encuentra DOMDocument.xml en el FLA")?)

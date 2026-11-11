@@ -60,6 +60,7 @@ impl From<io::Error> for SaveError {
 pub struct State {
     job: Option<Job>,
     conflict: Option<(PathBuf, bool)>,
+    error: Option<String>,
     next: Option<Instant>,
     schedule: Option<(bool, bool, u32)>,
     pending: std::collections::VecDeque<PathBuf>,
@@ -116,9 +117,10 @@ fn write_snapshot(
     expected: Option<Stamp>,
     incremental: bool,
 ) -> Result<(PathBuf, Stamp), SaveError> {
+    let exists = target.try_exists()?;
     let unchanged = || -> Result<bool, SaveError> {
-        Ok(if let Some(expected) = expected {
-            stamp(target) == Some(expected)
+        Ok(if exists {
+            expected.is_some_and(|expected| stamp(target) == Some(expected))
         } else {
             !target.try_exists()?
         })
@@ -164,8 +166,18 @@ fn write_snapshot(
         writer.flush()?;
         writer.get_ref().sync_all()?;
         drop(writer);
-        let written = stamp(&temporary)
-            .ok_or_else(|| SaveError::Failed("Cannot read saved file metadata".into()))?;
+        let size = fs::metadata(&temporary)?.len();
+        let published = |path: PathBuf| {
+            let stamp = stamp(&path)
+                .filter(|stamp| stamp.length == size)
+                .ok_or_else(|| {
+                    SaveError::Failed(format!(
+                        "Could not verify the saved project at {}",
+                        path.display()
+                    ))
+                })?;
+            Ok((path, stamp))
+        };
         if incremental {
             let stem = target.file_stem().unwrap_or_default().to_string_lossy();
             let base = increment_base(&stem);
@@ -190,7 +202,7 @@ fn write_snapshot(
                     .ok_or_else(|| SaveError::Failed("No available version number".into()))?;
                 let version = target.with_file_name(format!("{base}_v{latest}.{ext}"));
                 match publish_new(&temporary, &version) {
-                    Ok(()) => return Ok((version, written)),
+                    Ok(()) => return published(version),
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(e) => return Err(e.into()),
                 }
@@ -199,7 +211,7 @@ fn write_snapshot(
         if !unchanged()? {
             return Err(SaveError::Conflict);
         }
-        if expected.is_none() {
+        if !exists {
             match publish_new(&temporary, target) {
                 Ok(()) => (),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -224,7 +236,7 @@ fn write_snapshot(
             }
             fs::rename(&temporary, target)?;
         }
-        Ok((target.to_path_buf(), written))
+        published(target.to_path_buf())
     })();
     let _ = fs::remove_file(temporary);
     result
@@ -283,7 +295,11 @@ impl Editor {
                 self.status = tr("Choose a .ltoon file for the project.").into();
                 return;
             }
-            let path = path.canonicalize().unwrap_or(path);
+            let path = if choose {
+                path.canonicalize().unwrap_or(path)
+            } else {
+                path
+            };
             if choose && self.doc.extras.imported && self.path.as_ref() == Some(&path) {
                 self.status =
                     tr("Choose a different name to preserve the original Animate file.").into();
@@ -460,7 +476,8 @@ impl Editor {
                     }
                     Err(SaveError::Failed(error)) => {
                         self.project_save.update_save = None;
-                        self.status = error;
+                        self.status = error.clone();
+                        self.project_save.error = Some(error);
                     }
                 }
             } else {
@@ -498,6 +515,18 @@ impl Editor {
             }
             if copy || cancel {
                 self.project_save.conflict = None;
+            }
+            return;
+        }
+        if let Some(error) = &self.project_save.error {
+            let mut dismiss = false;
+            egui::Modal::new(egui::Id::unique("project-save-error")).show(ctx, |ui| {
+                ui.heading(tr("Could not save the project"));
+                ui.label(error);
+                dismiss = ui.button(tr("Aceptar")).clicked();
+            });
+            if dismiss {
+                self.project_save.error = None;
             }
             return;
         }
@@ -549,7 +578,6 @@ impl Editor {
             || self.hub.closing.is_some()
             || self.updater.install_pending
             || self.references.importing()
-            || self.canvas.can_undo_pen()
             || ctx.input(|i| i.pointer.any_down())
         {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -581,6 +609,28 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_saves_use_published_metadata_and_recreate_a_missing_target() {
+        let dir =
+            std::env::temp_dir().join(format!("libretoon-repeat-save-{}", crate::features::id()));
+        fs::create_dir(&dir).unwrap();
+        let target = dir.join("animation.ltoon");
+        let mut doc = crate::fresh_document();
+        let mut expected = None;
+        for fps in [24, 25, 30, 48] {
+            doc.fps = fps;
+            let (_, saved) = write_snapshot(&doc, &target, expected, false).unwrap();
+            assert!(stamp(&target) == Some(saved));
+            expected = Some(saved);
+        }
+        fs::remove_file(&target).unwrap();
+        doc.fps = 60;
+        let (_, recreated) = write_snapshot(&doc, &target, expected, false).unwrap();
+        assert!(stamp(&target) == Some(recreated));
+        assert_eq!(crate::documents::read_project(&target).unwrap().fps, 60);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn saving_preserves_external_edits_and_creates_numbered_versions() {
