@@ -53,7 +53,7 @@ El primer benchmark conserva el cálculo original para comparar y verifica igual
 
 Validación realizada: 27 regresiones superadas tanto en desarrollo como en `release`, y los 2 benchmarks manuales superados en `release`; comprobación de formato Rust y sintaxis de PowerShell. El ejecutable de desarrollo permaneció abierto ocho segundos sin errores de arranque con una recuperación temporal aislada. Esta comprobación no sustituye una sesión de dibujo manual.
 
-Los lanzadores normales abren `target/release/libretoon.exe`; `Desarrollar.cmd` conserva el ciclo rápido de compilación de desarrollo. Al guardar código, el reinicio del editor permite el cierre normal para que termine la recuperación pendiente.
+El lanzador normal abre `target/release/libretoon.exe`. [Desarrollar.cmd](scripts/dev/Desarrollar.cmd) conserva el ciclo rápido de compilación de desarrollo. Al guardar código, el reinicio del editor permite el cierre normal para que termine la recuperación pendiente.
 
 
 ## Iteración de dibujo vectorial
@@ -189,7 +189,7 @@ Medición sintética en este entorno Linux x86_64 (AMD EPYC 9V74, tres CPU visib
 | Base `fdc32ee` | 59,79551 ms |
 | Validación con deduplicación y controles nuevos | 0,60235 ms |
 
-Comando: `cargo test --release --locked benchmark_audit_shared_validation -- --ignored --nocapture`. Mide CPU de validación, no lectura, renderizado, latencia de entrada ni FPS. No constituye una comparación con Animate. Los costes pendientes y la matriz de compatibilidad están en `AUDIT.md`.
+Comando: `cargo test --release --locked benchmark_audit_shared_validation -- --ignored --nocapture`. Mide CPU de validación, no lectura, renderizado, latencia de entrada ni FPS. No constituye una comparación con Animate. Los costes pendientes y la matriz de compatibilidad están en [la auditoría de importación](docs/AUDIT.md).
 
 ## Temas e idiomas (noviembre de 2026)
 
