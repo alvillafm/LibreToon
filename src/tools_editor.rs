@@ -59,6 +59,7 @@ impl Editor {
             let mark = &mut self.doc.layers[l].frames[self.frame][m];
             if fill && mark.fill.is_some() {
                 mark.fill = Some(self.fill_color.to_array());
+                mark.style.palette_fill = None;
                 mark.style.gradient = None;
                 self.feature.gradient_on = false;
                 mark.style.shade = 0;
@@ -66,6 +67,7 @@ impl Editor {
             }
             if stroke && mark.stroke {
                 mark.color = self.color.to_array();
+                mark.style.palette_stroke = None;
             }
             if width && mark.stroke {
                 mark.width = self.width;

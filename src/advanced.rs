@@ -18,6 +18,8 @@ pub(crate) fn assemble_project(
         next.extras.animation_clips = child.extras.animation_clips.clone();
         next.extras.animation_library = child.extras.animation_library.clone();
         next.extras.library = child.extras.library.clone();
+        next.extras.palette = child.extras.palette.clone();
+        next.extras.main_palettes = child.extras.main_palettes.clone();
         next.extras.media.assets = child.extras.media.assets.clone();
         next.extras.references = child.extras.references.clone();
         if let Some(s) = next.extras.symbols.iter_mut().find(|s| s.id == *id) {
@@ -43,7 +45,7 @@ impl Editor {
             self.redo.clear();
         }
     }
-    pub fn prepare_style(&self, mut marks: Vec<Mark>) -> Vec<Mark> {
+    pub fn prepare_style(&mut self, mut marks: Vec<Mark>) -> Vec<Mark> {
         let bounds = marks.iter().fold(Rect::NOTHING, |r, m| {
             r.union(crate::vector::control_bounds(m))
         });
@@ -55,6 +57,7 @@ impl Editor {
                 g.fit(bounds);
                 m.style.gradient = Some(g);
             }
+            self.link_drawn_colors(m);
         }
         marks
     }
@@ -244,6 +247,8 @@ impl Editor {
             parent.extras.animation_clips = self.doc.extras.animation_clips.clone();
             parent.extras.animation_library = self.doc.extras.animation_library.clone();
             parent.extras.library = self.doc.extras.library.clone();
+            parent.extras.palette = self.doc.extras.palette.clone();
+            parent.extras.main_palettes = self.doc.extras.main_palettes.clone();
             parent.extras.media.assets = self.doc.extras.media.assets.clone();
             parent.extras.references = self.doc.extras.references.clone();
             if let Some(s) = parent.extras.symbols.iter_mut().find(|s| s.id == id) {

@@ -128,6 +128,10 @@ pub struct Instance {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MarkStyle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) palette_fill: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) palette_stroke: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primitive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +211,8 @@ pub struct LayerOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adjustment_bands: Option<SharedVec<crate::post::Band>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fx_target: Option<crate::light::Receiver>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub light: Option<crate::light::Light>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_receiver: Option<u64>,
@@ -239,6 +245,7 @@ impl Default for LayerOptions {
             raster: false,
             adjustment: None,
             adjustment_bands: None,
+            fx_target: None,
             light: None,
             light_receiver: None,
             height_guide: None,
@@ -278,7 +285,10 @@ pub fn default_layer_options(options: &LayerOptions) -> bool {
     *options == LayerOptions::default()
 }
 pub fn default_extras(extras: &ProjectExtras) -> bool {
-    extras.markers.is_empty()
+    extras.palette.is_empty()
+        && extras.main_palettes.is_empty()
+        && extras.rig_poses.is_empty()
+        && extras.markers.is_empty()
         && extras.tags.is_empty()
         && extras.references.is_empty()
         && extras.animation_library.is_empty()
@@ -361,6 +371,12 @@ impl Default for Perspective {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectExtras {
+    #[serde(skip_serializing_if = "SharedVec::is_empty")]
+    pub(crate) palette: SharedVec<crate::palette::Swatch>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) main_palettes: std::collections::BTreeMap<usize, SharedVec<[u8; 4]>>,
+    #[serde(default, skip_serializing_if = "SharedVec::is_empty")]
+    pub(crate) rig_poses: SharedVec<crate::rig::SavedPose>,
     pub markers: SharedVec<crate::dialogue::Marker>,
     pub tags: SharedVec<crate::dialogue::Tag>,
     pub references: SharedVec<crate::reftool::Reference>,
@@ -394,6 +410,7 @@ pub struct FrameDrag {
     pub target: Option<usize>,
 }
 pub struct FeatureState {
+    pub(crate) pen_edit_only: bool,
     pub toon_levels: u8,
     pub gradient_on: bool,
     pub gradient: Gradient,
@@ -405,6 +422,10 @@ pub struct FeatureState {
     pub selected_camera: Option<u64>,
     pub symbol_stack: Vec<(Document, usize, usize, u64)>,
     pub frame_selection: Option<(usize, usize, usize)>,
+    pub(crate) bucket_range_armed: bool,
+    pub(crate) bucket_next: bool,
+    pub(crate) bucket_next_count: usize,
+    pub(crate) bucket_range: Option<crate::canvas::BucketRange>,
     pub frame_drag: Option<FrameDrag>,
     pub exposure_drag: Option<crate::exposure_resize::Drag>,
     pub row_drag: Option<(bool, usize)>,
@@ -417,6 +438,7 @@ pub struct FeatureState {
 impl Default for FeatureState {
     fn default() -> Self {
         Self {
+            pen_edit_only: false,
             toon_levels: 1,
             gradient_on: false,
             gradient: Default::default(),
@@ -428,6 +450,10 @@ impl Default for FeatureState {
             selected_camera: None,
             symbol_stack: vec![],
             frame_selection: None,
+            bucket_range_armed: false,
+            bucket_next: false,
+            bucket_next_count: 2,
+            bucket_range: None,
             frame_drag: None,
             exposure_drag: None,
             row_drag: None,
@@ -842,28 +868,32 @@ fn resolve_mode(
             *mark = crate::folder_groups::mark(mark, matrix);
         }
     }
-    if camera {
-        if let Some(c) = doc
-            .extras
-            .cameras
-            .iter()
-            .find(|c| frame >= c.start && frame < c.start + c.duration)
-        {
-            let optics = crate::animation::camera_optics(c, frame);
-            let c = crate::animation::camera_at(c, frame);
-            marks.retain(|(l, _, _)| crate::depth::visible(&doc.layers[*l].options.depth, &optics));
-            for (l, _, m) in &mut marks {
-                *m = crate::depth::project_mark(doc, &c, &optics, &doc.layers[*l].options.depth, m);
-                *m = crate::vector::transform(m, |p| {
-                    Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.)
-                        + crate::canvas::rotate(p - crate::vector::pos(c.center), -c.angle) * c.zoom
-                });
-                m.width *= c.zoom;
-            }
-        }
+    if camera && let Some(track) = crate::depth::camera(doc, frame) {
+        let optics = crate::animation::camera_optics(track, frame);
+        marks.retain(|(l, _, _)| crate::depth::visible(&doc.layers[*l].options.depth, &optics));
+        project_camera_marks(doc, frame, track, &optics, &mut marks);
     }
     marks
 }
+
+pub(crate) fn project_camera_marks(
+    doc: &Document,
+    frame: usize,
+    track: &Camera,
+    optics: &crate::depth::Optics,
+    marks: &mut [(usize, usize, Mark)],
+) {
+    let c = crate::animation::camera_at(track, frame);
+    let center = Pos2::new(doc.width as f32 / 2., doc.height as f32 / 2.);
+    for (l, _, m) in marks {
+        *m = crate::depth::project_mark(doc, &c, optics, &doc.layers[*l].options.depth, m);
+        *m = crate::vector::transform(m, |p| {
+            center + crate::canvas::rotate(p - crate::vector::pos(c.center), -c.angle) * c.zoom
+        });
+        m.width *= c.zoom;
+    }
+}
+
 pub fn baked(doc: &Document) -> Document {
     if doc.extras.rig.is_empty()
         && doc

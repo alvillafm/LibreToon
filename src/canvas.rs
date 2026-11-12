@@ -406,7 +406,11 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     p.distance(a + ab * t)
 }
 pub(crate) fn stroke_hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
-    if !m.stroke {
+    if !m.stroke
+        || !crate::vector::control_bounds(m)
+            .expand(tolerance + m.width * if m.width_profile.is_empty() { 0.5 } else { 2. })
+            .contains(p)
+    {
         return false;
     }
     let points = vertices(m);
@@ -529,6 +533,7 @@ impl Editor {
     }
 
     pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
+        self.bucket_range_ui(ui.ctx());
         let tool = if self.drawing.pen.eraser() {
             Tool::Eraser
         } else {
@@ -637,7 +642,7 @@ impl Editor {
                 _ => None,
             })
         });
-        let picker_click = (picker.is_some() || self.studio.color_popup_open)
+        let picker_click = picker.is_some()
             && press_position.is_some_and(|pos| {
                 area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
             });
@@ -1168,7 +1173,9 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                if state.pen.is_some() || !self.grab_selected_node(&mut state, world, view) {
+                if self.feature.pen_edit_only {
+                    self.start_node_drag(&mut state, world, view);
+                } else if state.pen.is_some() || !self.grab_selected_node(&mut state, world, view) {
                     self.begin_pen(&mut state, world, view);
                 }
             } else if !self.playing
@@ -1177,7 +1184,11 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                self.bucket_at(&mut state, world, shift);
+                if self.feature.bucket_range_armed || self.feature.bucket_next {
+                    self.start_bucket_range(&ctx, world, shift);
+                } else {
+                    self.bucket_at(&mut state, world, shift);
+                }
             } else if !self.playing && tool == Tool::Width {
                 self.start_width_drag(&mut state, world, view);
             } else if !self.playing && tool == Tool::Node {
@@ -2401,6 +2412,7 @@ impl Editor {
             self.paint_snap_feedback(&painter, area, view);
         }
         self.stage_mask(&painter, area, stage_view);
+        self.paint_preview_progress(&painter, area);
         if over
             && !space
             && !matches!(state.drag, Some(Drag::Pan(_)))
@@ -2883,7 +2895,8 @@ impl Editor {
             return;
         }
         self.checkpoint();
-        let marks = self.prepare_style(self.symmetry_marks(vec![pen.mark]));
+        let marks = self.symmetry_marks(vec![pen.mark]);
+        let marks = self.prepare_style(marks);
         self.commit_paint(pen.layer, pen.frame, marks);
         self.recover();
         self.status = "Trazado Bézier creado".into();
@@ -3098,6 +3111,8 @@ impl Editor {
         for &(l, m) in &ids {
             let mark = &mut self.doc.layers[l].frames[self.frame][m];
             mark.color = self.color.to_array();
+            mark.style.palette_stroke = None;
+            mark.style.palette_fill = None;
             mark.width = self.width;
             mark.width_profile = self.width_profile.clone();
             mark.stroke = self.stroke_enabled;
@@ -3534,74 +3549,335 @@ impl Editor {
             self.status = "Activa un color de relleno".into();
             return;
         }
-        let marks = &self.doc.layers[self.layer].frames[self.frame];
-        let existing = marks.iter().rposition(|mark| {
-            mark.style.instance.is_none()
-                && mark.style.media_image.is_none()
-                && !mark.style.raster_tile
-                && !mark.style.guide
-                && crate::vector::contains_fill(mark, world)
-        });
-        let rebuild = recalculate || existing.is_none_or(|index| marks[index].bucket);
-        let new_faces = rebuild.then(|| {
-            if let Some(index) = existing.filter(|&index| recalculate && !marks[index].bucket) {
-                let mut contours = marks.to_vec();
-                if contours[index].stroke {
-                    contours[index].fill = None;
-                } else {
-                    contours.remove(index);
-                }
-                crate::bucket::fill(&contours, world, self.gap, self.fill_color.to_array())
-            } else {
-                crate::bucket::fill(marks, world, self.gap, self.fill_color.to_array())
+        let layer = self.layer;
+        let frame = self.frame;
+        let marks = &self.doc.layers[layer].frames[frame];
+        match bucket_edit(
+            marks,
+            world,
+            recalculate,
+            self.gap,
+            self.fill_color.to_array(),
+        ) {
+            Ok(edit) => {
+                self.checkpoint();
+                self.prepare_paint_key(layer, frame);
+                self.apply_bucket_edit(
+                    layer,
+                    frame,
+                    edit,
+                    self.feature.gradient_on,
+                    self.feature.gradient.clone(),
+                );
+                state.clear_selection();
+                self.recover();
+                self.status = "Relleno aplicado".into();
             }
-        });
-        if let Some(Ok(shapes)) = new_faces.as_ref() {
-            let mut replaced = crate::bucket::covered_bucket_fills(marks, shapes);
-            let keep_outline = existing.is_some_and(|index| marks[index].stroke);
-            if let Some(index) = existing
-                && !keep_outline
-                && !replaced.contains(&index)
-            {
-                replaced.push(index);
-                replaced.sort_unstable();
-            }
-            let shapes = self.prepare_style(shapes.clone());
-            self.checkpoint();
-            self.prepare_paint_key(self.layer, self.frame);
-            let frame = &mut self.doc.layers[self.layer].frames[self.frame];
-            if let Some(index) = existing.filter(|_| keep_outline) {
-                frame[index].fill = None;
-                frame[index].style.gradient = None;
-            }
-            for index in replaced.into_iter().rev() {
-                frame.remove(index);
-            }
-            frame.splice(0..0, shapes);
-        } else if let Some(index) = existing.filter(|_| !recalculate) {
-            let mut mark = marks[index].clone();
-            mark.fill = Some(self.fill_color.to_array());
-            mark.style.gradient = self.feature.gradient_on.then(|| {
-                let mut gradient = self.feature.gradient.clone();
-                gradient.fit(crate::vector::control_bounds(&mark));
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn apply_bucket_edit(
+        &mut self,
+        layer: usize,
+        frame: usize,
+        edit: BucketEdit,
+        gradient_on: bool,
+        gradient: crate::features::Gradient,
+    ) {
+        let fit_gradient = |mark: &Mark| {
+            gradient_on.then(|| {
+                let mut gradient = gradient.clone();
+                gradient.fit(crate::vector::control_bounds(mark));
                 gradient
-            });
-            mark.style.shade = 0;
-            mark.style.light = 0;
-            self.checkpoint();
-            self.prepare_paint_key(self.layer, self.frame);
-            self.doc.layers[self.layer].frames[self.frame][index] = mark;
-        } else {
-            if let Some(Err(error)) = new_faces {
-                self.status = error;
+            })
+        };
+        match edit {
+            BucketEdit::Recolor { index, color } => {
+                let link = (!gradient_on)
+                    .then(|| self.track_vector_color(color))
+                    .flatten();
+                let marks = &mut self.doc.layers[layer].frames[frame];
+                let mark = &mut marks[index];
+                mark.fill = Some(color);
+                mark.style.palette_fill = link;
+                mark.style.gradient = fit_gradient(mark);
+                mark.style.shade = 0;
+                mark.style.light = 0;
             }
+            BucketEdit::Replace {
+                shapes,
+                replaced,
+                outline,
+            } => {
+                let mut shapes = shapes;
+                let bounds = shapes.iter().fold(Rect::NOTHING, |bounds, mark| {
+                    bounds.union(crate::vector::control_bounds(mark))
+                });
+                for shape in &mut shapes {
+                    shape.style.start_cap = self.feature.start_cap;
+                    shape.style.end_cap = self.feature.end_cap;
+                    shape.style.gradient = gradient_on.then(|| {
+                        let mut gradient = gradient.clone();
+                        gradient.fit(bounds);
+                        gradient
+                    });
+                    self.link_drawn_colors(shape);
+                }
+                let marks = &mut self.doc.layers[layer].frames[frame];
+                if let Some(index) = outline {
+                    marks[index].fill = None;
+                    marks[index].style.palette_fill = None;
+                    marks[index].style.gradient = None;
+                }
+                for index in replaced.into_iter().rev() {
+                    marks.remove(index);
+                }
+                marks.splice(0..0, shapes);
+            }
+        }
+    }
+
+    fn start_bucket_range(&mut self, ctx: &egui::Context, world: Pos2, recalculate: bool) {
+        if self.feature.bucket_range.is_some() || !self.fill_enabled {
             return;
         }
-        state.clear_selection();
-        self.recover();
-        self.status = "Relleno aplicado".into();
+        let confirm = std::mem::take(&mut self.feature.bucket_range_armed);
+        let layer = self.layer;
+        let snapshot = self.doc.layers.clone();
+        let source = &snapshot[layer];
+        let frames: Vec<_> = if confirm {
+            let Some((_, a, b)) = self
+                .feature
+                .frame_selection
+                .filter(|selection| selection.0 == layer)
+            else {
+                return;
+            };
+            (a.min(b)..=a.max(b).min(source.frames.len() - 1))
+                .filter(|frame| source.key(*frame))
+                .take(33)
+                .collect()
+        } else {
+            following_bucket_keys(source, self.frame, self.feature.bucket_next_count)
+        };
+        if confirm && frames.len() > 32 {
+            self.status = crate::i18n::tr("Select a range with at most 32 keyframes.").into();
+            return;
+        }
+        if frames.is_empty() {
+            self.status = crate::i18n::tr("No keyframes to fill").into();
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_snapshot = snapshot.clone();
+        let current_pose =
+            (!confirm && !source.key(self.frame) && self.studio.prefs.auto_key_paint)
+                .then(|| (self.frame, crate::animation::marks(source, self.frame)));
+        let color = self.fill_color.to_array();
+        let gap = self.gap;
+        let ctx = ctx.clone();
+        self.feature.bucket_range = Some(BucketRange {
+            layer,
+            snapshot,
+            confirm,
+            start_frame: self.frame,
+            result: None,
+            pending: rx,
+            gradient_on: self.feature.gradient_on,
+            gradient: self.feature.gradient.clone(),
+        });
+        std::thread::spawn(move || {
+            let edits = frames
+                .into_iter()
+                .map(|frame| {
+                    let marks = current_pose
+                        .as_ref()
+                        .filter(|(current, _)| *current == frame)
+                        .map_or(&worker_snapshot[layer].frames[frame], |(_, marks)| marks);
+                    (frame, bucket_edit(marks, world, recalculate, gap, color))
+                })
+                .collect();
+            let _ = tx.send(edits);
+            ctx.request_repaint();
+        });
+    }
+
+    fn bucket_range_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut batch) = self.feature.bucket_range.take() else {
+            return;
+        };
+        if batch.snapshot.identity() != self.doc.layers.identity() {
+            return;
+        }
+        if batch.result.is_none() {
+            match batch.pending.try_recv() {
+                Ok(result) => batch.result = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let mut open = true;
+        let mut apply = !batch.confirm && batch.result.is_some();
+        if batch.confirm {
+            egui::Window::new(crate::i18n::tr("Fill selected keyframes"))
+                .id(egui::Id::unique("bucket-range-preview"))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    if let Some(edits) = &batch.result {
+                        egui::ScrollArea::vertical()
+                            .max_height(260.)
+                            .show(ui, |ui| {
+                                for (frame, edit) in edits {
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("{:03}", frame + 1));
+                                        if let Err(error) = edit {
+                                            ui.label(crate::i18n::tr(error));
+                                        } else {
+                                            ui.label(crate::i18n::tr("Fill ready"));
+                                        }
+                                    });
+                                }
+                            });
+                        if crate::design::button(
+                            ui,
+                            Icon::Bucket,
+                            "Apply fills",
+                            "Apply fills",
+                            false,
+                            edits.iter().any(|(_, edit)| edit.is_ok()),
+                        )
+                        .clicked()
+                        {
+                            apply = true;
+                        }
+                    } else {
+                        ui.spinner();
+                    }
+                });
+        }
+        if apply && let Some(edits) = batch.result {
+            let count = edits.iter().filter(|(_, edit)| edit.is_ok()).count();
+            if count == 0 {
+                self.status = edits
+                    .into_iter()
+                    .find_map(|(_, edit)| edit.err())
+                    .unwrap_or_default();
+                return;
+            }
+            let total = edits.len();
+            self.checkpoint();
+            for (frame, edit) in edits {
+                if let Ok(edit) = edit {
+                    if !batch.confirm && frame == batch.start_frame {
+                        self.prepare_paint_key(batch.layer, frame);
+                    }
+                    self.apply_bucket_edit(
+                        batch.layer,
+                        frame,
+                        edit,
+                        batch.gradient_on,
+                        batch.gradient.clone(),
+                    );
+                    let layer = &mut self.doc.layers[batch.layer];
+                    let marks = layer.frames[frame].clone();
+                    for held in layer.exposure(frame) {
+                        layer.frames[held] = marks.clone();
+                    }
+                }
+            }
+            self.recover();
+            self.status = format!("{} {count}/{total}", crate::i18n::tr("Keyframes filled"));
+        } else if open {
+            if !batch.confirm {
+                self.status = crate::i18n::tr("Filling keyframes…").into();
+            }
+            self.feature.bucket_range = Some(batch);
+        }
     }
 }
+
+fn following_bucket_keys(layer: &crate::document::Layer, frame: usize, count: usize) -> Vec<usize> {
+    std::iter::once(frame)
+        .chain(
+            (frame.saturating_add(1)..layer.frames.len())
+                .filter(|frame| layer.key(*frame))
+                .take(count.clamp(1, 32)),
+        )
+        .collect()
+}
+
+enum BucketEdit {
+    Recolor {
+        index: usize,
+        color: [u8; 4],
+    },
+    Replace {
+        shapes: Vec<Mark>,
+        replaced: Vec<usize>,
+        outline: Option<usize>,
+    },
+}
+
+type BucketEdits = Vec<(usize, Result<BucketEdit, String>)>;
+
+pub(crate) struct BucketRange {
+    layer: usize,
+    confirm: bool,
+    start_frame: usize,
+    snapshot: crate::shared::SharedVec<crate::document::Layer>,
+    gradient_on: bool,
+    gradient: crate::features::Gradient,
+    pending: std::sync::mpsc::Receiver<BucketEdits>,
+    result: Option<BucketEdits>,
+}
+
+fn bucket_edit(
+    marks: &[Mark],
+    world: Pos2,
+    recalculate: bool,
+    gap: crate::bucket::Gap,
+    color: [u8; 4],
+) -> Result<BucketEdit, String> {
+    let existing = marks.iter().rposition(|mark| {
+        mark.style.instance.is_none()
+            && mark.style.media_image.is_none()
+            && !mark.style.raster_tile
+            && !mark.style.guide
+            && mark.fill.is_some()
+            && crate::vector::control_bounds(mark).contains(world)
+            && crate::vector::contains_fill(mark, world)
+    });
+    if !recalculate && let Some(index) = existing {
+        return Ok(BucketEdit::Recolor { index, color });
+    }
+    let shapes = if let Some(index) = existing.filter(|&index| !marks[index].bucket) {
+        let mut contours = marks.to_vec();
+        if contours[index].stroke {
+            contours[index].fill = None;
+        } else {
+            contours.remove(index);
+        }
+        crate::bucket::fill(&contours, world, gap, color)?
+    } else {
+        crate::bucket::fill(marks, world, gap, color)?
+    };
+    let mut replaced = crate::bucket::covered_bucket_fills(marks, &shapes);
+    let outline = existing.filter(|&index| marks[index].stroke);
+    if let Some(index) = existing
+        && outline.is_none()
+        && !replaced.contains(&index)
+    {
+        replaced.push(index);
+        replaced.sort_unstable();
+    }
+    Ok(BucketEdit::Replace {
+        shapes,
+        replaced,
+        outline,
+    })
+}
+
 fn paint_width_handles(p: &egui::Painter, mark: &Mark, view: View) {
     let controls = if mark.width_profile.is_empty() {
         crate::width::Preset::Custom.stops()
@@ -3700,6 +3976,21 @@ mod styling_gesture_tests {
         });
     }
     #[test]
+    fn next_bucket_keyframes_include_current_and_skip_other_held_frames() {
+        let mut doc = crate::Document::default();
+        let layer = &mut doc.layers[0];
+        layer.init_keys();
+        layer.options.keys.fill(false);
+        for key in [0, 3, 7, 9] {
+            layer.options.keys[key] = true;
+        }
+        assert_eq!(following_bucket_keys(layer, 0, 2), vec![0, 3, 7]);
+        assert_eq!(following_bucket_keys(layer, 1, 2), vec![1, 3, 7]);
+        assert_eq!(following_bucket_keys(layer, 3, 2), vec![3, 7, 9]);
+        assert_eq!(following_bucket_keys(layer, 9, 2), vec![9]);
+    }
+
+    #[test]
     fn bucket_click_creates_vector_fill_and_recolor_does_not_accumulate_faces() {
         run(|ctx, e| {
             e.doc.layers[0].frames[0].push(Mark {
@@ -3733,6 +4024,14 @@ mod styling_gesture_tests {
                 e.doc.layers[0].frames[0][0].fill,
                 Some(Color32::RED.to_array())
             );
+            assert_eq!(
+                &*e.doc.layers[0].frames[0][0].points,
+                &[[250., 225.], [350., 275.]]
+            );
+            let mut canvas = std::mem::take(&mut e.canvas);
+            e.bucket_at(&mut canvas, Pos2::new(300., 250.), true);
+            e.canvas = canvas;
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
             assert!(crate::vector::contains_fill(
                 &e.doc.layers[0].frames[0][0],
                 Pos2::new(225., 250.),
@@ -4434,13 +4733,6 @@ mod new_tool_regressions {
 
             e.activate_tool(Tool::Brush);
             let fill = e.fill_color;
-            let stroke = e.color;
-            e.studio.color_popup_open = true;
-            click(ctx, e, view.screen(Pos2::new(180., 150.)));
-            assert_eq!((e.fill_color, e.color), (fill, stroke));
-            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
-
-            e.studio.color_popup_open = false;
             e.studio.color_picker = Some(false);
             click(ctx, e, view.screen(Pos2::new(180., 150.)));
             assert_eq!(e.color, Color32::from_rgb(210, 20, 40));

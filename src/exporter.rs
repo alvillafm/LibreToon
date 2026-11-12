@@ -10,6 +10,86 @@ use std::{
     },
     time::Duration,
 };
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExportBatch {
+    #[default]
+    Range,
+    Scenes,
+    Tags,
+}
+
+impl ExportBatch {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Range => "Frame range",
+            Self::Scenes => "All scenes",
+            Self::Tags => "All animation tags",
+        }
+    }
+
+    fn entries(
+        self,
+        doc: &Document,
+        settings: &ExportSettings,
+    ) -> Result<Vec<(ExportSettings, PathBuf)>, String> {
+        let mut entries = Vec::new();
+        if self == Self::Range {
+            return Ok(vec![(settings.clone(), settings.target()?)]);
+        }
+        let mut offset = 0;
+        for index in 0..doc.extras.scenes.len().max(1) {
+            let scene = crate::animation::scene_doc(doc, index);
+            let count = scene.layers[0].frames.len();
+            let append = |name: &str,
+                          first: usize,
+                          last: usize,
+                          entries: &mut Vec<_>|
+             -> Result<(), String> {
+                let slug: String = name
+                    .chars()
+                    .take(48)
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let mut job = settings.clone();
+                job.first = offset + first + 1;
+                job.last = offset + last + 1;
+                job.name = format!("{}-{:03}-{slug}", settings.name, entries.len() + 1);
+                if job.format == 1 {
+                    job.svg_sequence = true;
+                }
+                if job.format == SPRITE_SHEET {
+                    job.sheet_size().map_err(|error| tr(error).to_owned())?;
+                }
+                entries.push((job.clone(), job.target()?));
+                Ok(())
+            };
+            if self == Self::Scenes {
+                let name = doc
+                    .extras
+                    .scenes
+                    .get(index)
+                    .map_or("Scene", |scene| scene.name.as_str());
+                append(name, 0, count - 1, &mut entries)?;
+            } else {
+                for tag in scene.extras.tags.iter().filter(|tag| tag.start < count) {
+                    append(&tag.name, tag.start, tag.end.min(count - 1), &mut entries)?;
+                }
+            }
+            offset += count;
+        }
+        if entries.is_empty() {
+            return Err(tr("No animation tags to export.").into());
+        }
+        Ok(entries)
+    }
+}
+
 #[derive(Clone)]
 pub struct ExportSettings {
     pub name: String,
@@ -27,7 +107,7 @@ pub struct ExportSettings {
     pub svg_sequence: bool,
     pub(crate) sheet: SheetSettings,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SheetSettings {
     columns: u32,
     rows: u32,
@@ -41,6 +121,52 @@ impl Default for SheetSettings {
             rows: 0,
             spacing: 0,
         }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Preset {
+    name: String,
+    format: usize,
+    width: u32,
+    height: u32,
+    fps: u32,
+    quality: u32,
+    loops: i32,
+    colors: u32,
+    dither: bool,
+    svg_sequence: bool,
+    sheet: SheetSettings,
+}
+
+impl Preset {
+    fn capture(name: String, settings: &ExportSettings) -> Self {
+        Self {
+            name,
+            format: settings.format,
+            width: settings.width,
+            height: settings.height,
+            fps: settings.fps,
+            quality: settings.quality,
+            loops: settings.loops,
+            colors: settings.colors,
+            dither: settings.dither,
+            svg_sequence: settings.svg_sequence,
+            sheet: settings.sheet.clone(),
+        }
+    }
+
+    fn apply(&self, settings: &mut ExportSettings) {
+        settings.format = self.format.min(SPRITE_SHEET);
+        settings.width = self.width.clamp(2, 4096);
+        settings.height = self.height.clamp(2, 4096);
+        settings.fps = self.fps.clamp(1, 120);
+        settings.quality = self.quality.clamp(1, 100);
+        settings.loops = self.loops.clamp(0, 100);
+        settings.colors = self.colors.clamp(2, 256);
+        settings.dither = self.dither;
+        settings.svg_sequence = self.svg_sequence;
+        settings.sheet = self.sheet.clone();
     }
 }
 
@@ -163,6 +289,7 @@ impl Editor {
                     .to_string_lossy()
                     .into_owned()
             });
+        self.studio.export_batch = ExportBatch::Range;
         self.studio.export = Some(ExportSettings {
             name: "animation".into(),
             folder,
@@ -324,7 +451,22 @@ impl Editor {
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(ctx, |ui| {
                     let value = self.studio.export_progress.load(Ordering::Relaxed) as f32 / 1000.;
-                    ui.add(egui::ProgressBar::new(value).show_percentage());
+                    let done = self.studio.export_batch_index.load(Ordering::Relaxed);
+                    let total = self.studio.export_batch_total;
+                    if total > 1 {
+                        ui.label(format!(
+                            "{} {}/{}",
+                            tr("Export queue"),
+                            (done + 1).min(total),
+                            total
+                        ));
+                    }
+                    ui.add(
+                        egui::ProgressBar::new(
+                            ((done as f32 + value) / total as f32).clamp(0., 1.),
+                        )
+                        .show_percentage(),
+                    );
                     if ui.button(tr("Cancelar")).clicked() {
                         self.studio.export_cancel.store(true, Ordering::Relaxed);
                     }
@@ -501,6 +643,43 @@ impl Editor {
                     if ui.small_button(tr("Transparent PNG")).clicked() { s.format = 6; }
                 });
             }
+            egui::CollapsingHeader::new(tr("Saved export presets")).show(ui, |ui| {
+                let mut save = false;
+                let mut remove = None;
+                ui.horizontal(|ui| {
+                    let id = ui.scope_id().with("export-preset-name");
+                    let mut name = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
+                    ui.add(egui::TextEdit::singleline(&mut name).char_limit(48).hint_text(tr("Preset name")));
+                    if crate::design::button(
+                        ui, crate::design::Icon::Save, "", "Save export preset", false,
+                        !name.trim().is_empty() && self.studio.prefs.export_presets.len() < 24,
+                    ).clicked() {
+                        self.studio.prefs.export_presets.push(Preset::capture(name.trim().to_owned(), &s));
+                        name.clear();
+                        save = true;
+                    }
+                    ui.data_mut(|d| d.insert_temp(id, name));
+                });
+                egui::ScrollArea::vertical().max_height(100.).show(ui, |ui| {
+                    for (index, preset) in self.studio.prefs.export_presets.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button(&preset.name).clicked() {
+                                preset.apply(&mut s);
+                            }
+                            if crate::design::button(ui, crate::design::Icon::Trash, "", "Delete export preset", false, true).clicked() {
+                                remove = Some(index);
+                            }
+                        });
+                    }
+                });
+                if let Some(index) = remove {
+                    self.studio.prefs.export_presets.remove(index);
+                    save = true;
+                }
+                if save && let Err(error) = self.studio.save() {
+                    self.status = error;
+                }
+            });
             if s.format == SPRITE_SHEET {
                 match s.sheet_size() {
                     Ok([width, height]) => {
@@ -545,7 +724,15 @@ impl Editor {
                 });
             }
             ui.separator();
-            if ui.add_enabled(s.format != SPRITE_SHEET || s.sheet_size().is_ok(), egui::Button::new(tr("Exportar"))).clicked() {
+            egui::ComboBox::from_id_salt("export-batch").selected_text(tr(self.studio.export_batch.label())).show_ui(ui, |ui| {
+                for mode in [ExportBatch::Range, ExportBatch::Scenes, ExportBatch::Tags] {
+                    ui.selectable_value(&mut self.studio.export_batch, mode, tr(mode.label()));
+                }
+            });
+            let range = if self.studio.export_batch == ExportBatch::Range { format!("{}–{}", s.first, s.last) } else { tr(self.studio.export_batch.label()).into() };
+            let audio = if matches!(s.format, 0 | 2 | 3 | 4) { "Audio included when present" } else { "No audio in this export" };
+            ui.small(format!("{} × {} · {} fps · {} · {}", s.width, s.height, s.fps, range, tr(audio)));
+            if ui.add_enabled(self.studio.export_batch != ExportBatch::Range || s.format != SPRITE_SHEET || s.sheet_size().is_ok(), egui::Button::new(tr("Exportar"))).clicked() {
                 if !matches!(s.format, 1 | 6 | SPRITE_SHEET)
                     && crate::ffmpeg_setup::available(&self.studio.prefs.ffmpeg).is_none()
                 {
@@ -563,15 +750,17 @@ impl Editor {
             if let Err(e) = self.studio.save() {
                 self.status = e;
             }
-            match s.target() {
-                Ok(path) => {
-                    let mut targets = vec![path.clone()];
-                    if s.format == 6 || (s.format == 1 && s.svg_sequence) {
-                        targets = (s.first..=s.last)
-                            .map(|f| frame_target(&path, f, s.extension()))
-                            .collect();
-                    }
-                    let overwrite = targets.iter().any(|p| p.exists());
+            let doc = self.project_document();
+            match self.studio.export_batch.entries(&doc, &s) {
+                Ok(jobs) => {
+                    let overwrite = jobs.iter().any(|(job, path)| {
+                        if job.format == 6 || (job.format == 1 && job.svg_sequence) {
+                            (job.first..=job.last)
+                                .any(|f| frame_target(path, f, job.extension()).exists())
+                        } else {
+                            path.exists()
+                        }
+                    });
                     if overwrite
                         && rfd::MessageDialog::new()
                             .set_title(tr("Reemplazar archivo"))
@@ -583,9 +772,12 @@ impl Editor {
                         self.studio.export = Some(s);
                         return;
                     }
-                    let doc = self.project_document();
+                    let single = self.studio.export_batch == ExportBatch::Range;
                     let current = crate::animation::movie_offset(&doc, self.frame);
                     let ffmpeg = ffmpeg_path(&self.studio.prefs.ffmpeg);
+                    self.studio.export_batch_total = jobs.len();
+                    self.studio.export_batch_index.store(0, Ordering::Relaxed);
+                    let index = self.studio.export_batch_index.clone();
                     self.studio.export_progress.store(0, Ordering::Relaxed);
                     self.studio.export_cancel.store(false, Ordering::Relaxed);
                     let progress = self.studio.export_progress.clone();
@@ -593,8 +785,28 @@ impl Editor {
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.studio.export_job = Some(rx);
                     std::thread::spawn(move || {
-                        let result = run_export(&doc, &s, current, &path, ffmpeg, progress, cancel);
-                        let _ = tx.send(result.map(|_| path));
+                        let result = (|| {
+                            let mut last = PathBuf::new();
+                            for (number, (job, path)) in jobs.into_iter().enumerate() {
+                                progress.store(0, Ordering::Relaxed);
+                                index.store(number, Ordering::Relaxed);
+                                if cancel.load(Ordering::Relaxed) {
+                                    return Err(tr("Exportación cancelada").into());
+                                }
+                                run_export(
+                                    &doc,
+                                    &job,
+                                    if single { current } else { job.first - 1 },
+                                    &path,
+                                    ffmpeg.clone(),
+                                    progress.clone(),
+                                    cancel.clone(),
+                                )?;
+                                last = path;
+                            }
+                            Ok(last)
+                        })();
+                        let _ = tx.send(result);
                     });
                 }
                 Err(e) => {
@@ -687,13 +899,6 @@ pub(crate) fn run_export(
                 return Err(tr("Exportación cancelada").into());
             }
             let frames = video.frames(doc, frame - 1, &ffmpeg)?;
-            let (scene, local) = crate::animation::locate(doc, frame - 1);
-            let resolved = crate::features::resolve_preview(
-                &crate::animation::scene_doc(doc, scene),
-                local,
-                true,
-                local,
-            );
             let mut rgba = raster_composited(
                 doc,
                 frame - 1,
@@ -702,8 +907,7 @@ pub(crate) fn run_export(
                 &context,
                 &mut cache,
                 &frames,
-                resolved,
-                local,
+                None,
                 true,
                 true,
                 true,
@@ -933,15 +1137,8 @@ pub(crate) fn raster_with_video(
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
 ) -> Vec<u8> {
-    let (scene, local) = crate::animation::locate(doc, frame);
-    let resolved = crate::features::resolve_preview(
-        &crate::animation::scene_doc(doc, scene),
-        local,
-        true,
-        local,
-    );
     raster_composited(
-        doc, frame, w, h, ctx, cache, video, resolved, local, false, true, true, true, true, None,
+        doc, frame, w, h, ctx, cache, video, None, false, true, true, true, true, None,
     )
 }
 pub(crate) fn raster_preview(
@@ -957,9 +1154,8 @@ pub(crate) fn raster_preview(
     post: bool,
     blur: bool,
     full_quality: bool,
-    cancel: Option<&AtomicBool>,
+    work: Option<&crate::depth::PreviewWork>,
 ) -> Vec<u8> {
-    let resolved = crate::features::resolve_preview(doc, frame, camera, clock);
     raster_composited(
         doc,
         frame,
@@ -968,14 +1164,13 @@ pub(crate) fn raster_preview(
         ctx,
         cache,
         video,
-        resolved,
-        clock,
+        Some(clock),
         false,
         post,
         blur,
         camera,
         full_quality,
-        cancel,
+        work,
     )
 }
 // Keep a single shaded image per receiver layer. Keys own their shared mark
@@ -992,8 +1187,27 @@ struct LitPlaneKey {
     scene_mask: Option<u64>,
 }
 
+impl LitPlaneKey {
+    fn same_source(&self, other: &Self) -> bool {
+        self.layer == other.layer
+            && self.dimensions == other.dimensions
+            && self.region == other.region
+            && self.guide == other.guide
+            && self.mask_roots == other.mask_roots
+            && self.scene_mask == other.scene_mask
+            && self.artwork == other.artwork
+    }
+}
+
+struct LitInput {
+    key: Arc<LitPlaneKey>,
+    assets: Option<crate::shared::SharedVec<crate::media::Asset>>,
+    subset: RenderSubset,
+    pixels: Vec<u8>,
+}
+
 struct LitPlane {
-    key: LitPlaneKey,
+    key: Arc<LitPlaneKey>,
     assets: Option<crate::shared::SharedVec<crate::media::Asset>>,
     pixels: std::sync::Arc<Vec<u8>>,
 }
@@ -1001,16 +1215,47 @@ struct LitPlane {
 #[derive(Default)]
 pub(crate) struct LitPlanes {
     planes: std::collections::VecDeque<LitPlane>,
+    inputs: std::collections::VecDeque<LitInput>,
+    surfaces: crate::light::SurfaceCache,
     #[cfg(test)]
     hits: usize,
 }
 
 impl LitPlanes {
+    fn input(
+        &mut self,
+        key: &LitPlaneKey,
+        assets: Option<usize>,
+        subset: RenderSubset,
+    ) -> Option<Vec<u8>> {
+        let index = self.inputs.iter().position(|input| {
+            input.subset == subset
+                && input.key.same_source(key)
+                && input.assets.as_ref().map(|assets| assets.identity()) == assets
+        })?;
+        let input = self.inputs.remove(index).unwrap();
+        let pixels = input.pixels.clone();
+        self.inputs.push_back(input);
+        Some(pixels)
+    }
+
+    fn insert_input(&mut self, input: LitInput) {
+        const LIMIT: usize = 64 * 1024 * 1024;
+        if input.pixels.len() > LIMIT {
+            return;
+        }
+        let mut bytes =
+            input.pixels.len() + self.inputs.iter().map(|i| i.pixels.len()).sum::<usize>();
+        while bytes > LIMIT || self.inputs.len() >= 32 {
+            bytes -= self.inputs.pop_front().unwrap().pixels.len();
+        }
+        self.inputs.push_back(input);
+    }
     fn get(&mut self, key: &LitPlaneKey, assets: Option<usize>) -> Option<Arc<Vec<u8>>> {
         let index = self.planes.iter().position(|plane| {
             plane.key.layer == key.layer
                 && plane.assets.as_ref().map(|assets| assets.identity()) == assets
-                && &plane.key == key
+                && plane.key.as_ref() == key
         })?;
         let plane = self.planes.remove(index).unwrap();
         let pixels = plane.pixels.clone();
@@ -1051,19 +1296,24 @@ fn raster_composited(
     ctx: &egui::Context,
     cache: &mut crate::paint::RenderCache,
     video: &[crate::media::ExportVideoFrame],
-    resolved: Vec<(usize, usize, crate::Mark)>,
-    clock: usize,
+    clock: Option<usize>,
     transparent: bool,
     post: bool,
     camera_blur: bool,
     camera: bool,
     full_quality: bool,
-    cancel: Option<&AtomicBool>,
+    work: Option<&crate::depth::PreviewWork>,
 ) -> Vec<u8> {
-    let canceled = || cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+    let canceled = || work.is_some_and(crate::depth::PreviewWork::canceled);
+    let report = |percent| {
+        if let Some(work) = work {
+            work.report(percent);
+        }
+    };
     if canceled() {
         return Vec::new();
     }
+    report(5);
     cache.begin_frame();
     let (scene, local) = crate::animation::locate(doc, frame);
     let scene = crate::animation::scene_doc(doc, scene);
@@ -1073,9 +1323,19 @@ fn raster_composited(
             .iter()
             .any(|layer| crate::post::visible_effects_at(layer, local));
     let scale = (w as f32 / doc.width as f32).min(h as f32 / doc.height as f32);
-    let optics = crate::depth::camera(&scene, local)
-        .map(|c| crate::animation::camera_optics(c, local))
+    let active_camera = crate::depth::camera(&scene, local);
+    let camera_optics = active_camera.map(|c| crate::animation::camera_optics(c, local));
+    let optics = camera_optics
+        .as_ref()
         .filter(|o| camera_blur && o.strength > 0.);
+    let camera_track = active_camera.filter(|_| camera);
+    let mut resolved =
+        crate::features::resolve_preview(&scene, local, false, clock.unwrap_or(local));
+    if let Some(optics) = camera_optics.as_ref().filter(|_| camera_track.is_some()) {
+        resolved.retain(|(layer, _, _)| {
+            crate::depth::visible(&scene.layers[*layer].options.depth, optics)
+        });
+    }
     let has_guides = resolved
         .iter()
         .any(|(_, _, mark)| mark.style.surface_height.is_some());
@@ -1097,24 +1357,99 @@ fn raster_composited(
             .then_some((index, light, layer.options.opacity))
         })
         .collect();
-    let camera_track = camera
-        .then(|| crate::depth::camera(&scene, local))
-        .flatten();
-    let world = camera_track.filter(|_| !lights.is_empty()).map(|track| {
-        let optics = crate::animation::camera_optics(track, local);
-        let mut marks = crate::features::resolve_preview(&scene, local, false, clock);
-        marks.retain(|(layer, _, _)| {
-            crate::depth::visible(&scene.layers[*layer].options.depth, &optics)
-        });
-        marks
-    });
-    if optics.is_some() || !lights.is_empty() {
+    let world = if let (Some(track), Some(optics)) = (camera_track, camera_optics.as_ref()) {
+        let world = (!lights.is_empty()).then(|| resolved.clone());
+        crate::features::project_camera_marks(&scene, local, track, optics, &mut resolved);
+        world
+    } else {
+        None
+    };
+    report(20);
+    let phase = |value| {
+        if let Some(work) = work {
+            work.phase(value);
+        }
+    };
+    let scoped_fx: Vec<_> = scene
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| {
+            adjust
+                && layer.options.fx_target.is_some()
+                && crate::post::visible_effects_at(layer, local)
+                && crate::folder_groups::layer_active(&scene, layer, local)
+        })
+        .collect();
+    let auto_outlines: Vec<_> = scene
+        .layers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, layer)| {
+            if !adjust
+                || !layer.visible
+                || layer.options.fx_target.is_some()
+                || !crate::folder_groups::layer_active(&scene, layer, local)
+                || !crate::post::effects_at(layer, local)
+                    .is_some_and(|effects| effects.iter().any(crate::post::Effect::enabled_outline))
+            {
+                return None;
+            }
+            let target = resolved
+                .iter()
+                .filter_map(|(i, _, mark)| {
+                    (*i < index
+                        && !crate::post::is_adjustment(&scene.layers[*i])
+                        && mark.style.surface_height.is_none()
+                        && !mark.style.light_mask)
+                        .then_some(*i)
+                })
+                .max()?;
+            Some((index, target, layer))
+        })
+        .collect();
+    // Contiguous folder members can be composited together, which keeps outlines
+    // and inner shadows off seams where two drawings overlap.
+    let mut groups = Vec::<(usize, usize, u64)>::new();
+    for (adjustment, row) in &scoped_fx {
+        let Some(crate::light::Receiver::Folder(id)) = row.options.fx_target else {
+            continue;
+        };
+        let indices: Vec<_> = scene
+            .layers
+            .iter()
+            .take(*adjustment)
+            .enumerate()
+            .filter(|(_, layer)| crate::light::Receiver::Folder(id).matches(&scene, layer))
+            .map(|(index, _)| index)
+            .collect();
+        let (Some(&start), Some(&end)) = (indices.first(), indices.last()) else {
+            continue;
+        };
+        if indices.len() < 2
+            || indices.len() != end - start + 1
+            || video
+                .iter()
+                .any(|clip| (start + 1..=end).contains(&clip.slot))
+            || scene.layers[start..=end]
+                .iter()
+                .any(|layer| layer.options.adjustment.is_some() || layer.options.light.is_some())
+            || groups.iter().any(|(a, b, _)| start <= *b && *a <= end)
+        {
+            continue;
+        }
+        groups.push((start, end, id));
+    }
+    if optics.is_some() || !lights.is_empty() || !scoped_fx.is_empty() || !auto_outlines.is_empty()
+    {
         let channels = if transparent || adjust { 4 } else { 3 };
         let mut result = vec![if channels == 4 { 0 } else { 255 }; (w * h) as usize * channels];
         let mut clips = video.iter().enumerate().peekable();
-        let mut render = |result: &mut Vec<u8>,
-                          subset: (bool, usize),
-                          plane: &crate::depth::LayerDepth| {
+        let render = |cache: &mut crate::paint::RenderCache,
+                      result: &mut Vec<u8>,
+                      subset: (bool, usize),
+                      plane: &crate::depth::LayerDepth,
+                      group: Option<(u64, usize)>| {
             let radius = optics.as_ref().map_or(0., |optics| {
                 optics.radius(plane.distance - optics.position) * scale
             });
@@ -1129,6 +1464,7 @@ fn raster_composited(
                 layer.is_some_and(|layer| subset.1 < *index && light.receives(&scene, layer))
             });
             let use_world = target_lights.clone().next().is_some();
+            phase(u8::from(use_world));
             let artwork = if use_world {
                 world.as_deref().unwrap_or(&resolved)
             } else {
@@ -1165,7 +1501,7 @@ fn raster_composited(
             } else {
                 None
             };
-            let render_art = |cache: &mut crate::paint::RenderCache, subset: RenderSubset| {
+            let draw_art = |cache: &mut crate::paint::RenderCache, subset: RenderSubset| {
                 raster_flat_in_view(
                     doc,
                     w,
@@ -1203,26 +1539,28 @@ fn raster_composited(
                             .iter()
                             .any(|(_, _, mark)| mark.style.light_mask_target == Some(id))
                 });
-                let key = use_world.then(|| LitPlaneKey {
-                    layer: subset.1,
-                    dimensions: [doc.width, doc.height, w, h, source_pad],
-                    region,
-                    artwork: artwork
-                        .iter()
-                        .filter(|(index, _, mark)| {
-                            *index == subset.1
-                                || scene_mask_id
-                                    .is_some_and(|id| mark.style.light_mask_target == Some(id))
-                        })
-                        .cloned()
-                        .collect(),
-                    lights: target_lights
-                        .clone()
-                        .map(|(_, light, opacity)| (light.shading_key(local), *opacity))
-                        .collect(),
-                    guide: has_local_guide,
-                    mask_roots: mask_roots.clone(),
-                    scene_mask: scene_mask_id,
+                let key = use_world.then(|| {
+                    Arc::new(LitPlaneKey {
+                        layer: subset.1,
+                        dimensions: [doc.width, doc.height, w, h, source_pad],
+                        region,
+                        artwork: artwork
+                            .iter()
+                            .filter(|(index, _, mark)| {
+                                *index == subset.1
+                                    || scene_mask_id
+                                        .is_some_and(|id| mark.style.light_mask_target == Some(id))
+                            })
+                            .cloned()
+                            .collect(),
+                        lights: target_lights
+                            .clone()
+                            .map(|(_, light, opacity)| (light.shading_key(local), *opacity))
+                            .collect(),
+                        guide: has_local_guide,
+                        mask_roots: mask_roots.clone(),
+                        scene_mask: scene_mask_id,
+                    })
                 });
                 let assets = key
                     .as_ref()
@@ -1251,6 +1589,26 @@ fn raster_composited(
                         &pixels,
                     )
                 } else {
+                    let render_art = |cache: &mut crate::paint::RenderCache, subset| {
+                        let Some(key) = &key else {
+                            return draw_art(cache, subset);
+                        };
+                        if let Some(pixels) = cache.lit_planes.input(
+                            key,
+                            assets.map(|assets| assets.identity()),
+                            subset,
+                        ) {
+                            return pixels;
+                        }
+                        let pixels = draw_art(cache, subset);
+                        cache.lit_planes.insert_input(LitInput {
+                            key: key.clone(),
+                            assets: assets.cloned(),
+                            subset,
+                            pixels: pixels.clone(),
+                        });
+                        pixels
+                    };
                     let height =
                         has_local_guide.then(|| render_art(cache, RenderSubset::Height(subset.1)));
                     let scene_mask =
@@ -1285,7 +1643,9 @@ fn raster_composited(
                             }
                         }
                     }
-                    let shade = |image: &mut Vec<u8>, mask: Option<&[u8]>| {
+                    let shade = |surfaces: &mut crate::light::SurfaceCache,
+                                 image: &mut Vec<u8>,
+                                 mask: Option<&[u8]>| {
                         for (_, light, opacity) in target_lights.clone() {
                             if let Some(region) = region {
                                 light.shade_region(
@@ -1297,6 +1657,7 @@ fn raster_composited(
                                     *opacity,
                                     height.as_deref(),
                                     mask,
+                                    surfaces,
                                 );
                                 continue;
                             }
@@ -1311,6 +1672,7 @@ fn raster_composited(
                                 *opacity,
                                 height.as_deref(),
                                 mask,
+                                Some(surfaces),
                             );
                         }
                     };
@@ -1338,12 +1700,20 @@ fn raster_composited(
                             }
                             let mut image =
                                 render_art(cache, RenderSubset::Piece(subset.1, root, piece));
-                            shade(&mut image, mask.as_deref().or(scene_mask.as_deref()));
+                            shade(
+                                &mut cache.lit_planes.surfaces,
+                                &mut image,
+                                mask.as_deref().or(scene_mask.as_deref()),
+                            );
                             composite(&mut raw, &image, 4);
                         }
                     } else {
                         raw = render_art(cache, RenderSubset::Single(false, subset.1));
-                        shade(&mut raw, scene_mask.as_deref());
+                        shade(
+                            &mut cache.lit_planes.surfaces,
+                            &mut raw,
+                            scene_mask.as_deref(),
+                        );
                     }
                     if let Some(key) = key {
                         let pixels = Arc::new(raw);
@@ -1370,7 +1740,7 @@ fn raster_composited(
                     }
                 }
             } else {
-                render_art(cache, RenderSubset::Single(true, subset.1))
+                draw_art(cache, RenderSubset::Single(true, subset.1))
             };
             if let Some(layer) = layer {
                 if let Some(id) = layer.options.light_receiver {
@@ -1385,7 +1755,10 @@ fn raster_composited(
                         for caster in subset.1 + 1..*index {
                             let candidate = &scene.layers[caster];
                             if !candidate.visible
-                                || !light.receives(&scene, candidate)
+                                || !shadow.caster.map_or_else(
+                                    || light.receives(&scene, candidate),
+                                    |id| candidate.options.light_receiver == Some(id),
+                                )
                                 || !resolved.iter().any(|(l, _, mark)| {
                                     *l == caster
                                         && mark.style.surface_height.is_none()
@@ -1418,6 +1791,54 @@ fn raster_composited(
                     }
                 }
             }
+            if let Some(layer) = layer {
+                for (index, adjustment) in &scoped_fx {
+                    if subset.1 < *index
+                        && !group.is_some_and(|(id, end)| {
+                            *index > end
+                                && adjustment.options.fx_target
+                                    == Some(crate::light::Receiver::Folder(id))
+                        })
+                        && adjustment
+                            .options
+                            .fx_target
+                            .is_some_and(|target| target.matches(&scene, layer))
+                    {
+                        apply_adjustment(
+                            &mut cache.post_fx,
+                            &mut raw,
+                            pw,
+                            ph,
+                            adjustment,
+                            scale,
+                            &scene,
+                            local,
+                            camera,
+                            false,
+                            FxPass::All,
+                        );
+                    }
+                }
+            }
+            if !subset.0 {
+                for (_, target, adjustment) in &auto_outlines {
+                    if *target == subset.1 {
+                        apply_adjustment(
+                            &mut cache.post_fx,
+                            &mut raw,
+                            pw,
+                            ph,
+                            adjustment,
+                            scale,
+                            &scene,
+                            local,
+                            camera,
+                            false,
+                            FxPass::Outline,
+                        );
+                    }
+                }
+            }
             let blurred = if let Some(optics) = &optics {
                 crate::depth::blur(raw, pw, ph, radius, optics)
             } else {
@@ -1436,20 +1857,25 @@ fn raster_composited(
                 }
             }
         };
+        let mut group_pixels = None;
         for layer in 0..=scene.layers.len() {
+            report(20 + (67 * layer / scene.layers.len().max(1)) as u8);
             if canceled() {
                 return Vec::new();
             }
             while clips.peek().is_some_and(|(_, c)| c.slot <= layer) {
                 let (i, clip) = clips.next().unwrap();
-                render(&mut result, (true, i), &clip.depth);
+                render(cache, &mut result, (true, i), &clip.depth, None);
             }
             if let Some(l) = scene.layers.get(layer).filter(|l| l.visible) {
                 if adjust
+                    && l.options.fx_target.is_none()
                     && crate::post::visible_effects_at(l, local)
                     && crate::folder_groups::layer_active(&scene, l, local)
                 {
+                    phase(2);
                     apply_adjustment(
+                        &mut cache.post_fx,
                         &mut result,
                         w,
                         h,
@@ -1459,17 +1885,62 @@ fn raster_composited(
                         local,
                         camera,
                         !lights.iter().any(|(index, _, _)| *index == layer),
+                        if auto_outlines.iter().any(|(index, _, _)| *index == layer) {
+                            FxPass::WithoutOutline
+                        } else {
+                            FxPass::All
+                        },
                     );
                 } else if !crate::post::is_adjustment(l)
                     && resolved.iter().any(|(i, ..)| *i == layer)
                 {
-                    render(&mut result, (false, layer), &l.options.depth);
+                    if let Some(&(_, end, id)) = groups
+                        .iter()
+                        .find(|(start, end, _)| (*start..=*end).contains(&layer))
+                    {
+                        let group =
+                            group_pixels.get_or_insert_with(|| vec![0; (w * h * 4) as usize]);
+                        render(
+                            cache,
+                            group,
+                            (false, layer),
+                            &l.options.depth,
+                            Some((id, end)),
+                        );
+                    } else {
+                        render(cache, &mut result, (false, layer), &l.options.depth, None);
+                    }
                 }
+            }
+            if let Some(&(_, end, id)) = groups.iter().find(|(_, end, _)| *end == layer)
+                && let Some(mut group) = group_pixels.take()
+            {
+                for (index, adjustment) in &scoped_fx {
+                    if *index > end
+                        && adjustment.options.fx_target == Some(crate::light::Receiver::Folder(id))
+                    {
+                        apply_adjustment(
+                            &mut cache.post_fx,
+                            &mut group,
+                            w,
+                            h,
+                            adjustment,
+                            scale,
+                            &scene,
+                            local,
+                            camera,
+                            false,
+                            FxPass::All,
+                        );
+                    }
+                }
+                composite(&mut result, &group, channels);
             }
         }
         if canceled() {
             return Vec::new();
         }
+        report(95);
         return if adjust {
             finish_adjusted(result, transparent)
         } else {
@@ -1480,6 +1951,7 @@ fn raster_composited(
         let mut result = vec![0; (w * h * 4) as usize];
         let mut start = 0;
         for (index, layer) in scene.layers.iter().enumerate() {
+            report(20 + (67 * index / scene.layers.len().max(1)) as u8);
             if canceled() {
                 return Vec::new();
             }
@@ -1504,7 +1976,20 @@ fn raster_composited(
                 );
                 composite(&mut result, &group, 4);
             }
-            apply_adjustment(&mut result, w, h, layer, scale, &scene, local, camera, true);
+            phase(2);
+            apply_adjustment(
+                &mut cache.post_fx,
+                &mut result,
+                w,
+                h,
+                layer,
+                scale,
+                &scene,
+                local,
+                camera,
+                true,
+                FxPass::All,
+            );
             start = at + 1;
         }
         let group = raster_flat(
@@ -1520,6 +2005,7 @@ fn raster_composited(
             true,
         );
         composite(&mut result, &group, 4);
+        report(95);
         return finish_adjusted(result, transparent);
     }
     raster_flat(
@@ -1684,7 +2170,15 @@ fn finish_adjusted(rgba: Vec<u8>, transparent: bool) -> Vec<u8> {
     composite(&mut rgb, &rgba, 3);
     rgb
 }
+#[derive(Clone, Copy)]
+enum FxPass {
+    All,
+    Outline,
+    WithoutOutline,
+}
+
 fn apply_adjustment(
+    fx_cache: &mut crate::post::EffectCache,
     result: &mut Vec<u8>,
     w: u32,
     h: u32,
@@ -1694,14 +2188,21 @@ fn apply_adjustment(
     frame: usize,
     camera: bool,
     composite_light: bool,
+    pass: FxPass,
 ) {
     let opacity = layer.options.opacity.clamp(0., 1.);
     if opacity == 0. {
         return;
     }
-    if let Some(effects) = crate::post::effects_at(layer, frame) {
+    if let Some(mut effects) = crate::post::effects_at(layer, frame) {
         let original = (opacity < 1.).then(|| result.clone());
-        crate::post::apply(result, w, h, &effects, scale);
+        match pass {
+            FxPass::All => {}
+            FxPass::Outline => effects.to_mut().retain(crate::post::Effect::is_outline),
+            FxPass::WithoutOutline => effects.to_mut().retain(|effect| !effect.is_outline()),
+        }
+        crate::post::animate_grain(effects.to_mut(), frame);
+        fx_cache.apply(result, w, h, &effects, scale);
         if let Some(original) = original {
             for (p, old) in result.iter_mut().zip(original) {
                 *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
@@ -1709,11 +2210,13 @@ fn apply_adjustment(
         }
     }
     if composite_light && let Some(light) = &layer.options.light {
-        light.apply_padded(result, w, h, 0, doc, frame, camera, opacity, None, None);
+        light.apply_padded(
+            result, w, h, 0, doc, frame, camera, opacity, None, None, None,
+        );
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderSubset {
     Single(bool, usize),
     Height(usize),
@@ -2233,6 +2736,21 @@ mod tests {
         let source = PathBuf::from(std::env::var_os("LIBRETOON_CAMERA_FIXTURE").unwrap());
         let doc = crate::documents::read_project(&source).unwrap();
         let ctx = egui::Context::default();
+        if let Some(path) = std::env::var_os("LIBRETOON_REFERENCE_FRAME") {
+            let reference = image::open(path).unwrap().into_rgb8();
+            assert_eq!(reference.dimensions(), (doc.width, doc.height));
+            assert!(
+                reference.as_raw()
+                    == &raster(
+                        &doc,
+                        0,
+                        doc.width,
+                        doc.height,
+                        &ctx,
+                        &mut Default::default()
+                    )
+            );
+        }
         let count = crate::animation::movie_count(&doc);
         let first = count.saturating_sub(4);
         let mut cache = crate::paint::RenderCache::default();

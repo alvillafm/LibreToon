@@ -252,6 +252,19 @@ pub fn crossing_parts(mark: &Mark, others: &[Mark]) -> Vec<Mark> {
     parts(mark, &cuts, |_| false, true).0
 }
 /// New paint replaces covered fills; matching colors become a single region.
+fn compatible_paint_style(
+    new: &crate::features::MarkStyle,
+    old: &crate::features::MarkStyle,
+) -> bool {
+    if new == old {
+        return true;
+    }
+    let mut old = old.clone();
+    old.palette_fill = old.palette_fill.or(new.palette_fill);
+    old.palette_stroke = old.palette_stroke.or(new.palette_stroke);
+    new == &old
+}
+
 pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
     let mut result = existing.to_vec();
     for new in incoming {
@@ -297,7 +310,7 @@ pub fn compose(existing: &[Mark], incoming: Vec<Mark>) -> Vec<Mark> {
             touched = true;
             if !new.style.primitive
                 && color == old_color
-                && new.style == old.style
+                && compatible_paint_style(&new.style, &old.style)
                 && new.bucket == old.bucket
             {
                 region = region.union(&poly);

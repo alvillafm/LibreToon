@@ -51,6 +51,7 @@ pub struct RigEditor {
     pub target: Option<u64>,
     pub pin: Option<u64>,
     pub create: bool,
+    reanchor: bool,
     pub paint: bool,
     show_weights: bool,
     pub radius: f32,
@@ -72,6 +73,7 @@ impl Default for RigEditor {
             target: None,
             pin: None,
             create: true,
+            reanchor: false,
             paint: false,
             show_weights: false,
             radius: 40.,
@@ -427,6 +429,7 @@ impl Editor {
                     self.rigging.drag = Some(Gesture::Paint { last: world });
                 } else if self.rigging.create
                     || (!self.rigging.paint
+                        && !self.rigging.reanchor
                         && poses.values().any(|p| {
                             (view.screen(p.end) + Vec2::new(12., -12.)).distance(screen) < 9.
                         }))
@@ -465,62 +468,63 @@ impl Editor {
                     if let Some(id) = id {
                         self.rigging.bone = Some(id);
                         self.checkpoint();
-                        self.rigging.drag =
-                            if ui.input(|i| i.modifiers.shift && !i.modifiers.command) {
-                                self.doc
-                                    .extras
-                                    .rig
-                                    .bones
-                                    .iter()
-                                    .find(|bone| bone.id == id)
-                                    .cloned()
-                                    .map(|original| Gesture::ReanchorBone {
-                                        id,
-                                        grab: world,
-                                        original,
-                                    })
-                            } else if ui.input(|i| {
-                                (i.modifiers.alt || i.modifiers.command) && !i.modifiers.shift
-                            }) {
-                                let bone = self
-                                    .doc
-                                    .extras
-                                    .rig
-                                    .bones
-                                    .iter()
-                                    .find(|bone| bone.id == id)
-                                    .unwrap();
-                                let distance = world.distance(poses[&id].start).max(1.);
-                                Some(Gesture::ScaleBone {
-                                    id,
-                                    distance,
-                                    scale: rig::bone_value(bone, rig_frame).scale,
-                                    stretch: ui
-                                        .input(|i| i.modifiers.command)
-                                        .then(|| rig::bone_value(bone, rig_frame).stretch),
-                                })
-                            } else if ui.input(|i| i.modifiers.shift) {
-                                let bone = self
-                                    .doc
-                                    .extras
-                                    .rig
-                                    .bones
-                                    .iter()
-                                    .find(|bone| bone.id == id)
-                                    .unwrap();
-                                let key = rig::bone_value(bone, rig_frame);
-                                Some(Gesture::MoveBone {
+                        self.rigging.drag = if self.rigging.reanchor
+                            || ui.input(|i| i.modifiers.shift && !i.modifiers.command)
+                        {
+                            self.doc
+                                .extras
+                                .rig
+                                .bones
+                                .iter()
+                                .find(|bone| bone.id == id)
+                                .cloned()
+                                .map(|original| Gesture::ReanchorBone {
                                     id,
                                     grab: world,
-                                    translation: vector::pos(key.translation).to_vec2(),
-                                    parent_angle: bone
-                                        .parent
-                                        .and_then(|parent| poses.get(&parent))
-                                        .map_or(0., |pose| pose.angle),
+                                    original,
                                 })
-                            } else {
-                                Some(Gesture::Bone { id })
-                            };
+                        } else if ui.input(|i| {
+                            (i.modifiers.alt || i.modifiers.command) && !i.modifiers.shift
+                        }) {
+                            let bone = self
+                                .doc
+                                .extras
+                                .rig
+                                .bones
+                                .iter()
+                                .find(|bone| bone.id == id)
+                                .unwrap();
+                            let distance = world.distance(poses[&id].start).max(1.);
+                            Some(Gesture::ScaleBone {
+                                id,
+                                distance,
+                                scale: rig::bone_value(bone, rig_frame).scale,
+                                stretch: ui
+                                    .input(|i| i.modifiers.command)
+                                    .then(|| rig::bone_value(bone, rig_frame).stretch),
+                            })
+                        } else if ui.input(|i| i.modifiers.shift) {
+                            let bone = self
+                                .doc
+                                .extras
+                                .rig
+                                .bones
+                                .iter()
+                                .find(|bone| bone.id == id)
+                                .unwrap();
+                            let key = rig::bone_value(bone, rig_frame);
+                            Some(Gesture::MoveBone {
+                                id,
+                                grab: world,
+                                translation: vector::pos(key.translation).to_vec2(),
+                                parent_angle: bone
+                                    .parent
+                                    .and_then(|parent| poses.get(&parent))
+                                    .map_or(0., |pose| pose.angle),
+                            })
+                        } else {
+                            Some(Gesture::Bone { id })
+                        };
                     }
                 }
             } else {
@@ -548,12 +552,16 @@ impl Editor {
                     self.rigging.target = Some(target);
                     self.rigging.pin = Some(id);
                     self.checkpoint();
-                    self.rigging.drag = Some(if ui.input(|i| i.modifiers.shift) {
-                        Gesture::ReanchorPin { target, id }
-                    } else {
-                        Gesture::Pin { target, id }
-                    });
-                } else if let Some((l, m)) = self.rig_hit(world, 4. / view.scale) {
+                    self.rigging.drag = Some(
+                        if self.rigging.reanchor || ui.input(|i| i.modifiers.shift) {
+                            Gesture::ReanchorPin { target, id }
+                        } else {
+                            Gesture::Pin { target, id }
+                        },
+                    );
+                } else if !self.rigging.reanchor
+                    && let Some((l, m)) = self.rig_hit(world, 4. / view.scale)
+                {
                     self.add_puppet_pin(l, m, world);
                 }
             }
@@ -1008,21 +1016,24 @@ impl Editor {
             {
                 self.rigging.create = true;
                 self.rigging.paint = false;
+                self.rigging.reanchor = false;
             }
             if design::button(
                 ui,
                 Icon::Rotate,
                 "Posar",
                 "Shift: move anchor · Ctrl/Cmd+Shift: move pose · Alt: scale · Ctrl/Cmd: stretch",
-                !self.rigging.create && !self.rigging.paint,
+                !self.rigging.create && !self.rigging.paint && !self.rigging.reanchor,
                 true,
             )
             .clicked()
             {
                 self.rigging.create = false;
                 self.rigging.paint = false;
+                self.rigging.reanchor = false;
             }
         });
+        self.rig_anchor_mode_button(ui);
         design::category(ui, "JERARQUÍA");
         let bones = self.doc.extras.rig.bones.clone();
         let targets = self.rig_targets();
@@ -1031,17 +1042,21 @@ impl Editor {
             .filter(|target| target.layer == self.layer)
             .map(|target| target.track)
             .collect();
+        let shown: Vec<_> = bones
+            .iter()
+            .filter(|bone| {
+                bone.targets.is_empty()
+                    || bone
+                        .targets
+                        .iter()
+                        .any(|track| local_tracks.contains(track))
+            })
+            .collect();
         egui::ScrollArea::vertical()
             .id_salt("bone-tree")
             .max_height(170.)
             .show(ui, |ui| {
-                for b in bones.iter().filter(|bone| {
-                    bone.targets.is_empty()
-                        || bone
-                            .targets
-                            .iter()
-                            .any(|track| local_tracks.contains(track))
-                }) {
+                for b in &shown {
                     let mut depth = 0;
                     let mut parent = b.parent;
                     while let Some(id) = parent {
@@ -1068,6 +1083,45 @@ impl Editor {
                     });
                 }
             });
+        if !shown.is_empty() {
+            egui::CollapsingHeader::new(tr("Rename visible bones")).show(ui, |ui| {
+                let id = ui.scope_id().with("rig-name-prefix");
+                let mut prefix = ui
+                    .data(|data| data.get_temp::<String>(id))
+                    .unwrap_or_default();
+                ui.add(
+                    egui::TextEdit::singleline(&mut prefix)
+                        .char_limit(48)
+                        .hint_text(tr("Bone name prefix")),
+                );
+                if design::button(
+                    ui,
+                    Icon::Rename,
+                    "Rename visible bones",
+                    "",
+                    false,
+                    !prefix.trim().is_empty(),
+                )
+                .clicked()
+                {
+                    self.checkpoint();
+                    for (index, visible) in shown.iter().enumerate() {
+                        if let Some(bone) = self
+                            .doc
+                            .extras
+                            .rig
+                            .bones
+                            .iter_mut()
+                            .find(|b| b.id == visible.id)
+                        {
+                            bone.name = format!("{} {:02}", prefix.trim(), index + 1);
+                        }
+                    }
+                    self.recover();
+                }
+                ui.data_mut(|data| data.insert_temp(id, prefix));
+            });
+        }
         let Some(index) = self
             .rigging
             .bone
@@ -1189,6 +1243,7 @@ impl Editor {
         .clicked()
         {
             self.rigging.paint = !self.rigging.paint;
+            self.rigging.reanchor = false;
             self.rigging.create = false;
         }
         if self.rigging.paint {
@@ -1316,7 +1371,25 @@ impl Editor {
             self.recover();
         }
     }
+    fn rig_anchor_mode_button(&mut self, ui: &mut egui::Ui) {
+        if design::button(
+            ui,
+            Icon::Transform,
+            "Edit anchors",
+            "Move anchors without posing the artwork",
+            self.rigging.reanchor,
+            true,
+        )
+        .clicked()
+        {
+            self.rigging.reanchor = !self.rigging.reanchor;
+            self.rigging.create = false;
+            self.rigging.paint = false;
+        }
+    }
+
     fn puppet_properties(&mut self, ui: &mut egui::Ui) {
+        self.rig_anchor_mode_button(ui);
         let rig_frame = self.group_rig_frame();
         design::category(ui, "PUPPET VECTORIAL");
         ui.small(tr(

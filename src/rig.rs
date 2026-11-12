@@ -55,6 +55,12 @@ pub struct Rig {
     pub bindings: SharedVec<Binding>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SavedPose {
+    pub(crate) name: String,
+    pub(crate) bones: Vec<(u64, BoneKey)>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Bone {
     pub id: u64,
     pub name: String,

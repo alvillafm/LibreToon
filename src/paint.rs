@@ -165,6 +165,7 @@ impl Prepared {
 #[derive(Default)]
 pub struct RenderCache {
     pub(crate) lit_planes: crate::exporter::LitPlanes,
+    pub(crate) post_fx: crate::post::EffectCache,
     entries: HashMap<Key, (Arc<Prepared>, u64)>,
     epoch: u64,
     bytes: usize,

@@ -251,6 +251,7 @@ pub struct State {
     pub(crate) selected_tag: Option<u64>,
     pub(crate) tag_drag: Option<crate::dialogue::TagDrag>,
     pub(crate) space_press: Option<(f64, bool)>,
+    pub(crate) exposure_sheet: bool,
     pub scenes_open: bool,
     pub scene_rename: Option<u64>,
     pub scene_delete: Option<u64>,

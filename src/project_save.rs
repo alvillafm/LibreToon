@@ -40,6 +40,7 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
 }
 
 struct Job {
+    target: PathBuf,
     result: mpsc::Receiver<Result<(PathBuf, Stamp), SaveError>>,
     recovery: PathBuf,
     revision: u64,
@@ -142,17 +143,13 @@ fn write_snapshot(
             .create_new(true)
             .open(&temporary)?;
         let mut writer = io::BufWriter::new(file);
-        if crate::native_project::is_native_path(target)
-            || target
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("fla"))
+        if crate::native_project::is_native_path(target) {
+            crate::native_project::write(doc, &mut writer).map_err(SaveError::Failed)?;
+        } else if target
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("fla"))
         {
-            let bytes = if crate::native_project::is_native_path(target) {
-                crate::native_project::encode(doc)
-            } else {
-                crate::fla::encode(doc)
-            }
-            .map_err(SaveError::Failed)?;
+            let bytes = crate::fla::encode(doc).map_err(SaveError::Failed)?;
             if bytes.len() > 256 * 1024 * 1024 {
                 return Err(SaveError::Failed(
                     "Project exceeds the 256 MiB opening limit".into(),
@@ -350,6 +347,7 @@ impl Editor {
         document.extras.imported = false;
         let (send, result) = mpsc::channel();
         self.project_save.job = Some(Job {
+            target: path.clone(),
             result,
             recovery: record.recovery.clone(),
             revision: record.revision,
@@ -370,11 +368,62 @@ impl Editor {
         let Some(index) = self.hub.active else {
             return;
         };
+        let document = self.project_document();
+        let layers = document
+            .layers
+            .iter()
+            .chain(
+                document
+                    .extras
+                    .scenes
+                    .iter()
+                    .flat_map(|scene| scene.layers.iter()),
+            )
+            .chain(
+                document
+                    .extras
+                    .symbols
+                    .iter()
+                    .flat_map(|symbol| symbol.layers.iter()),
+            );
+        let (mut raster, mut effects) = (false, false);
+        for layer in layers {
+            raster |= layer.options.raster;
+            effects |= layer.options.light.is_some() || crate::post::is_adjustment(layer);
+        }
+        let mut description = tr("The FLA preview preserves compatible vector artwork and timing. Media, rigs and other LibreToon features may be missing or flattened in Animate.").to_owned();
+        let has_rig = !document.extras.rig.is_empty()
+            || document
+                .extras
+                .scenes
+                .iter()
+                .any(|scene| !scene.rig.is_empty())
+            || document
+                .extras
+                .symbols
+                .iter()
+                .any(|symbol| !symbol.rig.is_empty());
+        let affected = [
+            (!document.extras.media.assets.is_empty(), "Imported media"),
+            (has_rig, "Rigging"),
+            (raster, "Raster layers"),
+            (effects, "Lights and adjustment layers"),
+        ];
+        for (present, label) in affected {
+            if present {
+                description.push_str(&format!(
+                    "
+• {}",
+                    tr(label)
+                ));
+            }
+        }
         if rfd::MessageDialog::new()
             .set_title(tr("Export Adobe Animate (.fla)…"))
-            .set_description(tr("The FLA preview preserves compatible vector artwork and timing. Media, rigs and other LibreToon features may be missing or flattened in Animate."))
+            .set_description(&description)
             .set_buttons(rfd::MessageButtons::OkCancel)
-            .show() != rfd::MessageDialogResult::Ok
+            .show()
+            != rfd::MessageDialogResult::Ok
         {
             return;
         }
@@ -412,12 +461,13 @@ impl Editor {
             return;
         }
         let record = &self.hub.tabs[index].record;
-        let mut doc = self.project_document();
+        let mut doc = document;
         doc.extras.imported = false;
         crate::raster::prune(&mut doc);
         let expected = stamp(&path);
         let (send, result) = mpsc::channel();
         self.project_save.job = Some(Job {
+            target: path.clone(),
             result,
             recovery: record.recovery.clone(),
             revision: record.revision,
@@ -477,7 +527,22 @@ impl Editor {
                     Err(SaveError::Failed(error)) => {
                         self.project_save.update_save = None;
                         self.status = error.clone();
-                        self.project_save.error = Some(error);
+                        let mut details = format!(
+                            "{error}
+
+{} {}",
+                            tr("Destination"),
+                            job.target.display()
+                        );
+                        if !job.interchange && job.recovery.exists() {
+                            details.push_str(&format!(
+                                "
+{} {}",
+                                tr("Recovery file"),
+                                job.recovery.display()
+                            ));
+                        }
+                        self.project_save.error = Some(details);
                     }
                 }
             } else {
@@ -489,6 +554,15 @@ impl Editor {
             let mut cancel = false;
             egui::Modal::new(egui::Id::unique("project-save-conflict")).show(ctx, |ui| {
                 ui.heading(tr("El archivo cambió en disco"));
+                if let Some(path) = self
+                    .hub
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.record.recovery == recovery)
+                    .and_then(|tab| tab.record.path.as_ref())
+                {
+                    ui.label(path.display().to_string());
+                }
                 ui.label(tr(
                     "Guarda tu trabajo en una copia para conservar la versión del disco.",
                 ));

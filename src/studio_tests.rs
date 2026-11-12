@@ -188,14 +188,23 @@ fn recovered_documents_are_lazy_and_home_stays_selected() {
     e.persist_documents();
     drop(e);
     let ctx = egui::Context::default();
-    let mut restored = Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+    let mut restored = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
     assert!(restored.hub.home);
     assert!(restored.hub.active.is_none());
     assert_eq!(restored.hub.tabs.len(), 2);
     assert!(restored.doc.layers[0].frames[0].is_empty());
-    restored.activate_document(0);
+    let activate = |editor: &mut Editor, index| {
+        editor.activate_document(index);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while editor.hub.active != Some(index) {
+            assert!(std::time::Instant::now() < deadline, "{}", editor.status);
+            editor.poll_open(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    activate(&mut restored, 0);
     assert_eq!(restored.doc.layers[0].frames[0].len(), 1);
-    restored.activate_document(1);
+    activate(&mut restored, 1);
     assert_eq!(restored.doc.layers[0].name, "Segundo documento");
 }
 

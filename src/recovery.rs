@@ -1,8 +1,8 @@
 //! One background writer, with the latest pending snapshot per document.
 //! Shutdown flushes every pending document before joining the worker.
-use crate::{document::Document, write_document};
+use crate::{document::Document, write_recovery_document};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
@@ -12,6 +12,8 @@ use std::{
 #[derive(Default)]
 struct State {
     pending: HashMap<PathBuf, Document>,
+    in_flight: HashSet<PathBuf>,
+    discarded: HashSet<PathBuf>,
     shutdown: bool,
     error: Option<String>,
 }
@@ -26,6 +28,7 @@ impl RecoveryWriter {
             let shared = self.shared.clone();
             self.worker = Some(std::thread::spawn(move || {
                 let (lock, wake) = &*shared;
+                let mut cache = crate::fla_zip::RecoveryCompression::default();
                 loop {
                     let mut state = lock.lock().unwrap();
                     while state.pending.is_empty() && !state.shutdown {
@@ -42,6 +45,7 @@ impl RecoveryWriter {
                             .0;
                     }
                     let pending = std::mem::take(&mut state.pending);
+                    state.in_flight.extend(pending.keys().cloned());
                     let shutdown = state.shutdown;
                     drop(state);
                     for (path, doc) in pending {
@@ -49,9 +53,26 @@ impl RecoveryWriter {
                             .parent()
                             .map_or(Ok(()), std::fs::create_dir_all)
                             .map_err(|e| e.to_string())
-                            .and_then(|()| write_document(&path, &doc));
-                        if let Err(error) = result {
-                            lock.lock().unwrap().error = Some(error);
+                            .and_then(|()| {
+                                write_recovery_document(
+                                    &path,
+                                    &doc,
+                                    Some(&mut cache),
+                                    |temporary, destination| {
+                                        let state = lock.lock().unwrap();
+                                        if state.discarded.contains(destination) {
+                                            return Ok(());
+                                        }
+                                        std::fs::rename(temporary, destination)
+                                    },
+                                )
+                            });
+                        let mut state = lock.lock().unwrap();
+                        state.in_flight.remove(&path);
+                        if !state.discarded.remove(&path)
+                            && let Err(error) = result
+                        {
+                            state.error = Some(error);
                         }
                     }
                     if shutdown {
@@ -63,6 +84,19 @@ impl RecoveryWriter {
         self.shared.0.lock().unwrap().pending.insert(path, document);
         self.shared.1.notify_one();
     }
+    pub(crate) fn discard(&self, path: &std::path::Path) {
+        let mut state = self.shared.0.lock().unwrap();
+        state.pending.remove(path);
+        if state.in_flight.contains(path) {
+            state.discarded.insert(path.to_owned());
+        }
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            state.error = Some(error.to_string());
+        }
+    }
+
     pub fn take_error(&self) -> Option<String> {
         self.shared.0.lock().unwrap().error.take()
     }
@@ -123,6 +157,17 @@ mod tests {
         std::fs::remove_file(b).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }
+    #[test]
+    fn discard_removes_published_and_queued_recovery_before_shutdown() {
+        let path = std::env::temp_dir().join(format!("discarded-{}.ltoon", crate::features::id()));
+        std::fs::write(&path, b"old recovery").unwrap();
+        let mut writer = RecoveryWriter::default();
+        writer.submit(path.clone(), Document::default());
+        writer.discard(&path);
+        drop(writer);
+        assert!(!path.exists());
+    }
+
     #[test]
     fn write_failures_are_reported() {
         let mut writer = RecoveryWriter::default();

@@ -22,12 +22,32 @@ pub fn is_native_path(path: &std::path::Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case(EXTENSION))
 }
 
+#[cfg(test)]
 pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    write(doc, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub fn write(doc: &Document, writer: &mut impl std::io::Write) -> Result<(), String> {
+    write_with_recovery_cache(doc, writer, None)
+}
+
+pub(crate) fn write_with_recovery_cache(
+    doc: &Document,
+    writer: &mut impl std::io::Write,
+    recovery: Option<&mut crate::fla_zip::RecoveryCompression>,
+) -> Result<(), String> {
     let mut snapshot = doc.clone();
     crate::raster::prune(&mut snapshot);
     snapshot.validate()?;
     let metadata = without_media_payloads(&snapshot);
-    let (manifest, native) = match bounded_json(&metadata, COMPACT_THRESHOLD)? {
+    let legacy = if legacy_cels_exceed_threshold(&metadata) {
+        None
+    } else {
+        bounded_json(&metadata, COMPACT_THRESHOLD)?
+    };
+    let (manifest, native) = match legacy {
         Some(native) => (MANIFEST_V1, native),
         None => {
             let native = cels::compact(|| bounded_json(&metadata, COMPACT_DOCUMENT_LIMIT))?
@@ -35,7 +55,50 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
             (MANIFEST_V2, native)
         }
     };
-    pack_document(&snapshot, vec![(MANIFEST, manifest)], &native)
+    write_document(
+        &snapshot,
+        vec![(MANIFEST, manifest)],
+        &native,
+        writer,
+        recovery,
+    )
+}
+
+// A lower bound only selects the compact path when the legacy writer would
+// certainly hit the threshold. Count repeated cels by identity.
+fn legacy_cels_exceed_threshold(doc: &Document) -> bool {
+    let mut sizes = std::collections::HashMap::new();
+    let mut bytes = 0usize;
+    let layers = doc
+        .layers
+        .iter()
+        .chain(
+            doc.extras
+                .scenes
+                .iter()
+                .flat_map(|scene| scene.layers.iter()),
+        )
+        .chain(
+            doc.extras
+                .symbols
+                .iter()
+                .flat_map(|symbol| symbol.layers.iter()),
+        );
+    for frame in layers.flat_map(|layer| layer.frames.iter()) {
+        let size = sizes.entry(frame.identity()).or_insert_with(|| {
+            frame.iter().fold(0usize, |total, mark| {
+                total
+                    .saturating_add(40)
+                    .saturating_add(mark.points.len().saturating_mul(5))
+                    .saturating_add(mark.nodes.len().saturating_mul(30))
+            })
+        });
+        bytes = bytes.saturating_add(*size);
+        if bytes > COMPACT_THRESHOLD {
+            return true;
+        }
+    }
+    false
 }
 
 fn without_media_payloads(doc: &Document) -> Document {
@@ -83,14 +146,18 @@ fn bounded_json(doc: &Document, limit: usize) -> Result<Option<Vec<u8>>, String>
 pub(crate) fn pack(doc: &Document, header: Vec<(&str, &[u8])>) -> Result<Vec<u8>, String> {
     let native = bounded_json(&without_media_payloads(doc), LEGACY_DOCUMENT_LIMIT)?
         .ok_or("Proyecto demasiado grande para el contenedor de proyecto")?;
-    pack_document(doc, header, &native)
+    let mut bytes = Vec::new();
+    write_document(doc, header, &native, &mut bytes, None)?;
+    Ok(bytes)
 }
 
-fn pack_document(
+fn write_document(
     doc: &Document,
     header: Vec<(&str, &[u8])>,
     native: &[u8],
-) -> Result<Vec<u8>, String> {
+    writer: &mut impl std::io::Write,
+    recovery: Option<&mut crate::fla_zip::RecoveryCompression>,
+) -> Result<(), String> {
     let names: Vec<_> = doc
         .extras
         .media
@@ -127,7 +194,24 @@ fn pack_document(
     if entries.len() > u16::MAX as usize || size.is_none_or(|size| size > LIMIT) {
         return Err("El proyecto supera el límite de 256 MiB".into());
     }
-    crate::fla_zip::pack_compressed(&entries).map_err(|error| error.to_string())
+    let raster_names: std::collections::HashSet<_> = names
+        .iter()
+        .zip(doc.extras.media.assets.iter())
+        .filter_map(|(name, asset)| asset.raster_tile.then_some(name.as_str()))
+        .collect();
+    crate::fla_zip::write_compressed(
+        writer,
+        &entries,
+        |name| {
+            if name == DOCUMENT || raster_names.contains(name) {
+                flate2::Compression::default()
+            } else {
+                flate2::Compression::fast()
+            }
+        },
+        recovery,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn media_entry(id: u64) -> String {
@@ -323,6 +407,50 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&restored).unwrap(),
             serde_json::to_vec(&document).unwrap()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual archive benchmark with a production project fixture"]
+    fn benchmark_dbgt_storage() {
+        let path =
+            std::path::PathBuf::from(std::env::var_os("LIBRETOON_BENCHMARK_PROJECT").unwrap());
+        let before = std::fs::metadata(&path).unwrap().len();
+        let start = std::time::Instant::now();
+        let doc = crate::documents::read_project(&path).unwrap();
+        let open = start.elapsed();
+        let start = std::time::Instant::now();
+        let encoded = encode(&doc).unwrap();
+        let save = start.elapsed();
+        let mut recovery = crate::fla_zip::RecoveryCompression::default();
+        write_with_recovery_cache(&doc, &mut Vec::new(), Some(&mut recovery)).unwrap();
+        let start = std::time::Instant::now();
+        let mut recovered = Vec::new();
+        write_with_recovery_cache(&doc, &mut recovered, Some(&mut recovery)).unwrap();
+        let recovery_write = start.elapsed();
+        assert!(encoded == recovered);
+        let restored = decode_if_native(&encoded).unwrap().unwrap();
+        assert_eq!(
+            restored.extras.media.assets.len(),
+            doc.extras.media.assets.len()
+        );
+        for (old, new) in doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .zip(&restored.extras.media.assets)
+        {
+            assert_eq!(old.id, new.id);
+            assert!(old.data == new.data);
+        }
+        assert_eq!(restored.layers.len(), doc.layers.len());
+        for (old, new) in doc.layers.iter().zip(&restored.layers) {
+            assert!(old.frames == new.frames);
+        }
+        eprintln!(
+            "{before} -> {} bytes; open and validate {open:?}; serialize and compress {save:?}; recovery with warm resource compression {recovery_write:?}",
+            encoded.len()
         );
     }
 

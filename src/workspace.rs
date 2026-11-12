@@ -688,18 +688,6 @@ impl Editor {
                             .color(crate::themes::muted()),
                     );
                     ui.separator();
-                    if button(
-                        ui,
-                        Icon::Layers,
-                        "",
-                        "Layer objects",
-                        self.studio.layer_objects_open,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.studio.layer_objects_open = !self.studio.layer_objects_open;
-                    }
                     self.color_swatches(ui);
                 });
             });
@@ -721,42 +709,59 @@ impl Editor {
                         Icon::Settings,
                         "Propiedades",
                         "Propiedades",
-                        !self.feature.library && !self.clips.open,
+                        !self.feature.library && !self.clips.open && !self.studio.palette.open,
                         true,
                     )
                     .clicked()
                     {
                         self.feature.library = false;
                         self.clips.open = false;
+                        self.studio.palette.open = false;
                     }
                     if button(
                         ui,
                         Icon::Library,
                         "Biblioteca",
                         "Biblioteca",
-                        self.feature.library && !self.clips.open,
+                        self.feature.library && !self.clips.open && !self.studio.palette.open,
                         true,
                     )
                     .clicked()
                     {
                         self.feature.library = true;
                         self.clips.open = false;
+                        self.studio.palette.open = false;
                     }
                     if button(
                         ui,
                         Icon::Film,
                         "Animation",
                         "Animation Manager",
-                        self.clips.open,
+                        self.clips.open && !self.studio.palette.open,
                         true,
                     )
                     .clicked()
                     {
                         self.clips.open = true;
+                        self.studio.palette.open = false;
+                    }
+                    if button(
+                        ui,
+                        Icon::Eyedropper,
+                        "Color",
+                        "Color palettes",
+                        self.studio.palette.open,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        self.studio.palette.open = true;
                     }
                 });
                 ui.separator();
-                if self.clips.open {
+                if self.studio.palette.open {
+                    self.palette_ui(ui);
+                } else if self.clips.open {
                     self.animation_manager_ui(ui);
                 } else if self.feature.library {
                     self.library_ui(ui);

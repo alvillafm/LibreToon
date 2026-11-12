@@ -168,10 +168,14 @@ pub struct Preferences {
     pub language: Option<crate::i18n::Language>,
     pub theme: crate::themes::Theme,
     pub auto_key_paint: bool,
+    pub(crate) preview_cache_mib: usize,
     pub(crate) viewport_quality: crate::depth::ViewportQuality,
     pub saving: crate::project_save::Options,
     pub raster_brush: crate::raster::Brush,
     pub(crate) light_presets: Vec<crate::light::Preset>,
+    pub(crate) export_presets: Vec<crate::exporter::Preset>,
+    pub(crate) favorite_colors: Vec<[u8; 4]>,
+    pub(crate) color_preset: usize,
     layer_colors: [[u8; 3]; 9],
     pub bindings: Vec<Binding>,
     pub actions: Vec<Binding>,
@@ -204,10 +208,14 @@ impl Default for Preferences {
             language: None,
             theme: Default::default(),
             auto_key_paint: false,
+            preview_cache_mib: 256,
             viewport_quality: Default::default(),
             saving: Default::default(),
             raster_brush: Default::default(),
             light_presets: Vec::new(),
+            export_presets: Vec::new(),
+            favorite_colors: Vec::new(),
+            color_preset: 0,
             layer_colors: LayerColor::ALL.map(|(_, _, _, color)| color),
             bindings: TOOLS
                 .iter()
@@ -224,12 +232,12 @@ pub struct Studio {
     pub prefs: Preferences,
     pub preferences_open: bool,
     pub credits_open: bool,
+    pub(crate) palette: crate::palette::Panel,
     preference_category: usize,
     pub stage_only: bool,
     pub(crate) layer_objects_open: bool,
     pub(crate) command_helper: bool,
     pub(crate) color_picker: Option<bool>,
-    pub(crate) color_popup_open: bool,
     pub onion_before: usize,
     pub onion_after: usize,
     pub clipboard: Vec<Mark>,
@@ -250,6 +258,9 @@ pub struct Studio {
     pub export: Option<crate::exporter::ExportSettings>,
     pub ffmpeg_setup: crate::ffmpeg_setup::Setup,
     pub export_job: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    pub(crate) export_batch: crate::exporter::ExportBatch,
+    pub(crate) export_batch_total: usize,
+    pub(crate) export_batch_index: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub export_progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub export_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     notice: String,
@@ -294,12 +305,12 @@ impl Studio {
             prefs,
             preferences_open: false,
             credits_open: false,
+            palette: Default::default(),
             preference_category: 0,
             stage_only: false,
             layer_objects_open: false,
             command_helper: false,
             color_picker: None,
-            color_popup_open: false,
             onion_before: 1,
             onion_after: 1,
             clipboard: vec![],
@@ -320,6 +331,9 @@ impl Studio {
             export: None,
             ffmpeg_setup: Default::default(),
             export_job: None,
+            export_batch: Default::default(),
+            export_batch_total: 1,
+            export_batch_index: Default::default(),
             export_progress: Default::default(),
             export_cancel: Default::default(),
             notice: String::new(),
@@ -1296,7 +1310,7 @@ impl Editor {
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(Vec2::new(155.,560.),egui::Layout::top_down(egui::Align::Min),|ui|{
                         ui.add_space(8.);
-                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node),(2,"Opciones de guardado",crate::design::Icon::Save),(3,"Layer colors",crate::design::Icon::Layers)] {
+                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node),(2,"Opciones de guardado",crate::design::Icon::Save),(3,"Layer colors",crate::design::Icon::Layers),(4,"Performance",crate::design::Icon::Zoom),(5,"Tablet diagnostics",crate::design::Icon::Pen)] {
                             if crate::design::button(ui,icon,label,label,self.studio.preference_category==index,true).clicked(){self.studio.preference_category=index;self.studio.capture=None;}
                         }
                     });
@@ -1310,6 +1324,29 @@ impl Editor {
                                 ui.label(tr("Idioma"));let mut locale=self.studio.prefs.locale();egui::ComboBox::from_id_salt("language").selected_text(locale.name()).show_ui(ui,|ui|{for language in crate::i18n::Language::ALL{if ui.selectable_value(&mut locale,language,language.name()).changed(){self.studio.prefs.language=Some(locale);save=true;}}});ui.end_row();
 
                             });
+                        } else if self.studio.preference_category == 5 {
+                            ui.heading(tr("Tablet diagnostics"));
+                            let pen = &self.drawing.pen;
+                            ui.label(tr("Press the pen on this window to test pressure and the eraser."));
+                            ui.label(format!("{} · {}", tr("Input source"), pen.source().unwrap_or(tr("Waiting for pen"))));
+                            let force = pen.force().unwrap_or(0.);
+                            ui.add(egui::ProgressBar::new(force).text(format!("{} · {:.0}%", tr("Pressure"), force * 100.)));
+                            ui.label(if pen.eraser() { tr("Eraser tip") } else { tr("Pen tip") });
+                            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+                        } else if self.studio.preference_category == 4 {
+                            ui.heading(tr("Performance"));
+                            ui.add_space(12.);
+                            ui.horizontal(|ui| {
+                                ui.label(tr("Preview cache memory"));
+                                let memory = &mut self.studio.prefs.preview_cache_mib;
+                                egui::ComboBox::from_id_salt("preview-cache-memory").selected_text(format!("{memory} MiB")).show_ui(ui, |ui| {
+                                    for size in [128, 256, 512, 1024] {
+                                        save |= ui.selectable_value(memory, size, format!("{size} MiB")).changed();
+                                    }
+                                });
+                            });
+                            let (used, count) = self.depth.cache_usage();
+                            ui.label(format!("{:.1} MiB · {} {}", used as f64 / 1048576., count, tr("Cached frames")));
                         } else if self.studio.preference_category == 2 {
                             ui.heading(tr("Opciones de guardado"));
                             ui.add_space(12.);

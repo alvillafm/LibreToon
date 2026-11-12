@@ -40,6 +40,7 @@ impl Session {
         }
     }
     fn exchange(&mut self, e: &mut Editor) {
+        e.studio.palette = Default::default();
         e.feature.exposure_drag = None;
         e.folder_groups.clear();
         e.vector_trim.clear();
@@ -169,18 +170,24 @@ pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
     let fla_path = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("fla"));
+    let mut native_validated = false;
     let mut d: Document = if fla_path && !json {
         crate::fla::decode(&bytes)?
     } else if bytes.starts_with(b"PK") || native_path {
         match crate::native_project::decode_if_native(&bytes)? {
-            Some(doc) => doc,
+            Some(doc) => {
+                native_validated = true;
+                doc
+            }
             None if native_path => return Err("Missing LibreToon project manifest".into()),
             None => crate::fla::decode(&bytes)?,
         }
     } else {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?
     };
-    d.validate()?;
+    if !native_validated {
+        d.validate()?;
+    }
     d.extras.media.remove_empty_tracks();
     for scene in &mut d.extras.scenes {
         scene.media_tracks.retain(|track| !track.is_empty());
@@ -318,50 +325,23 @@ impl Editor {
         if self.hub.active != Some(i) {
             if self.hub.tabs[i].state.is_none() {
                 let record = &self.hub.tabs[i].record;
-                let path = record.path.clone();
-                let read_saved = || {
-                    let path = path.as_deref().ok_or("No se encuentra el proyecto")?;
-                    let before = crate::project_save::stamp(path);
-                    let doc = read_project(path)?;
-                    if before != crate::project_save::stamp(path) {
-                        return Err(
-                            "The file changed while it was being opened. Try opening it again."
-                                .into(),
-                        );
-                    }
-                    Ok((doc, before))
-                };
-                let read_recovery =
-                    || read_project(&record.recovery).map(|doc| (doc, record.stamp));
-                let doc = if record.dirty {
-                    read_recovery().or_else(|_| read_saved())
-                } else {
-                    read_saved().or_else(|_| read_recovery())
-                };
-                match doc {
-                    Ok((doc, stamp)) => {
-                        self.hub.tabs[i].state = Some(Session::new(
-                            doc,
-                            record.path.clone(),
-                            record.recovery.clone(),
-                        ));
-                        self.hub.tabs[i].record.stamp = stamp;
-                    }
-                    Err(e) => {
-                        self.status = crate::i18n::message(
-                            "No se pudo recuperar el documento: {e}",
-                            &[("e", e)],
-                        );
-                        return;
-                    }
-                }
+                self.status = "Abriendo proyecto…".into();
+                self.loader.restore(
+                    record.recovery.clone(),
+                    record.path.clone(),
+                    record.stamp,
+                    record.dirty,
+                );
+                return;
             }
+            self.loader.cancel_restore();
             self.park_document();
             if let Some(mut session) = self.hub.tabs[i].state.take() {
                 session.exchange(self);
             }
             self.hub.active = Some(i);
         }
+        self.loader.cancel_restore();
         self.hub.home = false;
         self.import_report_open = false;
         self.drawing.scroll_to_tab = true;
@@ -371,7 +351,38 @@ impl Editor {
         self.renaming_layer = None;
         self.document_settings = None;
     }
+    pub(crate) fn finish_restoring_tab(
+        &mut self,
+        recovery: PathBuf,
+        result: Result<Document, String>,
+        stamp: Option<crate::project_save::Stamp>,
+    ) {
+        let Some(index) = self
+            .hub
+            .tabs
+            .iter()
+            .position(|tab| tab.record.recovery == recovery && tab.state.is_none())
+        else {
+            return;
+        };
+        match result {
+            Ok(doc) => {
+                let tab = &mut self.hub.tabs[index];
+                tab.state = Some(Session::new(doc, tab.record.path.clone(), recovery));
+                tab.record.stamp = stamp;
+                self.activate_document(index);
+                self.status = "Proyecto abierto".into();
+            }
+            Err(error) => {
+                self.status =
+                    crate::i18n::message("No se pudo recuperar el documento: {e}", &[("e", error)]);
+            }
+        }
+    }
+
     pub fn add_document(&mut self, doc: Document, path: Option<PathBuf>) {
+        self.loader.cancel_restore();
+
         self.park_document();
         let recovery = catalogue_path()
             .parent()
@@ -509,7 +520,7 @@ impl Editor {
         let tab = self.hub.tabs.remove(i);
         let recovery = tab.record.recovery.clone();
         drop(tab);
-        let _ = std::fs::remove_file(recovery);
+        self.recovery_writer.discard(&recovery);
         if let Some(active) = &mut self.hub.active {
             if *active > i {
                 *active -= 1;
@@ -606,6 +617,7 @@ impl Editor {
             });
         self.drawing.scroll_to_tab = false;
         if home {
+            self.loader.cancel_restore();
             self.finish_pending_pen();
             if self.hub.active.is_some() {
                 self.recover();

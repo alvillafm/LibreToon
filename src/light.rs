@@ -16,6 +16,8 @@ pub enum Kind {
     Directional,
     Ambient,
     Rim,
+    RimShadow,
+    Spot,
 }
 
 impl Kind {
@@ -25,8 +27,123 @@ impl Kind {
             Self::Directional => "Directional light",
             Self::Ambient => "Ambient light",
             Self::Rim => "Rim light",
+            Self::RimShadow => "Rim shadow",
+            Self::Spot => "Spot light",
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum Gobo {
+    None,
+    Blinds,
+    Window,
+    Leaves,
+    Library,
+}
+
+impl Gobo {
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "No gobo",
+            Self::Blinds => "Blinds",
+            Self::Window => "Window",
+            Self::Leaves => "Leaves",
+            Self::Library => "Library symbol",
+        }
+    }
+
+    fn transmission(self, along: f32, across: f32, offset: f32) -> f32 {
+        let x = across + offset;
+        match self {
+            Self::None | Self::Library => 1.,
+            Self::Blinds => {
+                if (x * 9.).rem_euclid(1.) < 0.55 {
+                    1.
+                } else {
+                    0.12
+                }
+            }
+            Self::Window => {
+                if x.abs() < 0.035 || (along - 0.52).abs() < 0.035 {
+                    0.08
+                } else {
+                    1.
+                }
+            }
+            Self::Leaves => {
+                let pattern = (x * 67. + along * 33.).sin() * (along * 54. - x * 24.).sin();
+                (0.65 + pattern * 0.43).clamp(0.12, 1.)
+            }
+        }
+    }
+}
+
+const GOBO_SIZE: usize = 48;
+
+fn make_gobo(doc: &crate::Document, id: u64) -> Option<SharedVec<u8>> {
+    use geo::{BoundingRect, Contains};
+    let symbol = doc.extras.symbols.iter().find(|symbol| symbol.id == id)?;
+    let mut sample = doc.clone();
+    sample.layers = symbol.layers.clone();
+    sample.extras.rig = symbol.rig.clone();
+    sample.extras.folders = symbol.folders.clone();
+    sample.extras.scenes = Default::default();
+    let marks: Vec<_> = crate::features::resolve_export(&sample, 0, false)
+        .into_iter()
+        .map(|(_, _, mark)| mark)
+        .filter(|mark| {
+            mark.style.media_image.is_none() && !mark.style.raster_tile && !mark.style.light_mask
+        })
+        .take(513)
+        .collect();
+    if marks.len() > 512 {
+        return None;
+    }
+    let silhouette = crate::features::ink(&marks);
+    let bounds = silhouette.bounding_rect()?;
+    let extent = bounds.width().max(bounds.height()) * 1.1;
+    if extent <= 0. {
+        return None;
+    }
+    let center = bounds.center();
+    Some(
+        (0..GOBO_SIZE * GOBO_SIZE)
+            .map(|i| {
+                let x = ((i % GOBO_SIZE) as f64 + 0.5) / GOBO_SIZE as f64 - 0.5;
+                let y = ((i / GOBO_SIZE) as f64 + 0.5) / GOBO_SIZE as f64 - 0.5;
+                if silhouette.contains(&geo::Point::new(
+                    center.x + x * extent,
+                    center.y + y * extent,
+                )) {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect(),
+    )
+}
+
+fn sample_gobo(matte: &[u8], along: f32, across: f32) -> f32 {
+    let x = (across + 0.5) * (GOBO_SIZE - 1) as f32;
+    let y = along * (GOBO_SIZE - 1) as f32;
+    if !(0. ..=(GOBO_SIZE - 1) as f32).contains(&x) || !(0. ..=(GOBO_SIZE - 1) as f32).contains(&y)
+    {
+        return 0.;
+    }
+    let (ix, iy) = (
+        (x as usize).min(GOBO_SIZE - 2),
+        (y as usize).min(GOBO_SIZE - 2),
+    );
+    let tx = x - ix as f32;
+    let ty = y - iy as f32;
+    let row = |row| {
+        let a = f32::from(matte[row * GOBO_SIZE + ix]);
+        let b = f32::from(matte[row * GOBO_SIZE + ix + 1]);
+        egui::lerp(a..=b, tx)
+    };
+    egui::lerp(row(iy)..=row(iy + 1), ty) / 255.
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -46,6 +163,11 @@ pub struct Settings {
     specular: f32,
     gloss: f32,
     steps: u8,
+    cone: f32,
+    softness: f32,
+    preserve_lines: bool,
+    gobo: Gobo,
+    gobo_offset: f32,
 }
 
 impl Default for Settings {
@@ -65,6 +187,11 @@ impl Default for Settings {
             specular: 0.16,
             gloss: 24.,
             steps: 0,
+            cone: 55.,
+            softness: 0.3,
+            preserve_lines: true,
+            gobo: Gobo::None,
+            gobo_offset: 0.,
         }
     }
 }
@@ -86,6 +213,9 @@ impl Settings {
             && (0. ..=1.).contains(&self.specular)
             && (2. ..=96.).contains(&self.gloss)
             && self.steps <= 8
+            && (4. ..=170.).contains(&self.cone)
+            && (0. ..=1.).contains(&self.softness)
+            && (-2. ..=2.).contains(&self.gobo_offset)
     }
 }
 
@@ -95,9 +225,22 @@ pub enum Receiver {
     Folder(u64),
 }
 
+impl Receiver {
+    pub(crate) fn matches(self, doc: &crate::Document, layer: &crate::document::Layer) -> bool {
+        match self {
+            Self::Layer(id) => layer.options.light_receiver == Some(id),
+            Self::Folder(id) => {
+                crate::folder_groups::belongs(&doc.extras.folders, layer.options.folder, id)
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Shadow {
     pub floor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caster: Option<u64>,
     offset: [f32; 2],
     softness: f32,
     strength: f32,
@@ -191,6 +334,8 @@ pub struct Light {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<Shadow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    gobo_matte: Option<SharedVec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     gizmo_position: Option<[f32; 2]>,
     base: Settings,
     #[serde(default)]
@@ -198,11 +343,17 @@ pub struct Light {
 }
 
 #[derive(PartialEq)]
-pub(crate) struct ShadingKey(Kind, Settings, MaskMode, f32);
+pub(crate) struct ShadingKey(Kind, Settings, MaskMode, f32, Option<SharedVec<u8>>);
 
 impl Light {
     pub(crate) fn shading_key(&self, frame: usize) -> ShadingKey {
-        ShadingKey(self.kind, self.at(frame), self.mask_mode, self.mask_feather)
+        ShadingKey(
+            self.kind,
+            self.at(frame),
+            self.mask_mode,
+            self.mask_feather,
+            self.gobo_matte.clone(),
+        )
     }
 
     pub fn new(w: u32, h: u32, kind: Kind) -> Self {
@@ -212,11 +363,17 @@ impl Light {
             mask_feather: 0.,
             receivers: Default::default(),
             shadow: None,
+            gobo_matte: None,
             gizmo_position: None,
             base: Settings {
                 position: [w as f32 * 0.5, h as f32 * 0.4],
                 radius: (w.min(h) as f32 * 0.42).max(1.),
                 intensity: if kind == Kind::Ambient { 0.25 } else { 0.75 },
+                color: if kind == Kind::RimShadow {
+                    [65, 45, 112]
+                } else {
+                    Settings::default().color
+                },
                 ..Settings::default()
             },
             keys: Default::default(),
@@ -227,6 +384,10 @@ impl Light {
         self.base.valid()
             && (0. ..=128.).contains(&self.mask_feather)
             && self.receivers.len() <= 100
+            && self
+                .gobo_matte
+                .as_ref()
+                .is_none_or(|matte| matte.len() == GOBO_SIZE * GOBO_SIZE)
             && self.shadow.as_ref().is_none_or(|shadow| {
                 (0. ..=1.).contains(&shadow.strength)
                     && (0. ..=128.).contains(&shadow.softness)
@@ -281,6 +442,11 @@ impl Light {
             specular: lerp(start.specular, end.specular),
             gloss: lerp(start.gloss, end.gloss),
             steps: start.steps,
+            cone: lerp(start.cone, end.cone),
+            softness: lerp(start.softness, end.softness),
+            preserve_lines: start.preserve_lines,
+            gobo: start.gobo,
+            gobo_offset: lerp(start.gobo_offset, end.gobo_offset),
             color: std::array::from_fn(|i| {
                 lerp(start.color[i].into(), end.color[i].into()).round() as u8
             }),
@@ -293,15 +459,13 @@ impl Light {
 
     pub fn receives(&self, doc: &crate::Document, layer: &crate::document::Layer) -> bool {
         self.receivers.is_empty()
-            || self.receivers.iter().any(|receiver| match *receiver {
-                Receiver::Layer(id) => layer.options.light_receiver == Some(id),
-                Receiver::Folder(id) => {
-                    crate::folder_groups::belongs(&doc.extras.folders, layer.options.folder, id)
-                }
-            })
+            || self
+                .receivers
+                .iter()
+                .any(|receiver| receiver.matches(doc, layer))
     }
 
-    pub fn apply_padded(
+    pub(crate) fn apply_padded(
         &self,
         pixels: &mut [u8],
         w: u32,
@@ -313,6 +477,7 @@ impl Light {
         opacity: f32,
         height_map: Option<&[u8]>,
         mask: Option<&[u8]>,
+        surfaces: Option<&mut SurfaceCache>,
     ) {
         let center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
         let mut point = crate::vector::pos(self.at(frame).position);
@@ -341,6 +506,7 @@ impl Light {
             height_map,
             mask,
             None,
+            surfaces,
         );
     }
 
@@ -354,6 +520,7 @@ impl Light {
         opacity: f32,
         height_map: Option<&[u8]>,
         mask: Option<&[u8]>,
+        surfaces: &mut SurfaceCache,
     ) {
         let point = view.screen(crate::vector::pos(self.at(frame).position));
         self.shade(
@@ -368,6 +535,7 @@ impl Light {
             height_map,
             mask,
             Some(surface_step),
+            Some(surfaces),
         );
     }
 
@@ -399,6 +567,7 @@ impl Light {
         height_map: Option<&[u8]>,
         mask: Option<&[u8]>,
         surface_step: Option<usize>,
+        surfaces: Option<&mut SurfaceCache>,
     ) {
         let settings = self.at(frame);
         if settings.intensity == 0. || opacity == 0. {
@@ -408,13 +577,15 @@ impl Light {
         let angle = settings.angle.to_radians() + angle;
         let radius = (settings.radius * scale).max(1.);
         let (left, top, right, bottom) = match self.kind {
-            Kind::Point => (
+            Kind::Point | Kind::Spot => (
                 (x - radius).max(0.) as usize,
                 (y - radius).max(0.) as usize,
                 ((x + radius).ceil() as usize).min(w as usize),
                 ((y + radius).ceil() as usize).min(h as usize),
             ),
-            Kind::Directional | Kind::Ambient | Kind::Rim => (0, 0, w as usize, h as usize),
+            Kind::Directional | Kind::Ambient | Kind::Rim | Kind::RimShadow => {
+                (0, 0, w as usize, h as usize)
+            }
         };
         if left >= right || top >= bottom {
             return;
@@ -432,18 +603,27 @@ impl Light {
         });
         let mask = feathered.as_deref().or(mask);
         let surface = (settings.relief > 0. && self.kind != Kind::Ambient).then(|| {
-            Surface::new(
+            let bevel = settings.bevel * scale;
+            let step = surface_step.unwrap_or_else(|| width.max(h as usize).div_ceil(1024).max(1));
+            if let Some(cache) = surfaces
+                && height_map.is_none()
+                && settings.texture_relief == 0.
+            {
+                return cache.get(pixels, width, h as usize, bevel, step);
+            }
+            std::sync::Arc::new(Surface::new(
                 pixels,
                 width,
                 h as usize,
-                settings.bevel * scale,
+                bevel,
                 settings.texture_relief,
                 height_map,
-                surface_step.unwrap_or_else(|| width.max(h as usize).div_ceil(1024).max(1)),
-            )
+                step,
+            ))
         });
         let elevation = settings.elevation.to_radians();
-        let dir = Vec2::angled(angle) * elevation.cos();
+        let aim = Vec2::angled(angle);
+        let dir = aim * elevation.cos();
         let height = elevation.sin().max(0.08);
         let tint = settings.color.map(|c| f32::from(c) / 255.);
         for py in top..bottom {
@@ -453,9 +633,11 @@ impl Light {
                 if alpha == 0. {
                     continue;
                 }
-                let (lx, ly, lz, attenuation) = match self.kind {
-                    Kind::Directional | Kind::Ambient | Kind::Rim => (dir.x, dir.y, height, 1.),
-                    Kind::Point => {
+                let (lx, ly, lz, mut attenuation) = match self.kind {
+                    Kind::Directional | Kind::Ambient | Kind::Rim | Kind::RimShadow => {
+                        (dir.x, dir.y, height, 1.)
+                    }
+                    Kind::Point | Kind::Spot => {
                         let dx = (x - px as f32) / radius;
                         let dy = (y - py as f32) / radius;
                         let d2 = dx * dx + dy * dy;
@@ -472,6 +654,31 @@ impl Light {
                         )
                     }
                 };
+                if self.kind == Kind::Spot {
+                    let ray = Vec2::new(px as f32 - x, py as f32 - y) / radius;
+                    let along = ray.dot(aim);
+                    let across = ray.dot(Vec2::new(-aim.y, aim.x));
+                    let cos = along / ray.length().max(0.00001);
+                    let half = settings.cone.to_radians() * 0.5;
+                    let outer = half.cos();
+                    let inner = (half * (1. - settings.softness)).cos();
+                    let edge = ((cos - outer) / (inner - outer).max(0.0001)).clamp(0., 1.);
+                    attenuation *= edge
+                        * edge
+                        * (3. - 2. * edge)
+                        * if settings.gobo == Gobo::Library {
+                            self.gobo_matte.as_ref().map_or(1., |matte| {
+                                sample_gobo(matte, along, across + settings.gobo_offset)
+                            })
+                        } else {
+                            settings
+                                .gobo
+                                .transmission(along, across, settings.gobo_offset)
+                        };
+                    if attenuation <= 0. {
+                        continue;
+                    }
+                }
                 let n = surface
                     .as_ref()
                     .map_or(Vec2::ZERO, |surface| surface.slope(px, py))
@@ -481,6 +688,16 @@ impl Light {
                 let mut diffuse = match self.kind {
                     Kind::Ambient => 0.65,
                     Kind::Rim => ((n.x * lx + n.y * ly) * nz).max(0.) * (1. - nz).sqrt(),
+                    Kind::RimShadow => {
+                        let edge = (1. - nz).sqrt();
+                        let strength = (-(n.x * lx + n.y * ly) * nz).max(0.) * edge * 3.;
+                        if settings.softness == 0. {
+                            f32::from(strength >= 0.23)
+                        } else {
+                            ((strength - 0.23) / settings.softness + 0.5).clamp(0., 1.)
+                                * (strength * 3.).min(1.)
+                        }
+                    }
                     _ => ((n.x * lx + n.y * ly + lz) * nz).clamp(0., 1.),
                 };
                 if settings.steps >= 2 {
@@ -491,7 +708,7 @@ impl Light {
                 }
                 let halfway = (2. + 2. * lz).sqrt();
                 let specular = if settings.specular > 0.
-                    && matches!(self.kind, Kind::Point | Kind::Directional)
+                    && matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot)
                 {
                     (((n.x * lx + n.y * ly + lz + 1.) * nz) / halfway)
                         .clamp(0., 1.)
@@ -509,13 +726,24 @@ impl Light {
                     }
                 });
                 let strength = settings.intensity * attenuation * opacity * influence;
-                let shade = if matches!(self.kind, Kind::Point | Kind::Directional) {
+                let shade = if matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot) {
                     (1. - diffuse) * settings.shadow * strength
                 } else {
                     0.
                 };
                 for channel in 0..3 {
                     let value = f32::from(pixels[idx + channel]);
+                    if self.kind == Kind::RimShadow {
+                        let ink = if settings.preserve_lines {
+                            (value / alpha * 6.).min(1.)
+                        } else {
+                            1.
+                        };
+                        let weight = (diffuse * strength * ink).clamp(0., 1.);
+                        pixels[idx + channel] =
+                            (value * (1. - weight * (1. - tint[channel]))).round() as u8;
+                        continue;
+                    }
                     let lit = value * (1. - shade)
                         + ((alpha - value) * diffuse * 0.64 + alpha * specular)
                             * strength
@@ -546,6 +774,68 @@ impl Light {
 
 // A capped Euclidean distance field gives an editable bevel across the silhouette.
 // Texture relief also works on opaque artwork, where coverage has no internal edges.
+#[derive(Default)]
+pub(crate) struct SurfaceCache {
+    entries: std::collections::VecDeque<SurfaceEntry>,
+}
+
+struct SurfaceEntry {
+    width: usize,
+    height: usize,
+    bevel: f32,
+    alpha: Vec<u8>,
+    surface: std::sync::Arc<Surface>,
+}
+
+impl SurfaceEntry {
+    fn bytes(&self) -> usize {
+        self.alpha.len() + self.surface.slopes.len() * std::mem::size_of::<Vec2>()
+    }
+}
+
+impl SurfaceCache {
+    fn get(
+        &mut self,
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        bevel: f32,
+        step: usize,
+    ) -> std::sync::Arc<Surface> {
+        let alpha = || pixels[3..].iter().step_by(4).copied();
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.width == width
+                && entry.height == height
+                && entry.bevel == bevel
+                && entry.surface.step == step
+                && entry.alpha.iter().copied().eq(alpha())
+        }) {
+            let entry = self.entries.remove(index).unwrap();
+            let surface = entry.surface.clone();
+            self.entries.push_back(entry);
+            return surface;
+        }
+        let surface =
+            std::sync::Arc::new(Surface::new(pixels, width, height, bevel, 0., None, step));
+        let size = width * height + surface.slopes.len() * std::mem::size_of::<Vec2>();
+        const LIMIT: usize = 32 * 1024 * 1024;
+        if size <= LIMIT {
+            let mut bytes = size + self.entries.iter().map(SurfaceEntry::bytes).sum::<usize>();
+            while bytes > LIMIT || self.entries.len() >= 8 {
+                bytes -= self.entries.pop_front().unwrap().bytes();
+            }
+            self.entries.push_back(SurfaceEntry {
+                width,
+                height,
+                bevel,
+                alpha: alpha().collect(),
+                surface: surface.clone(),
+            });
+        }
+        surface
+    }
+}
+
 struct Surface {
     width: usize,
     height: usize,
@@ -647,7 +937,7 @@ impl Surface {
     }
 }
 
-fn silhouette_distances(coverage: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn silhouette_distances(coverage: &[f32], w: usize, h: usize) -> Vec<f32> {
     // Keep fractional coverage in the distance transform. As an edge moves
     // through a cell its cost increases continuously instead of switching
     // between an exterior site and an opaque cell at 50% coverage.
@@ -1110,6 +1400,7 @@ impl Editor {
         let mut updated = light.clone();
         let mut new_receiver = None;
         let mut new_floor = None;
+        let mut new_caster = None;
         let mut paint_target = None;
         design::category(ui, "Light receivers");
         if design::button(
@@ -1239,6 +1530,37 @@ impl Editor {
                 }
             });
             if let Some(shadow) = &mut updated.shadow {
+                ui.menu_button(tr("Shadow caster"), |ui| {
+                    if ui
+                        .selectable_label(shadow.caster.is_none(), tr("All artwork above receiver"))
+                        .clicked()
+                    {
+                        shadow.caster = None;
+                        ui.close();
+                    }
+                    let mut above_receiver = false;
+                    for (index, candidate) in self.doc.layers.iter().enumerate().take(light_index) {
+                        if candidate.options.light_receiver == Some(shadow.floor) {
+                            above_receiver = true;
+                            continue;
+                        }
+                        if above_receiver
+                            && !crate::post::is_adjustment(candidate)
+                            && candidate.options.height_guide.is_none()
+                            && !candidate.options.light_mask
+                            && ui
+                                .selectable_label(
+                                    shadow.caster.is_some()
+                                        && shadow.caster == candidate.options.light_receiver,
+                                    &candidate.name,
+                                )
+                                .clicked()
+                        {
+                            new_caster = Some(index);
+                            ui.close();
+                        }
+                    }
+                });
                 ui.small(tr(
                     "Artwork above the floor and in the receiver list casts the shadow.",
                 ));
@@ -1272,7 +1594,11 @@ impl Editor {
                 );
             }
         });
-        if updated != *light || new_receiver.is_some() || new_floor.is_some() {
+        if updated != *light
+            || new_receiver.is_some()
+            || new_floor.is_some()
+            || new_caster.is_some()
+        {
             self.checkpoint();
             if let Some(index) = new_receiver {
                 let id = self.doc.layers[index]
@@ -1290,10 +1616,21 @@ impl Editor {
                     .get_or_insert_with(crate::features::id);
                 updated.shadow = Some(Shadow {
                     floor: *id,
+                    caster: None,
                     offset: [24., 16.],
                     softness: 10.,
                     strength: 0.38,
                 });
+            }
+            if let Some(index) = new_caster
+                && let Some(shadow) = &mut updated.shadow
+            {
+                shadow.caster = Some(
+                    *self.doc.layers[index]
+                        .options
+                        .light_receiver
+                        .get_or_insert_with(crate::features::id),
+                );
             }
             self.doc.layers[light_index].options.light = Some(updated);
             self.recover();
@@ -1317,9 +1654,10 @@ impl Editor {
         let mut value = original;
         let mut remove = false;
         let mut insert = false;
+        let mut gobo_symbol = None;
         ui.add_enabled_ui(!self.doc.layers[self.layer].options.locked, |ui| {
             design::category(ui, "Light source");
-            if kind == Kind::Point {
+            if matches!(kind, Kind::Point | Kind::Spot) {
                 control(
                     ui,
                     Icon::Focus,
@@ -1342,7 +1680,8 @@ impl Editor {
                     1. ..=20_000.,
                 );
                 control(ui, Icon::Tween, "Falloff", &mut value.falloff, 0.25..=5.);
-            } else {
+            }
+            if kind != Kind::Point {
                 control(
                     ui,
                     Icon::Rotate,
@@ -1350,6 +1689,54 @@ impl Editor {
                     &mut value.angle,
                     -180. ..=180.,
                 );
+            }
+            if kind == Kind::Spot {
+                control(ui, Icon::Rotate, "Cone angle", &mut value.cone, 4. ..=170.);
+                egui::ComboBox::from_id_salt("spot-gobo")
+                    .selected_text(tr(value.gobo.name()))
+                    .show_ui(ui, |ui| {
+                        for pattern in [
+                            Gobo::None,
+                            Gobo::Blinds,
+                            Gobo::Window,
+                            Gobo::Leaves,
+                            Gobo::Library,
+                        ] {
+                            if pattern == Gobo::Library && light.gobo_matte.is_none() {
+                                continue;
+                            }
+                            ui.selectable_value(&mut value.gobo, pattern, tr(pattern.name()));
+                        }
+                    });
+                ui.menu_button(tr("Use symbol as gobo"), |ui| {
+                    for symbol in &self.doc.extras.symbols {
+                        if ui.button(&symbol.name).clicked() {
+                            gobo_symbol = Some(symbol.id);
+                            ui.close();
+                        }
+                    }
+                });
+                if value.gobo != Gobo::None {
+                    control(
+                        ui,
+                        Icon::Transform,
+                        "Gobo offset",
+                        &mut value.gobo_offset,
+                        -2. ..=2.,
+                    );
+                }
+            }
+            if matches!(kind, Kind::RimShadow | Kind::Spot) {
+                control(
+                    ui,
+                    Icon::Blur,
+                    "Edge softness",
+                    &mut value.softness,
+                    0. ..=1.,
+                );
+            }
+            if kind == Kind::RimShadow {
+                ui.checkbox(&mut value.preserve_lines, tr("Preserve line art"));
             }
             for (icon, name, field, range) in [
                 (Icon::Bulb, "Intensity", &mut value.intensity, 0. ..=2.),
@@ -1425,9 +1812,19 @@ impl Editor {
                 .clicked();
             });
         });
-        if value != original || insert || remove {
+        let matte = gobo_symbol.and_then(|id| make_gobo(&self.doc, id));
+        if gobo_symbol.is_some() && matte.is_none() {
+            self.status = tr("The symbol has no supported gobo artwork.").into();
+        }
+        if matte.is_some() {
+            value.gobo = Gobo::Library;
+        }
+        if value != original || insert || remove || matte.is_some() {
             self.checkpoint();
             let light = self.doc.layers[self.layer].options.light.as_mut().unwrap();
+            if let Some(matte) = matte {
+                light.gobo_matte = Some(matte);
+            }
             if remove {
                 light.keys.retain(|key| key.0 != self.frame);
             } else if light.keys.is_empty() && !insert && self.frame == 0 {
@@ -1461,6 +1858,9 @@ impl Editor {
             view.screen(anchor + Vec2::angled(settings.angle.to_radians()) * (55. / view.scale));
         let center_rect = Rect::from_center_size(center, Vec2::splat(27.));
         let arrow_rect = Rect::from_center_size(arrow, Vec2::splat(24.));
+        let cone_handle = center
+            + Vec2::angled(settings.angle.to_radians() + settings.cone.to_radians() * 0.5)
+                * (settings.radius * view.scale).clamp(75., 145.);
         if !input {
             let color = Color32::GOLD;
             if kind == Kind::Point {
@@ -1470,6 +1870,20 @@ impl Editor {
                     Stroke::new(1., color.gamma_multiply(0.45)),
                 );
             } else {
+                if kind == Kind::Spot {
+                    ui.painter()
+                        .circle_stroke(cone_handle, 5., Stroke::new(1.5, color));
+                    let reach = settings.radius * view.scale;
+                    let angle = (arrow - center).angle();
+                    let half = settings.cone.to_radians() * 0.5;
+                    for side in [-1., 1.] {
+                        let end = center + Vec2::angled(angle + side * half) * reach;
+                        ui.painter().line_segment(
+                            [center, end],
+                            Stroke::new(1., color.gamma_multiply(0.5)),
+                        );
+                    }
+                }
                 ui.painter()
                     .arrow(center, arrow - center, Stroke::new(2., color));
                 ui.painter()
@@ -1483,62 +1897,144 @@ impl Editor {
         if layer.options.locked {
             return false;
         }
-        let moved = ui
-            .interact(
-                center_rect,
-                ui.scope_id().with(("move-light", self.layer)),
-                egui::Sense::drag(),
+        let drag_id = ui.scope_id().with("light-gizmo-drag");
+        let context = (self.doc.extras.active_scene, self.layer, self.frame, kind);
+        let mut drag = ui
+            .data(|data| data.get_temp::<GizmoDrag>(drag_id))
+            .filter(|drag| drag.context == context);
+        let (pointer, pressed, down, released) = ui.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.pointer.primary_pressed(),
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
             )
-            .on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text(tr("Move light handle"));
-        let rotated = (kind != Kind::Point).then(|| {
-            ui.interact(
-                arrow_rect,
-                ui.scope_id().with(("rotate-light", self.layer)),
-                egui::Sense::drag(),
-            )
-            .on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text(tr("Rotate directional light"))
         });
-        let response = rotated
-            .as_ref()
-            .filter(|r| r.dragged() || r.drag_stopped() || r.is_pointer_button_down_on());
-        let (response, rotate) = response.map_or((&moved, false), |r| (r, true));
-        if response.drag_started() {
-            self.checkpoint();
-        }
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let point = view.world(pointer);
-            let position = [
-                point.x.clamp(-100_000., 100_000.),
-                point.y.clamp(-100_000., 100_000.),
-            ];
-            let light = self.doc.layers[self.layer].options.light.as_mut().unwrap();
-            if rotate {
-                let delta = point - anchor;
-                if delta.length_sq() > 0.0001 {
-                    let angle = delta.y.atan2(delta.x).to_degrees();
-                    light.set(self.frame, Settings { angle, ..settings });
+        if pressed {
+            drag = pointer.and_then(|pointer| {
+                if !ui.clip_rect().contains(pointer)
+                    || ui.ctx().layer_id_at(pointer) != Some(ui.layer_id())
+                {
+                    return None;
                 }
-            } else if kind != Kind::Point {
-                light.gizmo_position = Some(position);
-            } else {
-                light.set(
-                    self.frame,
-                    Settings {
-                        position,
-                        ..settings
-                    },
-                );
+                let action = if center_rect.contains(pointer) {
+                    GizmoAction::Move
+                } else if kind != Kind::Point && arrow_rect.contains(pointer) {
+                    GizmoAction::Rotate
+                } else if kind == Kind::Spot
+                    && Rect::from_center_size(cone_handle, Vec2::splat(18.)).contains(pointer)
+                {
+                    GizmoAction::Aperture
+                } else {
+                    return None;
+                };
+                Some(GizmoDrag {
+                    context,
+                    action,
+                    press: pointer,
+                    offset: anchor - view.world(pointer),
+                    changed: false,
+                })
+            });
+        }
+        if let Some(drag) = &mut drag
+            && (down || released)
+            && let Some(pointer) = pointer
+            && (drag.changed || pointer.distance(drag.press) >= 2.)
+        {
+            if !drag.changed {
+                self.checkpoint();
+                drag.changed = true;
+            }
+            let light = self.doc.layers[self.layer].options.light.as_mut().unwrap();
+            let point = view.world(pointer);
+            match drag.action {
+                GizmoAction::Move => {
+                    let position = {
+                        let position = point + drag.offset;
+                        [position.x, position.y].map(|v| v.clamp(-100_000., 100_000.))
+                    };
+                    if matches!(kind, Kind::Point | Kind::Spot) {
+                        light.gizmo_position = None;
+                        light.set(
+                            self.frame,
+                            Settings {
+                                position,
+                                ..settings
+                            },
+                        );
+                    } else {
+                        light.gizmo_position = Some(position);
+                    }
+                }
+                GizmoAction::Rotate => {
+                    let delta = point - anchor;
+                    if delta.length_sq() > 0.0001 {
+                        light.set(
+                            self.frame,
+                            Settings {
+                                angle: delta.angle().to_degrees(),
+                                ..settings
+                            },
+                        );
+                    }
+                }
+                GizmoAction::Aperture => {
+                    let delta = (point - anchor).angle().to_degrees() - settings.angle;
+                    let cone =
+                        (((delta + 180.).rem_euclid(360.) - 180.).abs() * 2.).clamp(4., 170.);
+                    light.set(self.frame, Settings { cone, ..settings });
+                }
             }
         }
-        if response.drag_stopped() {
-            self.recover();
+        let consumed = drag.is_some();
+        if !down && !pressed {
+            if drag.as_ref().is_some_and(|drag| drag.changed) {
+                self.recover();
+            }
+            drag = None;
         }
-        response.dragged() || response.is_pointer_button_down_on()
+        if consumed
+            || pointer.is_some_and(|p| {
+                ui.clip_rect().contains(p)
+                    && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
+                    && (center_rect.contains(p)
+                        || kind != Kind::Point && arrow_rect.contains(p)
+                        || kind == Kind::Spot
+                            && Rect::from_center_size(cone_handle, Vec2::splat(18.)).contains(p))
+            })
+        {
+            ui.ctx().set_cursor_icon(if consumed {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
+        ui.data_mut(|data| {
+            if let Some(drag) = drag {
+                data.insert_temp(drag_id, drag);
+            } else {
+                data.remove::<GizmoDrag>(drag_id);
+            }
+        });
+        consumed
     }
+}
+
+#[derive(Clone, Copy)]
+enum GizmoAction {
+    Move,
+    Rotate,
+    Aperture,
+}
+
+#[derive(Clone, Copy)]
+struct GizmoDrag {
+    context: (usize, usize, usize, Kind),
+    action: GizmoAction,
+    press: Pos2,
+    offset: Vec2,
+    changed: bool,
 }
 
 fn control(
@@ -1777,6 +2273,7 @@ mod tests {
         light.receivers.push(Receiver::Layer(200));
         light.shadow = Some(Shadow {
             floor: 100,
+            caster: None,
             offset: [24., 16.],
             softness: 0.,
             strength: 0.5,
@@ -1835,6 +2332,7 @@ mod tests {
             1.,
             None,
             None,
+            None,
         );
         for distance in [4., 9., 15.] {
             let intensity: Vec<_> = (-60..=60)
@@ -1862,6 +2360,23 @@ mod tests {
                 "Abrupt rim-light changes {largest:.2} at {distance}px"
             );
         }
+    }
+
+    #[test]
+    fn relief_cache_reuses_alpha_only_normals_and_rejects_changed_coverage() {
+        let mut cache = SurfaceCache::default();
+        let mut pixels = vec![255; 16 * 16 * 4];
+        let first = cache.get(&pixels, 16, 16, 10., 1);
+        pixels[0] = 100;
+        let recolored = cache.get(&pixels, 16, 16, 10., 1);
+        assert!(std::sync::Arc::ptr_eq(&first, &recolored));
+        pixels[3] = 100;
+        let edited = cache.get(&pixels, 16, 16, 10., 1);
+        assert!(!std::sync::Arc::ptr_eq(&first, &edited));
+        assert_eq!(
+            edited.slopes,
+            Surface::new(&pixels, 16, 16, 10., 0., None, 1).slopes
+        );
     }
 
     #[test]
@@ -1943,6 +2458,107 @@ mod tests {
     }
 
     #[test]
+    fn new_light_handles_capture_drag_over_the_canvas() {
+        for kind in [Kind::RimShadow, Kind::Spot] {
+            let ctx = egui::Context::default();
+            let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+            editor.doc.layers[0].options.light = Some(Light::new(200, 200, kind));
+            let view = View {
+                center: Pos2::ZERO,
+                stage_center: Pos2::ZERO,
+                scale: 1.,
+                angle: 0.,
+            };
+            let tick = |editor: &mut Editor, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300., 260.))),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+                            editor.light_gizmo(ui, view, true);
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let drag = |editor: &mut Editor, from, to| {
+                tick(
+                    editor,
+                    vec![egui::Event::PointerMoved(from), button(from, true)],
+                );
+                tick(editor, vec![egui::Event::PointerMoved(to)]);
+                tick(editor, vec![button(to, false)]);
+            };
+            tick(&mut editor, Vec::new());
+            let center = Pos2::new(100., 80.);
+            let destination = Pos2::new(135., 110.);
+            drag(&mut editor, center, destination);
+            let light = editor.doc.layers[0].options.light.as_ref().unwrap();
+            assert_eq!(
+                light.gizmo_position.unwrap_or(light.at(0).position),
+                [135., 110.]
+            );
+            let arrow = destination + Vec2::angled(light.at(0).angle.to_radians()) * 55.;
+            drag(&mut editor, arrow, destination + Vec2::new(0., 55.));
+            let light = editor.doc.layers[0].options.light.as_ref().unwrap();
+            assert!((light.at(0).angle - 90.).abs() < 0.01);
+            assert_eq!(editor.undo.len(), 2);
+        }
+    }
+
+    #[test]
+    fn spot_limits_illumination_to_the_cone_and_rim_shadow_preserves_alpha() {
+        let doc = crate::Document {
+            width: 64,
+            height: 64,
+            ..Default::default()
+        };
+        let mut pixels = vec![0; 64 * 64 * 4];
+        for y in 8..56 {
+            for x in 8..56 {
+                pixels[(y * 64 + x) * 4..][..4].copy_from_slice(&[140, 140, 140, 255]);
+            }
+        }
+        let mut spot = Light::new(64, 64, Kind::Spot);
+        spot.base.position = [30., 32.];
+        spot.base.angle = 0.;
+        spot.base.radius = 30.;
+        spot.base.relief = 0.;
+        spot.base.shadow = 0.;
+        let mut lit = pixels.clone();
+        spot.apply_padded(&mut lit, 64, 64, 0, &doc, 0, false, 1., None, None, None);
+        assert!(lit[(32 * 64 + 40) * 4] > 140);
+        assert_eq!(lit[(32 * 64 + 20) * 4], 140);
+        let mut shadow = Light::new(64, 64, Kind::RimShadow);
+        shadow.base.angle = 0.;
+        shadow.base.bevel = 8.;
+        let mut shaded = pixels.clone();
+        shadow.apply_padded(&mut shaded, 64, 64, 0, &doc, 0, false, 1., None, None, None);
+        assert!(
+            shaded
+                .chunks_exact(4)
+                .zip(pixels.chunks_exact(4))
+                .any(|(after, before)| after[0] < before[0])
+        );
+        assert!(
+            shaded
+                .chunks_exact(4)
+                .zip(pixels.chunks_exact(4))
+                .all(|(after, before)| after[3] == before[3])
+        );
+    }
+
+    #[test]
     fn directional_light_reverses_the_lit_edge_when_turned() {
         let doc = crate::Document {
             width: 64,
@@ -1959,13 +2575,13 @@ mod tests {
         let mut light = Light::new(64, 64, Kind::Directional);
         light.base.angle = 180.;
         light.base.bevel = 12.;
-        light.apply_padded(&mut left, 64, 64, 0, &doc, 0, false, 1., None, None);
+        light.apply_padded(&mut left, 64, 64, 0, &doc, 0, false, 1., None, None, None);
         let mut moved = pixels.clone();
         light.gizmo_position = Some([200., 200.]);
-        light.apply_padded(&mut moved, 64, 64, 0, &doc, 0, false, 1., None, None);
+        light.apply_padded(&mut moved, 64, 64, 0, &doc, 0, false, 1., None, None, None);
         assert_eq!(left, moved);
         light.base.angle = 0.;
-        light.apply_padded(&mut pixels, 64, 64, 0, &doc, 0, false, 1., None, None);
+        light.apply_padded(&mut pixels, 64, 64, 0, &doc, 0, false, 1., None, None, None);
         let edge = (32 * 64 + 14) * 4;
         assert!(left[edge] > pixels[edge]);
         assert_eq!(left[edge + 3], 255);

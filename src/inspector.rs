@@ -196,9 +196,6 @@ impl Editor {
         std::mem::swap(&mut self.stroke_enabled, &mut self.fill_enabled);
     }
     pub fn color_swatches(&mut self, ui: &mut egui::Ui) {
-        let old_fill = self.fill_color;
-        let old_stroke = self.color;
-        self.studio.color_popup_open = false;
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.studio.color_picker = None;
         }
@@ -224,14 +221,6 @@ impl Editor {
         );
         ui.advance_cursor_after_rect(r);
         ui.add_space(4.);
-        if old_fill != self.fill_color {
-            self.fill_enabled = true;
-            self.change_selected_style(true, false, false, false);
-        }
-        if old_stroke != self.color {
-            self.stroke_enabled = true;
-            self.change_selected_style(false, true, false, false);
-        }
         ui.horizontal(|ui| {
             if design::button(
                 ui,
@@ -258,43 +247,21 @@ impl Editor {
         });
     }
     fn paint_color_picker(&mut self, ui: &mut egui::Ui, fill: bool) -> egui::Response {
-        use egui::color_picker::{Alpha, color_picker_color32};
-        let color = if fill {
-            &mut self.fill_color
-        } else {
-            &mut self.color
-        };
+        let color = if fill { self.fill_color } else { self.color };
         let response = ui
             .add_sized(
                 ui.spacing().interact_size,
-                egui::Button::new("").fill(*color),
+                egui::Button::new("").fill(color),
             )
             .on_hover_text(crate::i18n::tr(if fill { "Relleno" } else { "Contorno" }));
-        if response.clicked() {
+        if response.clicked() || response.double_clicked() {
             self.studio.color_picker = None;
             self.active_fill = fill;
+            self.studio.palette.clear_linked_selection();
         }
-        let popup = egui::Popup::menu(&response)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                if design::button(
-                    ui,
-                    Icon::Eyedropper,
-                    "Cuentagotas",
-                    "Cuentagotas",
-                    false,
-                    true,
-                )
-                .clicked()
-                {
-                    self.studio.color_picker = Some(fill);
-                    ui.close();
-                    return;
-                }
-                ui.spacing_mut().slider_width = 275.;
-                color_picker_color32(ui, color, Alpha::BlendOrAdditive);
-            });
-        self.studio.color_popup_open |= popup.is_some();
+        if response.double_clicked() {
+            self.studio.palette.open = true;
+        }
         response
     }
 
@@ -482,19 +449,76 @@ impl Editor {
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.)),
                 );
             }
+            if self.tool == Tool::Pen {
+                design::category(ui, "Pen mode");
+                if design::button(
+                    ui,
+                    Icon::Node,
+                    "Edit nodes only",
+                    "Edit existing curves without adding a path",
+                    self.feature.pen_edit_only,
+                    true,
+                )
+                .clicked()
+                {
+                    self.finish_pending_pen();
+                    self.feature.pen_edit_only = !self.feature.pen_edit_only;
+                }
+            }
             if self.tool == Tool::Bucket {
-                design::category(ui, "RELLENO");
-                ui.label(crate::i18n::tr("Cierre de huecos"));
+                design::category(ui, "FILL METHOD");
+                for (gap, icon) in crate::bucket::Gap::ALL.into_iter().zip([
+                    Icon::Line,
+                    Icon::CapRound,
+                    Icon::Width,
+                    Icon::Transform,
+                ]) {
+                    if design::button(ui, icon, gap.label(), "", self.gap == gap, true).clicked() {
+                        self.gap = gap;
+                    }
+                }
                 ui.small(crate::i18n::tr(
                     "Shift + click to recalculate an existing fill",
                 ));
-                egui::ComboBox::from_id_salt("bucket-gap")
-                    .selected_text(self.gap.label())
-                    .show_ui(ui, |ui| {
-                        for gap in crate::bucket::Gap::ALL {
-                            ui.selectable_value(&mut self.gap, gap, gap.label());
-                        }
+                design::category(ui, "MULTI-FRAME FILL");
+                let has_selection = self
+                    .feature
+                    .frame_selection
+                    .is_some_and(|(layer, _, _)| layer == self.layer);
+                if design::button(
+                    ui,
+                    Icon::Film,
+                    "Fill selected keyframes",
+                    "Pick a point to preview fills across the selected range",
+                    self.feature.bucket_range_armed,
+                    has_selection && self.feature.bucket_range.is_none(),
+                )
+                .clicked()
+                {
+                    self.feature.bucket_range_armed = !self.feature.bucket_range_armed;
+                }
+                if !has_selection {
+                    ui.small(crate::i18n::tr(
+                        "Shift-click timeline cells to select a range",
+                    ));
+                }
+                if ui
+                    .checkbox(
+                        &mut self.feature.bucket_next,
+                        crate::i18n::tr("Fill next keyframes"),
+                    )
+                    .changed()
+                {
+                    self.feature.bucket_range_armed = false;
+                }
+                if self.feature.bucket_next {
+                    ui.horizontal(|ui| {
+                        ui.label(crate::i18n::tr("Additional keyframes"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.feature.bucket_next_count).range(1..=32),
+                        );
                     });
+                }
             }
             if matches!(
                 self.tool,

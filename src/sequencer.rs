@@ -6,6 +6,41 @@ use crate::{
     i18n::tr,
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+fn exposure_cell(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    active: bool,
+    row: usize,
+) -> egui::Response {
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(("exposure-cell", id)),
+        egui::Sense::click(),
+    );
+    let colors = crate::themes::palette();
+    let background = if active {
+        crate::themes::accent().gamma_multiply(0.34)
+    } else if response.hovered() {
+        crate::themes::accent().gamma_multiply(0.18)
+    } else if row % 2 == 0 {
+        ui.visuals().faint_bg_color
+    } else {
+        crate::themes::panel()
+    };
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    painter.rect_filled(rect.shrink(0.5), 0., background);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(12.),
+        colors.text,
+    );
+    response
+}
+
 #[derive(Clone, Copy)]
 enum Row {
     Layer(usize, usize),
@@ -603,10 +638,150 @@ impl Editor {
             }
         }
     }
+    fn exposure_sheet(&mut self, ctx: &egui::Context) {
+        if !self.animation.exposure_sheet {
+            return;
+        }
+        let mut open = true;
+        let mut next = None;
+        let layers = &self.doc.layers;
+        let frames = layers
+            .iter()
+            .map(|layer| layer.frames.len())
+            .max()
+            .unwrap_or(0);
+        let colors = crate::themes::palette();
+        let frame_width = 58.;
+        let column_width = 122.;
+        egui::Window::new(tr("Exposure sheet"))
+            .id(egui::Id::unique("exposure-sheet"))
+            .open(&mut open)
+            .default_width(660.)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.;
+                let table_height = (ui.available_height() - 36.).max(100.);
+                egui::ScrollArea::both().max_height(table_height).show_rows(
+                    ui,
+                    25.,
+                    frames + 1,
+                    |ui, rows| {
+                        for row in rows {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(frame_width + column_width * layers.len() as f32, 25.),
+                                egui::Sense::hover(),
+                            );
+                            let header = row == 0;
+                            let frame = row.saturating_sub(1);
+                            let clip = ui.clip_rect();
+                            let first = (((clip.left() - rect.left() - frame_width) / column_width)
+                                .floor()
+                                .max(0.)) as usize;
+                            let last = (((clip.right() - rect.left() - frame_width) / column_width)
+                                .ceil()
+                                .max(0.)) as usize;
+                            let number =
+                                egui::Rect::from_min_size(rect.min, egui::vec2(frame_width, 25.));
+                            if number.intersects(clip) {
+                                let label = if header {
+                                    tr("Frame").to_owned()
+                                } else {
+                                    format!("{:03}", frame + 1)
+                                };
+                                let response = exposure_cell(
+                                    ui,
+                                    number,
+                                    ("number", row),
+                                    &label,
+                                    header || frame == self.frame,
+                                    row,
+                                );
+                                if !header && response.clicked() {
+                                    next = Some((self.layer, frame));
+                                }
+                            }
+                            for (index, layer) in layers.iter().enumerate().take(last).skip(first) {
+                                let cell = egui::Rect::from_min_size(
+                                    rect.min
+                                        + egui::vec2(frame_width + index as f32 * column_width, 0.),
+                                    egui::vec2(column_width, 25.),
+                                );
+                                if header {
+                                    exposure_cell(
+                                        ui,
+                                        cell,
+                                        ("layer", index),
+                                        &layer.name,
+                                        index == self.layer,
+                                        row,
+                                    )
+                                    .on_hover_text(&layer.name);
+                                    continue;
+                                }
+                                let Some(marks) = layer.frames.get(frame) else {
+                                    continue;
+                                };
+                                let (symbol, label) = if !layer.key(frame) {
+                                    ("—", tr("Held exposure"))
+                                } else if marks.is_empty() {
+                                    ("○", tr("Blank keyframe"))
+                                } else {
+                                    ("●", tr("Keyframe"))
+                                };
+                                let pose = (index == self.layer)
+                                    .then(|| self.lip_frame_label(frame))
+                                    .flatten();
+                                let text = pose.map_or_else(
+                                    || symbol.to_owned(),
+                                    |pose| format!("{symbol}  {pose}"),
+                                );
+                                if exposure_cell(
+                                    ui,
+                                    cell,
+                                    (index, row),
+                                    &text,
+                                    index == self.layer && frame == self.frame,
+                                    row,
+                                )
+                                .on_hover_text(format!(
+                                    "{} · {:03} · {label}",
+                                    layer.name,
+                                    frame + 1
+                                ))
+                                .clicked()
+                                {
+                                    next = Some((index, frame));
+                                }
+                            }
+                        }
+                    },
+                );
+                ui.add_space(8.);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "● {}     ○ {}     — {}",
+                        tr("Keyframe"),
+                        tr("Blank keyframe"),
+                        tr("Held exposure")
+                    ))
+                    .color(colors.text),
+                );
+            });
+        self.animation.exposure_sheet = open;
+        if let Some((layer, frame)) = next {
+            self.playing = false;
+            self.layer = layer;
+            self.frame = frame.min(self.doc.layers[layer].frames.len() - 1);
+            self.feature.frame_selection = Some((layer, self.frame, self.frame));
+            self.canvas.clear_selection();
+        }
+    }
+
     pub fn sequencer(&mut self, ui: &mut egui::Ui) {
         self.depth_window(ui.ctx());
         self.folder_dialog(ui.ctx());
         let previous_frame = self.frame;
+        self.exposure_sheet(ui.ctx());
         egui::Panel::bottom("timeline")
             .default_size(300.)
             .min_size(150.)
@@ -616,6 +791,8 @@ impl Editor {
                 let viewport_id = ui.scope_id().with("timeline-viewport");
                 let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
                 let previous_cell = viewport.cell;
+                let available_width = ui.available_width();
+                let mut fit = false;
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tr("TIMELINE")).size(10.).color(crate::themes::muted()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -627,6 +804,32 @@ impl Editor {
                         ui.spacing_mut().slider_width = 85.;
                         ui.add(egui::Slider::new(&mut viewport.cell, 6.0..=66.0).logarithmic(true).show_value(false))
                             .labelled_by(zoom_label.id);
+                        if button(ui, Icon::Fit, "", "Fit timeline to scene", false, true).clicked() {
+                            let width = (available_width - 324.).max(1.);
+                            viewport.cell = (width / self.doc.layers[0].frames.len() as f32).clamp(6., 66.);
+                            fit = true;
+                        }
+                        let prepare = button(ui, Icon::Film, "Prepare preview", "Prepare preview", self.preparing_preview(), true);
+                        egui::Popup::menu(&prepare).show(|ui| {
+                            if button(ui, Icon::Film, "Prepare scene preview", "", false, true).clicked() {
+                                self.prepare_preview(None);
+                                ui.close();
+                            }
+                            let selection = self.feature.frame_selection.map(|(_, a, b)| (a.min(b), a.max(b)));
+                            if button(ui, Icon::Select, "Prepare selected frames", "", false, selection.is_some()).clicked() {
+                                self.prepare_preview(selection);
+                                ui.close();
+                            }
+                            let range = self.active_tag_range();
+                            if button(ui, Icon::Loop, "Prepare active tag", "", false, range.is_some()).clicked() {
+                                self.prepare_preview(range);
+                                ui.close();
+                            }
+                            if button(ui, Icon::Minus, "Stop preparing preview", "", false, self.preparing_preview()).clicked() {
+                                self.stop_preparing_preview();
+                                ui.close();
+                            }
+                        });
                     });
                 });
                 ui.separator();
@@ -700,11 +903,16 @@ impl Editor {
                         self.playing = false;
                     }
                     ui.separator();
-                    ui.label(format!(
-                        "{:03} / {}",
-                        self.frame + 1,
-                        self.doc.layers[0].frames.len()
-                    ));
+                    let total = self.doc.layers[0].frames.len();
+                    let mut frame = self.frame + 1;
+                    if ui.add(egui::DragValue::new(&mut frame).range(1..=total).update_while_editing(false)).on_hover_text(tr("Go to frame")).changed() {
+                        self.frame = frame - 1;
+                        self.playing = false;
+                    }
+                    ui.label(format!("/ {total}"));
+                    if button(ui, Icon::Layers, "", "Exposure sheet", self.animation.exposure_sheet, true).clicked() {
+                        self.animation.exposure_sheet = !self.animation.exposure_sheet;
+                    }
                     let mut fps = self.doc.fps;
                     if ui
                         .add(
@@ -939,7 +1147,7 @@ impl Editor {
                         }
                         let lights = button(ui, Icon::Bulb, "", "Add light", false, self.feature.symbol_stack.is_empty());
                         egui::Popup::menu(&lights).show(|ui| {
-                            for kind in [crate::light::Kind::Point, crate::light::Kind::Directional, crate::light::Kind::Ambient, crate::light::Kind::Rim] {
+                            for kind in [crate::light::Kind::Point, crate::light::Kind::Directional, crate::light::Kind::Ambient, crate::light::Kind::Rim, crate::light::Kind::RimShadow, crate::light::Kind::Spot] {
                                 if button(ui, Icon::Bulb, kind.name(), "", false, self.doc.layers.len() < 100).clicked() {
                                     self.add_layer_advanced(false);
                                     let light = crate::light::Light::new(self.doc.width, self.doc.height, kind);
@@ -1006,7 +1214,8 @@ impl Editor {
                 if viewport.cell != previous_cell {
                     offset *= viewport.cell / previous_cell;
                 }
-                if viewport.panning || viewport.cell != previous_cell {
+                if fit { offset = 0.; }
+                if fit || viewport.panning || viewport.cell != previous_cell {
                     scroll = scroll.horizontal_scroll_offset(offset.max(0.));
                 }
                 let original_style = ui.style().clone();

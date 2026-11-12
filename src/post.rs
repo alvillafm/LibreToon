@@ -20,9 +20,14 @@ pub enum Kind {
     Sharpen,
     Exposure,
     Posterize,
+    Outline,
+    InnerShadow,
+    DirectionalBlur,
+    Grain,
+    RgbSplit,
 }
 impl Kind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 16] = [
         Self::Hue,
         Self::Levels,
         Self::Curves,
@@ -34,6 +39,11 @@ impl Kind {
         Self::Sharpen,
         Self::Exposure,
         Self::Posterize,
+        Self::Outline,
+        Self::InnerShadow,
+        Self::DirectionalBlur,
+        Self::Grain,
+        Self::RgbSplit,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -48,6 +58,11 @@ impl Kind {
             Self::Sharpen => "Sharpen",
             Self::Exposure => "Exposure / Contrast",
             Self::Posterize => "Posterize",
+            Self::Outline => "Outline",
+            Self::InnerShadow => "Inner shadow",
+            Self::DirectionalBlur => "Directional blur",
+            Self::Grain => "Grain / Paper texture",
+            Self::RgbSplit => "RGB separation",
         }
     }
     fn icon(self) -> Icon {
@@ -63,9 +78,160 @@ impl Kind {
             Self::Sharpen => Icon::Focus,
             Self::Exposure => Icon::LightBrush,
             Self::Posterize => Icon::Layers,
+            Self::Outline => Icon::Ellipse,
+            Self::InnerShadow => Icon::ShadeBrush,
+            Self::DirectionalBlur => Icon::Blur,
+            Self::Grain => Icon::Layers,
+            Self::RgbSplit => Icon::SwapColors,
         }
     }
 }
+
+const MAX_CURVE_NODES: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct CurveNode {
+    point: [f32; 2],
+    incoming: [f32; 2],
+    outgoing: [f32; 2],
+}
+
+fn empty_curves(curves: &[Vec<CurveNode>; 4]) -> bool {
+    curves.iter().all(Vec::is_empty)
+}
+
+fn valid_curve(nodes: &[CurveNode]) -> bool {
+    nodes.is_empty()
+        || ((2..=MAX_CURVE_NODES).contains(&nodes.len())
+            && nodes.first().is_some_and(|n| n.point[0] == 0.)
+            && nodes.last().is_some_and(|n| n.point[0] == 1.)
+            && nodes
+                .windows(2)
+                .all(|pair| pair[0].point[0] < pair[1].point[0])
+            && nodes.iter().all(|n| {
+                n.point.iter().all(|v| (0. ..=1.).contains(v))
+                    && n.incoming
+                        .iter()
+                        .chain(&n.outgoing)
+                        .all(|v| (-1. ..=1.).contains(v))
+            }))
+}
+
+fn linear_nodes(values: &[f32]) -> Vec<CurveNode> {
+    let step = 1. / (values.len() - 1) as f32;
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, &y)| {
+            let y = y.clamp(0., 1.);
+            CurveNode {
+                point: [
+                    if i + 1 == values.len() {
+                        1.
+                    } else {
+                        i as f32 * step
+                    },
+                    y,
+                ],
+                incoming: [
+                    -step / 3.,
+                    (values[i.saturating_sub(1)].clamp(0., 1.) - y) / 3.,
+                ],
+                outgoing: [
+                    step / 3.,
+                    (values[(i + 1).min(values.len() - 1)].clamp(0., 1.) - y) / 3.,
+                ],
+            }
+        })
+        .collect()
+}
+
+fn curve_segment(a: CurveNode, b: CurveNode) -> crate::vector::Cubic {
+    let [x0, y0] = a.point;
+    let [x1, y1] = b.point;
+    let mid = (x0 + x1) * 0.5;
+    crate::vector::Cubic([
+        Pos2::new(x0, y0),
+        Pos2::new(
+            (x0 + a.outgoing[0]).clamp(x0, mid),
+            (y0 + a.outgoing[1]).clamp(0., 1.),
+        ),
+        Pos2::new(
+            (x1 + b.incoming[0]).clamp(mid, x1),
+            (y1 + b.incoming[1]).clamp(0., 1.),
+        ),
+        Pos2::new(x1, y1),
+    ])
+}
+
+fn evaluate_curve(nodes: &[CurveNode], x: f32) -> f32 {
+    let index = nodes
+        .partition_point(|n| n.point[0] <= x)
+        .clamp(1, nodes.len() - 1);
+    let segment = curve_segment(nodes[index - 1], nodes[index]);
+    let [a, _, _, b] = segment.0;
+    if x <= a.x {
+        return a.y;
+    }
+    if x >= b.x {
+        return b.y;
+    }
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..16 {
+        let t = (low + high) * 0.5;
+        if segment.at(t).x < x {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    segment.at((low + high) * 0.5).y
+}
+
+fn blend_curve(
+    a: &[CurveNode],
+    legacy_a: [f32; 5],
+    b: &[CurveNode],
+    legacy_b: [f32; 5],
+    t: f32,
+) -> Vec<CurveNode> {
+    if a.is_empty() && b.is_empty() {
+        return Vec::new();
+    }
+    let fallback_a;
+    let fallback_b;
+    let a = if a.is_empty() {
+        fallback_a = linear_nodes(&legacy_a);
+        &fallback_a
+    } else {
+        a
+    };
+    let b = if b.is_empty() {
+        fallback_b = linear_nodes(&legacy_b);
+        &fallback_b
+    } else {
+        b
+    };
+    let mix = |a, b| egui::lerp(a..=b, t);
+    if a.len() == b.len() {
+        let pair = |a: [f32; 2], b: [f32; 2]| [mix(a[0], b[0]), mix(a[1], b[1])];
+        return a
+            .iter()
+            .zip(b)
+            .map(|(a, b)| CurveNode {
+                point: pair(a.point, b.point),
+                incoming: pair(a.incoming, b.incoming),
+                outgoing: pair(a.outgoing, b.outgoing),
+            })
+            .collect();
+    }
+    let values: [f32; MAX_CURVE_NODES] = std::array::from_fn(|i| {
+        let x = i as f32 / (MAX_CURVE_NODES - 1) as f32;
+        mix(evaluate_curve(a, x), evaluate_curve(b, x))
+    });
+    linear_nodes(&values)
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
     kind: Kind,
@@ -73,8 +239,20 @@ pub struct Effect {
     values: [f32; 3],
     color: [u8; 3],
     channels: [[f32; 5]; 4],
+    #[serde(default, skip_serializing_if = "empty_curves")]
+    curves: [Vec<CurveNode>; 4],
+    #[serde(skip)]
+    grain_seed: u32,
 }
 impl Effect {
+    pub(crate) fn is_outline(&self) -> bool {
+        self.kind == Kind::Outline
+    }
+
+    pub(crate) fn enabled_outline(&self) -> bool {
+        self.enabled && self.is_outline()
+    }
+
     pub(crate) fn new(kind: Kind) -> Self {
         let values = match kind {
             Kind::Glow => [0.68, 18., 0.5],
@@ -83,6 +261,11 @@ impl Effect {
             Kind::Gaussian | Kind::Lens => [12., 0., 0.],
             Kind::Sharpen => [0.6, 3., 0.],
             Kind::Posterize => [8., 0., 0.],
+            Kind::Outline => [4., 1., 0.85],
+            Kind::InnerShadow => [5., 135., 0.55],
+            Kind::DirectionalBlur => [12., 0., 0.],
+            Kind::Grain => [0.14, 2., 0.],
+            Kind::RgbSplit => [4., 0., 1.],
             _ => [0.; 3],
         };
         let channels = if kind == Kind::Levels {
@@ -95,6 +278,8 @@ impl Effect {
             enabled: true,
             values,
             channels,
+            curves: Default::default(),
+            grain_seed: 0,
             color: if kind == Kind::Harmony {
                 [93, 148, 117]
             } else {
@@ -110,6 +295,7 @@ pub fn valid(effects: &[Effect]) -> bool {
                 .iter()
                 .chain(e.channels.iter().flatten())
                 .all(|x| x.is_finite() && x.abs() <= 360.)
+                && e.curves.iter().all(|nodes| valid_curve(nodes))
         })
 }
 
@@ -164,6 +350,10 @@ impl Band {
                         values: std::array::from_fn(|i| lerp(a.values[i], b.values[i])),
                         color: std::array::from_fn(|i| {
                             lerp(a.color[i] as f32, b.color[i] as f32).round() as u8
+                        }),
+                        grain_seed: 0,
+                        curves: std::array::from_fn(|i| {
+                            blend_curve(&a.curves[i], a.channels[i], &b.curves[i], b.channels[i], t)
                         }),
                         channels: std::array::from_fn(|i| {
                             std::array::from_fn(|j| lerp(a.channels[i][j], b.channels[i][j]))
@@ -312,11 +502,215 @@ fn smooth(x: f32) -> f32 {
     t * t * (3. - 2. * t)
 }
 
+// Retain one adjustment input and its recent prefixes. Comparing exact bytes
+// keeps reuse valid across edits, undo, animated layers and preview resolutions.
+#[derive(Default)]
+pub(crate) struct EffectCache {
+    signature: Option<([u32; 2], f32)>,
+    input: Vec<u8>,
+    effects: Vec<Effect>,
+    prefixes: std::collections::VecDeque<(usize, Vec<u8>)>,
+}
+
+impl EffectCache {
+    pub(crate) fn apply(
+        &mut self,
+        pixels: &mut Vec<u8>,
+        w: u32,
+        h: u32,
+        effects: &[Effect],
+        scale: f32,
+    ) {
+        const LIMIT: usize = 40 * 1024 * 1024;
+        let bytes = pixels.len();
+        if bytes == 0
+            || bytes > LIMIT / 2
+            || !effects.iter().any(|e| {
+                e.enabled
+                    && matches!(
+                        e.kind,
+                        Kind::Gaussian | Kind::Lens | Kind::Glow | Kind::Sharpen
+                    )
+            })
+        {
+            apply(pixels, w, h, effects, scale);
+            return;
+        }
+        let signature = Some(([w, h], scale));
+        if self.signature != signature || self.input != *pixels {
+            self.signature = signature;
+            self.input.clone_from(pixels);
+            self.effects.clear();
+            self.prefixes.clear();
+        }
+        let common = self
+            .effects
+            .iter()
+            .zip(effects)
+            .take_while(|(a, b)| a == b)
+            .count();
+        self.prefixes.retain(|(end, _)| *end <= common);
+        let start = self.prefixes.back().map_or(0, |(end, output)| {
+            pixels.clone_from(output);
+            *end
+        });
+        for (index, effect) in effects.iter().enumerate().skip(start) {
+            apply(pixels, w, h, std::slice::from_ref(effect), scale);
+            if effect.enabled {
+                let capacity = (LIMIT / bytes).saturating_sub(1).min(4);
+                while self.prefixes.len() >= capacity {
+                    self.prefixes.pop_front();
+                }
+                self.prefixes.push_back((index + 1, pixels.clone()));
+            }
+        }
+        self.effects.clear();
+        self.effects.extend_from_slice(effects);
+    }
+}
+
+pub(crate) fn animate_grain(effects: &mut [Effect], frame: usize) {
+    for effect in effects
+        .iter_mut()
+        .filter(|effect| effect.kind == Kind::Grain && effect.values[2] >= 1.)
+    {
+        effect.grain_seed = (frame / effect.values[2].round().clamp(1., 12.) as usize) as u32;
+    }
+}
+
+fn apply_new_effect(pixels: &mut Vec<u8>, w: u32, h: u32, effect: &Effect, scale: f32) -> bool {
+    let [a, b, c] = effect.values;
+    if !matches!(
+        effect.kind,
+        Kind::Outline | Kind::InnerShadow | Kind::DirectionalBlur | Kind::Grain | Kind::RgbSplit
+    ) {
+        return false;
+    }
+    if w == 0 || h == 0 {
+        return true;
+    }
+    if effect.kind == Kind::Grain {
+        let cell = (b * scale).max(0.001);
+        let hash = |x: u32, y: u32| {
+            let mut n = x.wrapping_mul(0x9e3779b9)
+                ^ y.wrapping_mul(0x85ebca6b)
+                ^ effect.grain_seed.wrapping_mul(0x27d4eb2d);
+            n ^= n >> 16;
+            n = n.wrapping_mul(0x7feb352d);
+            n ^= n >> 15;
+            ((n >> 16) as f32 / 65535.) * 2. - 1.
+        };
+        for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+            let alpha = f32::from(pixel[3]);
+            let (x, y) = (index as u32 % w, index as u32 / w);
+            let noise = hash((x as f32 / cell) as u32, (y as f32 / cell) as u32) * a * alpha * 0.35;
+            for value in &mut pixel[..3] {
+                *value = (f32::from(*value) + noise).round().clamp(0., alpha) as u8;
+            }
+        }
+        return true;
+    }
+    let source = pixels.clone();
+    let sample = |image: &[u8], x: i32, y: i32, channel: usize| -> f32 {
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+            0.
+        } else {
+            f32::from(image[(y as usize * w as usize + x as usize) * 4 + channel])
+        }
+    };
+    let direction = Vec2::angled(b.to_radians());
+    let distance = (a * scale).clamp(0., 128.);
+    let softness = if effect.kind == Kind::InnerShadow {
+        distance * 0.5
+    } else {
+        0.
+    };
+    let blurred = (softness > 0.5).then(|| {
+        crate::depth::blur(
+            source.clone(),
+            w,
+            h,
+            softness,
+            &crate::depth::Optics::default(),
+        )
+    });
+    let matte = blurred.as_deref().unwrap_or(&source);
+    let opacity = c.clamp(0., 1.);
+    let outline_distance = (effect.kind == Kind::Outline).then(|| {
+        let inverse_coverage: Vec<_> = source
+            .chunks_exact(4)
+            .map(|pixel| 1. - f32::from(pixel[3]) / 255.)
+            .collect();
+        crate::light::silhouette_distances(&inverse_coverage, w as usize, h as usize)
+    });
+    let feather = (b * scale).clamp(1., 32.);
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let (x, y) = ((index as u32 % w) as i32, (index as u32 / w) as i32);
+        let alpha = f32::from(pixel[3]);
+        let at = |image: &[u8], delta: Vec2, channel| {
+            sample(
+                image,
+                x + delta.x.round() as i32,
+                y + delta.y.round() as i32,
+                channel,
+            )
+        };
+        match effect.kind {
+            Kind::DirectionalBlur => {
+                for (channel, value) in pixel.iter_mut().enumerate() {
+                    let sum: f32 = (-4..=4)
+                        .map(|step| at(&source, direction * (distance * step as f32 / 8.), channel))
+                        .sum();
+                    *value = (sum / 9.).round() as u8;
+                }
+            }
+            Kind::RgbSplit => {
+                for (channel, value) in pixel[..3].iter_mut().enumerate() {
+                    let delta = direction * (distance * (channel as f32 - 1.));
+                    let source_alpha = at(&source, delta, 3);
+                    let shifted = if source_alpha > 0. {
+                        at(&source, delta, channel) * alpha / source_alpha
+                    } else {
+                        0.
+                    };
+                    *value = egui::lerp(f32::from(*value)..=shifted, opacity)
+                        .clamp(0., alpha)
+                        .round() as u8;
+                }
+            }
+            Kind::InnerShadow => {
+                let depth = (1. - at(matte, direction * distance, 3) / 255.) * opacity;
+                for (channel, value) in pixel[..3].iter_mut().enumerate() {
+                    let tint = f32::from(effect.color[channel]) / 255.;
+                    *value = (f32::from(*value) * (1. - depth * (1. - tint))).round() as u8;
+                }
+            }
+            Kind::Outline => {
+                let field_index = (y as usize + 1) * (w as usize + 2) + x as usize + 1;
+                let edge_distance = outline_distance.as_ref().unwrap()[field_index].sqrt();
+                let added = (255. - alpha)
+                    * opacity
+                    * ((distance + 0.5 - edge_distance) / feather).clamp(0., 1.);
+                for (channel, value) in pixel[..3].iter_mut().enumerate() {
+                    *value = (f32::from(*value) + added * f32::from(effect.color[channel]) / 255.)
+                        .round() as u8;
+                }
+                pixel[3] = (alpha + added).round() as u8;
+            }
+            _ => unreachable!(),
+        }
+    }
+    true
+}
+
 pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f32) {
     // Stored in application order. The inspector displays the top effect first.
     for effect in effects.iter().filter(|e| e.enabled) {
         let [a, b, c] = effect.values;
         let kind = effect.kind;
+        if apply_new_effect(pixels, w, h, effect, scale) {
+            continue;
+        }
         let blur = |input: Vec<u8>, radius: f32, method| {
             crate::depth::blur(
                 input,
@@ -343,6 +737,9 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
             continue;
         }
         if kind == Kind::Glow {
+            if c <= 0. {
+                continue;
+            }
             let mut bright = pixels.clone();
             for p in bright.chunks_exact_mut(4) {
                 let alpha = f32::from(p[3]).max(1.);
@@ -371,9 +768,35 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
             }
             continue;
         }
+        if kind == Kind::Sharpen && a == 0. {
+            continue;
+        }
+        let exposure = if kind == Kind::Exposure {
+            2f32.powf(a)
+        } else {
+            1.
+        };
+        let tint_luma = luma(effect.color.map(|v| f32::from(v) / 255.));
         let blurred = (kind == Kind::Sharpen)
             .then(|| blur(pixels.clone(), b, crate::depth::BlurMethod::Gaussian));
         let tint = effect.color.map(|v| f32::from(v) / 255.);
+        let curves: [Option<Vec<f32>>; 4] = std::array::from_fn(|channel| {
+            let nodes = &effect.curves[channel];
+            (kind == Kind::Curves && !nodes.is_empty()).then(|| {
+                (0..=1024)
+                    .map(|i| evaluate_curve(nodes, i as f32 / 1024.))
+                    .collect()
+            })
+        });
+        let mapped = |v: f32, channel: usize| {
+            if let Some(lut) = &curves[channel] {
+                let x = v.clamp(0., 1.) * 1024.;
+                let i = (x as usize).min(1023);
+                egui::lerp(lut[i]..=lut[i + 1], x - i as f32)
+            } else {
+                channel_value(kind, v, effect.channels[channel])
+            }
+        };
         for (index, p) in pixels.chunks_exact_mut(4).enumerate() {
             let alpha = f32::from(p[3]);
             if alpha == 0. {
@@ -386,13 +809,9 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
             ];
             let out = match kind {
                 Kind::Hue => hue_saturation(rgb, a, b, c),
-                Kind::Levels | Kind::Curves => std::array::from_fn(|i| {
-                    channel_value(
-                        kind,
-                        channel_value(kind, rgb[i], effect.channels[i + 1]),
-                        effect.channels[0],
-                    )
-                }),
+                Kind::Levels | Kind::Curves => {
+                    std::array::from_fn(|i| mapped(mapped(rgb[i], i + 1), 0))
+                }
                 Kind::Vignette => {
                     let x = 2. * (index as u32 % w) as f32 / w as f32 - 1.;
                     let y = 2. * (index as u32 / w) as f32 / h as f32 - 1.;
@@ -402,7 +821,6 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
                 }
                 Kind::Harmony => {
                     let y = luma(rgb);
-                    let tint_luma = luma(tint);
                     std::array::from_fn(|i| {
                         let target = (tint[i] + (y - tint_luma) * b).clamp(0., 1.);
                         rgb[i] + (target - rgb[i]) * a
@@ -413,7 +831,7 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
                     let low_alpha = f32::from(low[3]).max(1.);
                     std::array::from_fn(|i| rgb[i] + a * (rgb[i] - f32::from(low[i]) / low_alpha))
                 }
-                Kind::Exposure => rgb.map(|v| (v * 2f32.powf(a) - 0.5) * (1. + b) + 0.5),
+                Kind::Exposure => rgb.map(|v| (v * exposure - 0.5) * (1. + b) + 0.5),
                 Kind::Posterize => {
                     let steps = a.round().clamp(2., 32.) - 1.;
                     rgb.map(|v| (v * steps).round() / steps)
@@ -440,65 +858,167 @@ fn slider(
         ui.add(egui::Slider::new(value, range).text(tr(label)));
     });
 }
-fn curve(ui: &mut egui::Ui, values: &mut [f32; 5], color: Color32) {
+fn curve(ui: &mut egui::Ui, values: &[f32; 5], stored: &mut Vec<CurveNode>, color: Color32) {
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().min(220.), 112.),
+        Vec2::new(ui.available_width().min(310.), 160.),
         egui::Sense::click_and_drag(),
     );
-    let graph = rect.shrink(7.);
-    ui.painter()
-        .rect_filled(rect, 4., crate::themes::palette().canvas);
+    let graph = rect.shrink(8.);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 4., crate::themes::palette().canvas);
+    let grid = egui::Stroke::new(1., crate::themes::line());
     for i in 0..5 {
         let t = i as f32 / 4.;
-        let x = egui::lerp(graph.x_range(), t);
-        let y = egui::lerp(graph.y_range(), t);
-        ui.painter().vline(
-            x,
-            graph.y_range(),
-            egui::Stroke::new(1., crate::themes::line()),
-        );
-        ui.painter().hline(
-            graph.x_range(),
-            y,
-            egui::Stroke::new(1., crate::themes::line()),
-        );
+        painter.vline(egui::lerp(graph.x_range(), t), graph.y_range(), grid);
+        painter.hline(graph.x_range(), egui::lerp(graph.y_range(), t), grid);
     }
-    let key = response.id.with("curve-control");
-    if (response.drag_started() || response.clicked())
-        && let Some(p) = response.interact_pointer_pos()
+    let screen = |p: Pos2| {
+        Pos2::new(
+            egui::lerp(graph.x_range(), p.x),
+            egui::lerp(graph.y_range(), 1. - p.y),
+        )
+    };
+    let input = |p: Pos2| {
+        [
+            (p.x - graph.left()) / graph.width(),
+            (graph.bottom() - p.y) / graph.height(),
+        ]
+    };
+    let mut nodes = if stored.is_empty() {
+        linear_nodes(values)
+    } else {
+        stored.clone()
+    };
+    let state = response.id.with("curve-control");
+    let (mut selected, mut handle) = ui
+        .data(|data| data.get_temp::<(usize, i8)>(state))
+        .unwrap_or((usize::MAX, 0));
+    let mut changed = false;
+    let point = |node: CurveNode| Pos2::new(node.point[0], node.point[1]);
+    let nearest = |nodes: &[CurveNode], pos: Pos2| {
+        nodes
+            .iter()
+            .position(|node| screen(point(*node)).distance(pos) <= 6.)
+    };
+    let grab = if response.drag_started() {
+        ui.input(|input| input.pointer.press_origin())
+    } else if response.clicked() {
+        response.interact_pointer_pos()
+    } else {
+        None
+    };
+    if let Some(pos) = grab {
+        response.request_focus();
+        handle = 0;
+        if let Some(index) = nearest(&nodes, pos) {
+            selected = index;
+        } else if selected > 0
+            && selected < nodes.len()
+            && screen(curve_segment(nodes[selected - 1], nodes[selected]).0[2]).distance(pos) <= 7.
+        {
+            handle = -1;
+        } else if selected < nodes.len() - 1
+            && screen(curve_segment(nodes[selected], nodes[selected + 1]).0[1]).distance(pos) <= 7.
+        {
+            handle = 1;
+        } else if graph.contains(pos) && nodes.len() < MAX_CURVE_NODES {
+            let [x, y] = input(pos);
+            let index = nodes.partition_point(|node| node.point[0] < x);
+            if index > 0
+                && index < nodes.len()
+                && x - nodes[index - 1].point[0] >= 0.004
+                && nodes[index].point[0] - x >= 0.004
+            {
+                nodes.insert(
+                    index,
+                    CurveNode {
+                        point: [x, y],
+                        incoming: [(nodes[index - 1].point[0] - x) / 3., 0.],
+                        outgoing: [(nodes[index].point[0] - x) / 3., 0.],
+                    },
+                );
+                selected = index;
+                changed = true;
+            }
+        }
+    }
+    if response.dragged()
+        && selected < nodes.len()
+        && let Some(pos) = response.interact_pointer_pos()
     {
-        let index = (((p.x - graph.left()) / graph.width()) * 4.)
-            .round()
-            .clamp(0., 4.) as usize;
-        ui.ctx().data_mut(|data| data.insert_temp(key, index));
+        let [x, y] = input(pos);
+        let previous = selected.checked_sub(1).map(|i| nodes[i].point[0]);
+        let next = nodes.get(selected + 1).map(|n| n.point[0]);
+        let node = &mut nodes[selected];
+        let y = y.clamp(0., 1.);
+        match handle {
+            -1 if previous.is_some() => {
+                let offset =
+                    (x - node.point[0]).clamp((previous.unwrap() - node.point[0]) * 0.5, 0.);
+                node.incoming = [offset, y - node.point[1]];
+            }
+            1 if next.is_some() => {
+                let offset = (x - node.point[0]).clamp(0., (next.unwrap() - node.point[0]) * 0.5);
+                node.outgoing = [offset, y - node.point[1]];
+            }
+            _ => {
+                if let (Some(left), Some(right)) = (previous, next) {
+                    let margin = 0.001f32.min((right - left) / 4.);
+                    node.point[0] = x.clamp(left + margin, right - margin);
+                }
+                node.point[1] = y;
+            }
+        }
+        changed = true;
     }
-    if (response.dragged() || response.clicked())
-        && let Some(p) = response.interact_pointer_pos()
-    {
-        let index = ui
-            .ctx()
-            .data(|data| data.get_temp::<usize>(key))
-            .unwrap_or(0);
-        values[index] = (1. - (p.y - graph.top()) / graph.height()).clamp(0., 1.);
+    let remove = if response.secondary_clicked() {
+        response
+            .interact_pointer_pos()
+            .and_then(|pos| nearest(&nodes, pos))
+    } else if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+        Some(selected)
+    } else {
+        None
+    };
+    if let Some(index) = remove.filter(|i| *i > 0 && *i < nodes.len() - 1) {
+        nodes.remove(index);
+        selected = usize::MAX;
+        changed = true;
     }
-    let points: Vec<_> = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            Pos2::new(
-                egui::lerp(graph.x_range(), i as f32 / 4.),
-                egui::lerp(graph.y_range(), 1. - v),
-            )
-        })
-        .collect();
-    ui.painter().add(egui::Shape::line(
-        points.clone(),
-        egui::Stroke::new(2., color),
-    ));
-    for p in points {
-        ui.painter().circle_filled(p, 3.5, color);
+    let mut path = vec![screen(point(nodes[0]))];
+    for pair in nodes.windows(2) {
+        let segment = curve_segment(pair[0], pair[1]);
+        path.extend((1..=24).map(|i| screen(segment.at(i as f32 / 24.))));
     }
+    painter.add(egui::Shape::line(path, egui::Stroke::new(2., color)));
+    for (i, node) in nodes.iter().enumerate() {
+        let p = screen(point(*node));
+        if i == selected {
+            for control in [
+                i.checked_sub(1)
+                    .map(|prev| curve_segment(nodes[prev], *node).0[2]),
+                nodes
+                    .get(i + 1)
+                    .map(|next| curve_segment(*node, *next).0[1]),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let control = screen(control);
+                painter.line_segment([p, control], egui::Stroke::new(1., color));
+                painter.circle_filled(control, 3., color);
+            }
+            painter.circle_stroke(p, 5., egui::Stroke::new(1., color));
+        }
+        painter.circle_filled(p, 3., color);
+    }
+    ui.data_mut(|data| data.insert_temp(state, (selected, handle)));
+    if changed {
+        *stored = nodes;
+    }
+    ui.small(tr("Click to add a point. Drag its handles to shape the curve. Right-click a point to remove it."));
 }
+
 fn settings(ui: &mut egui::Ui, effect: &mut Effect, channel: &mut usize) {
     let [a, b, c] = &mut effect.values;
     match effect.kind {
@@ -518,6 +1038,7 @@ fn settings(ui: &mut egui::Ui, effect: &mut Effect, channel: &mut usize) {
                 curve(
                     ui,
                     p,
+                    &mut effect.curves[*channel],
                     [
                         crate::themes::accent(),
                         Color32::LIGHT_RED,
@@ -566,6 +1087,39 @@ fn settings(ui: &mut egui::Ui, effect: &mut Effect, channel: &mut usize) {
             slider(ui, Icon::Adjust, "Contrast", b, -1. ..=1.);
         }
         Kind::Posterize => slider(ui, Icon::Layers, "Color steps", a, 2. ..=32.),
+        Kind::Outline | Kind::InnerShadow => {
+            if effect.kind == Kind::Outline {
+                ui.small(tr(
+                    "Outline follows the nearest artwork below, or the chosen effect target.",
+                ));
+            }
+            slider(ui, Icon::Width, "Distance", a, 1. ..=100.);
+            if effect.kind == Kind::Outline {
+                slider(ui, Icon::Blur, "Edge softness", b, 0. ..=20.);
+            } else {
+                slider(ui, Icon::Rotate, "Direction", b, -180. ..=180.);
+            }
+            slider(ui, Icon::Adjust, "Opacity", c, 0. ..=1.);
+            ui.color_edit_button_srgb(&mut effect.color);
+        }
+        Kind::DirectionalBlur | Kind::RgbSplit => {
+            slider(ui, Icon::Width, "Distance", a, 0. ..=100.);
+            slider(ui, Icon::Rotate, "Direction", b, -180. ..=180.);
+            if effect.kind == Kind::RgbSplit {
+                slider(ui, Icon::Adjust, "Opacity", c, 0. ..=1.);
+            }
+        }
+        Kind::Grain => {
+            slider(ui, Icon::Adjust, "Intensity", a, 0. ..=1.);
+            slider(ui, Icon::Width, "Grain size", b, 1. ..=12.);
+            slider(
+                ui,
+                Icon::Film,
+                "Grain frame interval (0 = fixed)",
+                c,
+                0. ..=12.,
+            );
+        }
     }
 }
 #[derive(Clone, Copy)]
@@ -949,7 +1503,53 @@ impl Editor {
         let mut effects = before.clone();
         let mut stack_edits = Vec::new();
         ui.heading(tr("Adjustment layer"));
-        ui.small(tr("Effects apply to all visible layers below this layer."));
+        let mut target = data.options.fx_target;
+        let mut target_layer = None;
+        ui.add_enabled_ui(!locked, |ui| {
+            ui.menu_button(tr("Effect target"), |ui| {
+                if ui
+                    .selectable_label(target.is_none(), tr("All artwork below"))
+                    .clicked()
+                {
+                    target = None;
+                    ui.close();
+                }
+                for (index, candidate) in self.doc.layers.iter().enumerate().take(layer).rev() {
+                    if candidate.options.adjustment.is_some()
+                        || candidate.options.light.is_some()
+                        || candidate.options.height_guide.is_some()
+                        || candidate.options.light_mask
+                    {
+                        continue;
+                    }
+                    let selected = candidate
+                        .options
+                        .light_receiver
+                        .is_some_and(|id| target == Some(crate::light::Receiver::Layer(id)));
+                    if ui.selectable_label(selected, &candidate.name).clicked() {
+                        target_layer = Some(index);
+                        ui.close();
+                    }
+                }
+                for folder in &self.doc.extras.folders {
+                    if ui
+                        .selectable_label(
+                            target == Some(crate::light::Receiver::Folder(folder.id)),
+                            &folder.name,
+                        )
+                        .clicked()
+                    {
+                        target = Some(crate::light::Receiver::Folder(folder.id));
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if target.is_some() {
+            ui.small(tr("Effects apply to the selected layer or folder below."));
+        } else {
+            ui.small(tr("Effects apply to all visible layers below this layer."));
+        }
         ui.small(tr("Effects run from bottom to top. Drag to reorder."));
         ui.horizontal(|ui| {
             for (icon, label, action, enabled) in [
@@ -1101,6 +1701,18 @@ impl Editor {
                 }
             }
         });
+        if target_layer.is_some() || target != self.doc.layers[layer].options.fx_target {
+            self.checkpoint();
+            if let Some(index) = target_layer {
+                let id = *self.doc.layers[index]
+                    .options
+                    .light_receiver
+                    .get_or_insert_with(crate::features::id);
+                target = Some(crate::light::Receiver::Layer(id));
+            }
+            self.doc.layers[layer].options.fx_target = target;
+            self.recover();
+        }
         if effects != before || !stack_edits.is_empty() {
             if !self.post.transaction {
                 self.checkpoint();
@@ -1145,6 +1757,97 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_targets_artwork_over_an_opaque_background() {
+        let mut doc = Document {
+            width: 64,
+            height: 64,
+            ..Default::default()
+        };
+        let mut art = doc.layers[0].clone();
+        let mut adjustment = art.clone();
+        let square = |a, b, fill| crate::Mark {
+            points: vec![[a, a], [b, b]].into(),
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            fill: Some(fill),
+            ..Default::default()
+        };
+        doc.layers[0].frames[0].push(square(0., 64., [255, 255, 255, 255]));
+        art.frames[0].push(square(20., 44., [220, 30, 30, 255]));
+        let mut edge = Effect::new(Kind::Outline);
+        edge.values = [5., 0., 1.];
+        adjustment.options.adjustment = Some(vec![edge].into());
+        doc.layers.push(art);
+        doc.layers.push(adjustment);
+        let rgb = crate::exporter::raster(
+            &doc,
+            0,
+            64,
+            64,
+            &egui::Context::default(),
+            &mut Default::default(),
+        );
+        let pixel = |x: usize| &rgb[(32 * 64 + x) * 3..][..3];
+        assert_eq!(pixel(17), &[0, 0, 0]);
+        assert_eq!(pixel(32), &[220, 30, 30]);
+        assert_eq!(pixel(10), &[255, 255, 255]);
+    }
+
+    #[test]
+    fn outline_extends_alpha_and_inner_shadow_stays_inside() {
+        let mut source = vec![0; 21 * 21 * 4];
+        for y in 7..14 {
+            for x in 7..14 {
+                source[(y * 21 + x) * 4..][..4].copy_from_slice(&[180, 150, 120, 255]);
+            }
+        }
+        let at = |x: usize, y: usize| (y * 21 + x) * 4;
+        let mut outline = source.clone();
+        let mut edge = Effect::new(Kind::Outline);
+        edge.values = [2., 0., 1.];
+        apply(&mut outline, 21, 21, &[edge], 1.);
+        assert_eq!(outline[at(6, 10) + 3], 255);
+        assert_eq!(&outline[at(10, 10)..][..4], &source[at(10, 10)..][..4]);
+        let mut shadow = source.clone();
+        apply(&mut shadow, 21, 21, &[Effect::new(Kind::InnerShadow)], 1.);
+        assert_eq!(shadow[at(6, 10) + 3], 0);
+        assert_eq!(shadow[at(7, 10) + 3], 255);
+        assert!(shadow[at(7, 10)] < source[at(7, 10)]);
+    }
+
+    #[test]
+    fn bezier_curves_preserve_legacy_points_and_apply_handles_to_pixels() {
+        let legacy = [0., 0.12, 0.5, 0.93, 1.];
+        let linear = linear_nodes(&legacy);
+        for i in 0..=100 {
+            let x = i as f32 / 100.;
+            assert!(
+                (evaluate_curve(&linear, x) - channel_value(Kind::Curves, x, legacy)).abs()
+                    < 0.00003
+            );
+        }
+        let mut effect = Effect::new(Kind::Curves);
+        effect.channels[0] = legacy;
+        let before = serde_json::to_value(&effect).unwrap();
+        assert!(before.get("curves").is_none());
+        let previous: Effect = serde_json::from_value(before).unwrap();
+        assert!(previous.curves[0].is_empty());
+        effect.curves[0] = linear;
+        effect.curves[0][0].outgoing = [0.1, 0.5];
+        assert!(valid(std::slice::from_ref(&effect)));
+        let restored: Effect =
+            serde_json::from_value(serde_json::to_value(&effect).unwrap()).unwrap();
+        assert!(effect == restored);
+        let mut old = vec![32, 32, 32, 255];
+        let mut new = old.clone();
+        apply(&mut old, 1, 1, &[previous], 1.);
+        apply(&mut new, 1, 1, &[restored], 1.);
+        assert!(new[0] > old[0] + 20);
+        assert_eq!(new[3], old[3]);
+    }
 
     #[test]
     fn fx_band_limits_rendering_and_interpolates_across_a_split() {
@@ -1312,8 +2015,35 @@ mod tests {
         assert_eq!(&pixels[left..left + 3], &[0, 255, 0]);
         assert_eq!(&pixels[right..right + 3], &[255, 0, 0]);
 
+        doc.layers[0].options.light_receiver = Some(100);
+        doc.layers[1].options.fx_target = Some(crate::light::Receiver::Layer(100));
+        assert_eq!(&render(&doc)[left..left + 3], &[0, 255, 0]);
+        doc.layers[1].options.fx_target = Some(crate::light::Receiver::Layer(101));
+        assert_eq!(&render(&doc)[left..left + 3], &[255, 0, 0]);
         doc.layers[1].visible = false;
         let pixels = render(&doc);
         assert_eq!(&pixels[left..left + 3], &[255, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn effect_cache_matches_uncached_render_after_parameter_and_input_changes() {
+    let mut cache = EffectCache::default();
+    let mut effects = [Effect::new(Kind::Gaussian), Effect::new(Kind::Glow)];
+    let mut input = vec![0; 16 * 16 * 4];
+    input[512..516].copy_from_slice(&[255; 4]);
+    for index in 0..3 {
+        if index == 1 {
+            effects[1].values[2] = 0.5;
+        }
+        if index == 2 {
+            input[513] = 190;
+        }
+        let mut expected = input.clone();
+        let mut actual = input.clone();
+        apply(&mut expected, 16, 16, &effects, 1.);
+        cache.apply(&mut actual, 16, 16, &effects, 1.);
+        assert_eq!(actual, expected);
     }
 }

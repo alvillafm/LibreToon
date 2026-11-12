@@ -233,6 +233,7 @@ struct Session {
     frame: usize,
     missing: usize,
     phrase: (usize, usize),
+    zoom_phrase: bool,
     media: SharedVec<crate::media::Track>,
 }
 
@@ -361,6 +362,7 @@ impl Editor {
             frame,
             missing: 0,
             phrase,
+            zoom_phrase: false,
             media: self.doc.extras.media.tracks.clone(),
         });
     }
@@ -450,18 +452,26 @@ impl Editor {
                     ui.add(egui::DragValue::new(&mut last).range(first..=end));
                 });
                 session.phrase = (first - 1, last - 1);
+                ui.checkbox(&mut session.zoom_phrase, tr("Zoom to phrase"));
+                let (view_start, view_end) = if session.zoom_phrase {
+                    (first - 1, last)
+                } else {
+                    (start, end)
+                };
+                let view_count = view_end - view_start;
                 let (wave, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width().max(260.), 70.),
                     egui::Sense::click_and_drag(),
                 );
                 let x_at = |frame: usize| {
-                    wave.left() + (frame.saturating_sub(start) as f32 / count as f32) * wave.width()
+                    wave.left()
+                        + ((frame as f32 - view_start as f32) / view_count as f32) * wave.width()
                 };
                 let frame_at = |x: f32| {
-                    start
-                        + (((x - wave.left()) / wave.width()) * count as f32)
+                    view_start
+                        + (((x - wave.left()) / wave.width()) * view_count as f32)
                             .floor()
-                            .clamp(0., (count - 1) as f32) as usize
+                            .clamp(0., (view_count - 1) as f32) as usize
                 };
                 let painter = ui.painter().with_clip_rect(wave);
                 painter.rect_filled(wave, 4., crate::themes::panel());
@@ -474,7 +484,13 @@ impl Editor {
                     crate::themes::accent().gamma_multiply(0.18),
                 );
                 for (i, peak) in session.waveform.iter().enumerate() {
-                    let x = wave.left() + (i as f32 / session.waveform.len() as f32) * wave.width();
+                    let frame =
+                        start as f32 + i as f32 * count as f32 / session.waveform.len() as f32;
+                    if frame < view_start as f32 || frame >= view_end as f32 {
+                        continue;
+                    }
+                    let x = wave.left()
+                        + (frame - view_start as f32) / view_count as f32 * wave.width();
                     let amplitude = f32::from(*peak) / 255. * 29.;
                     painter.line_segment(
                         [
@@ -489,7 +505,7 @@ impl Editor {
                 {
                     edit_frame = frame_at(pos.x);
                 }
-                if (start..end).contains(&edit_frame) {
+                if (view_start..view_end).contains(&edit_frame) {
                     let x = x_at(edit_frame);
                     painter.line_segment(
                         [egui::pos2(x, wave.top()), egui::pos2(x, wave.bottom())],
@@ -498,7 +514,10 @@ impl Editor {
                 }
                 let (lane, _) =
                     ui.allocate_exact_size(egui::vec2(wave.width(), 25.), egui::Sense::hover());
-                for key in keys.iter().filter(|key| (start..end).contains(&key.frame)) {
+                for key in keys
+                    .iter()
+                    .filter(|key| (view_start..view_end).contains(&key.frame))
+                {
                     let x = x_at(key.frame);
                     let pose = target.poses.get(key.pose).map_or("?", |p| p.name.as_str());
                     let rect = egui::Rect::from_min_size(

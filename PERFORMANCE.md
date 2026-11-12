@@ -273,3 +273,17 @@ La vista conserva hasta 32 texturas de fotogramas, con un presupuesto de 96 MiB 
 Medición local en Windows x64, perfil release, con los dos primeros fotogramas de DBGT-Rebuild-v1 a 1920 × 1080 y las luces activas. Preparar ambos llevó 3,07 s. Alternar entre sus texturas 100 veces llevó 0,42 ms de CPU en la prueba de interfaz, sin renderizados ni subidas de textura durante esa fase. No mide FPS en una ventana real, latencia de presentación ni el coste de fotogramas que aún no están en caché.
 
 Para repetirla, establece la variable `LIBRETOON_BENCHMARK_PROJECT` con la ruta del proyecto y ejecuta `cargo test --release --locked benchmark_dbgt_preview_cache -- --ignored --nocapture`.
+
+## Segunda iteración de rendimiento
+
+La preparación manual usa la vista de reproducción y admite la escena o la etiqueta activa. El límite de caché de fotogramas RGB en RAM es configurable entre 128 y 1024 MiB, con 256 MiB por defecto. Las texturas de fotogramas tienen un presupuesto separado de 96 MiB. Preparar una escena con pistas de vídeo queda fuera de esta ruta. El compositor conserva cachés acotadas de imágenes base, normales de relieve dependientes de alfa y prefijos de ajustes. Los relieves con mapa de altura o dependientes del color se recalculan. La selección y el bote descartan candidatos por sus límites antes de comprobar el contorno.
+
+El escritor nativo produce el ZIP directamente sobre el temporal, comprime más los metadatos y las teselas raster, y evita el intento de serialización antigua cuando las exposiciones ya superan el umbral por un límite inferior. La recuperación reutiliza la compresión de recursos idénticos y publica instantáneas completas. El cargador en segundo plano también restaura las pestañas sin sesión en memoria.
+
+Mediciones locales en Windows x64, perfil release, con DBGT-Rebuild-v1. Los primeros dos fotogramas Full HD se prepararon en 2,07 s frente a 3,07 s en la medición anterior. Los últimos cuatro tardaron 9,22 s con reutilización entre fotogramas frente a 11,95 s en la revisión anterior. El primer plano coincidió píxel a píxel con el PNG de referencia y los últimos cuatro coincidieron con renderizados sin caché previa. Los tiempos corresponden a ejecuciones individuales y no incluyen FPS de una ventana real.
+
+El proyecto pasó de 4.849.126 a 4.084.613 bytes y reabrió con los fotogramas y los recursos comprobados. Abrir y validar llevó 83 ms. Serializar y comprimir en memoria llevó 369 ms. Repetir la recuperación con la compresión de recursos ya preparada llevó 178 ms. Esas dos últimas cifras excluyen el tiempo de escritura y sincronización de disco.
+
+El prototipo WGPU de desenfoque de lente procesó una imagen sintética Full HD con 48 muestras. En una RTX 2060, CPU tardó 68,2 ms y GPU 11,4 ms con transferencias. La salida RGBA coincidió byte a byte. La integración interactiva en distintos adaptadores queda pendiente. Un ensayo de decodificación secuencial de vídeo con cadencia variable difirió de la búsqueda por fotograma en ocho de doce muestras con remuestreo fijo y en una de doce al seleccionar por PTS. La vista de vídeo reutiliza fotogramas ya decodificados y conserva la búsqueda original cuando falta una muestra.
+
+Pruebas manuales: `benchmark_dbgt_preview_cache` y `benchmark_dbgt_storage` con `LIBRETOON_BENCHMARK_PROJECT`, `benchmark_lit_camera_cache` con `LIBRETOON_CAMERA_FIXTURE` y una referencia PNG opcional en `LIBRETOON_REFERENCE_FRAME`, y `benchmark_gpu_lens_parity` para el ensayo de GPU. Ejecutar con `cargo test --release --locked <prueba> -- --ignored --nocapture`.

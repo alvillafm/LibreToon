@@ -88,6 +88,27 @@ pub(crate) struct Track {
     locked: bool,
 }
 
+impl Track {
+    fn replacement_fits(&self, old: u64, frames: usize) -> bool {
+        self.clips
+            .iter()
+            .filter(|clip| clip.asset == old)
+            .all(|clip| clip.offset.saturating_add(clip.length) <= frames)
+    }
+
+    fn replace_asset_reference(&mut self, old: u64, new: u64) {
+        if self.asset_use_count(old) > 0 {
+            for clip in self.clips.iter_mut().filter(|clip| clip.asset == old) {
+                clip.asset = new;
+            }
+        }
+    }
+
+    pub(crate) fn asset_use_count(&self, id: u64) -> usize {
+        self.clips.iter().filter(|clip| clip.asset == id).count()
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct MediaLibrary {
     pub(crate) assets: SharedVec<Asset>,
@@ -128,6 +149,7 @@ pub struct MediaEditor {
     )>,
     audio: AudioPreview,
     videos: std::collections::HashMap<u64, SceneVideoPreview>,
+    scene_video_cache: std::collections::VecDeque<CachedVideoSample>,
     selected_video: Option<u64>,
     waveform_cache: std::collections::HashMap<u64, SharedVec<u8>>,
     waveform_job: Option<std::sync::mpsc::Receiver<(u64, SharedVec<u8>)>>,
@@ -145,11 +167,53 @@ pub struct MediaEditor {
 
 #[derive(Default)]
 struct SceneVideoPreview {
-    request: Option<(u64, usize)>,
+    request: Option<VideoSampleKey>,
+    request_owner: Option<SharedVec<u8>>,
+    file_owner: Option<SharedVec<u8>>,
     job: Option<std::sync::mpsc::Receiver<Option<VideoFrame>>>,
     file: Option<(u64, StagedVideo)>,
     texture: Option<(u64, egui::TextureHandle)>,
     pixels: Option<std::sync::Arc<image::RgbaImage>>,
+    presented: Option<VideoSampleKey>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VideoSampleKey {
+    asset: u64,
+    frame: usize,
+    fps: u32,
+    data: usize,
+}
+
+struct CachedVideoSample {
+    key: VideoSampleKey,
+    _owner: SharedVec<u8>,
+    pixels: std::sync::Arc<image::RgbaImage>,
+}
+
+impl SceneVideoPreview {
+    fn present(
+        &mut self,
+        ctx: &egui::Context,
+        key: VideoSampleKey,
+        pixels: std::sync::Arc<image::RgbaImage>,
+    ) {
+        let size = [pixels.width() as usize, pixels.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+        self.pixels = Some(pixels);
+        self.presented = Some(key);
+        let id = key.asset;
+        if let Some((asset, texture)) = &mut self.texture
+            && *asset == id
+        {
+            texture.set(color, egui::TextureOptions::LINEAR);
+        } else {
+            self.texture = Some((
+                id,
+                ctx.load_texture("video-preview", color, egui::TextureOptions::LINEAR),
+            ));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -464,6 +528,111 @@ impl Editor {
         }
     }
 
+    pub(crate) fn media_replacement_choices(&self, old: u64) -> Vec<(u64, String)> {
+        if !self.feature.symbol_stack.is_empty() {
+            return Vec::new();
+        }
+        let assets = &self.doc.extras.media.assets;
+        let Some(source) = assets
+            .iter()
+            .find(|asset| asset.id == old && !asset.raster_tile)
+        else {
+            return Vec::new();
+        };
+        assets
+            .iter()
+            .filter(|asset| asset.id != old && !asset.raster_tile && asset.kind == source.kind)
+            .map(|asset| (asset.id, asset.name.clone()))
+            .collect()
+    }
+
+    pub(crate) fn replace_media_placements(&mut self, old: u64, new: u64) {
+        if !self
+            .media_replacement_choices(old)
+            .iter()
+            .any(|(id, _)| *id == new)
+        {
+            return;
+        }
+        let asset = self
+            .doc
+            .extras
+            .media
+            .assets
+            .iter()
+            .find(|asset| asset.id == new)
+            .unwrap();
+        if asset.kind != Kind::Image {
+            let available = (asset.seconds * f64::from(self.doc.fps)).ceil() as usize;
+            let tracks = self.doc.extras.media.tracks.iter().chain(
+                self.doc
+                    .extras
+                    .scenes
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != self.doc.extras.active_scene)
+                    .flat_map(|(_, scene)| scene.media_tracks.iter()),
+            );
+            if !tracks
+                .into_iter()
+                .all(|track| track.replacement_fits(old, available))
+            {
+                self.status = tr("Replacement media is too short for an existing clip.").into();
+                return;
+            }
+        }
+        fn images(
+            layers: &mut SharedVec<crate::document::Layer>,
+            old: u64,
+            new: u64,
+            cels: &mut std::collections::HashMap<usize, Option<SharedVec<crate::document::Mark>>>,
+        ) {
+            for layer in layers {
+                for cel in &mut layer.frames {
+                    let replacement = cels.entry(cel.identity()).or_insert_with(|| {
+                        if !cel.iter().any(|mark| mark.style.media_image == Some(old)) {
+                            return None;
+                        }
+                        let mut updated = cel.clone();
+                        for mark in updated
+                            .iter_mut()
+                            .filter(|mark| mark.style.media_image == Some(old))
+                        {
+                            mark.style.media_image = Some(new);
+                        }
+                        Some(updated)
+                    });
+                    if let Some(replacement) = replacement {
+                        *cel = replacement.clone();
+                    }
+                }
+            }
+        }
+        let image = asset.kind == Kind::Image;
+        self.checkpoint();
+        if image {
+            let mut cels = std::collections::HashMap::new();
+            images(&mut self.doc.layers, old, new, &mut cels);
+            for scene in &mut self.doc.extras.scenes {
+                images(&mut scene.layers, old, new, &mut cels);
+            }
+            for symbol in &mut self.doc.extras.symbols {
+                images(&mut symbol.layers, old, new, &mut cels);
+            }
+        } else {
+            for track in &mut self.doc.extras.media.tracks {
+                track.replace_asset_reference(old, new);
+            }
+            for scene in &mut self.doc.extras.scenes {
+                for track in &mut scene.media_tracks {
+                    track.replace_asset_reference(old, new);
+                }
+            }
+            self.restart_media_audio();
+        }
+        self.recover();
+    }
+
     pub(crate) fn delete_library_media(&mut self, id: u64) {
         fn references(doc: &crate::Document, id: u64) -> bool {
             let layers = |layers: &[crate::document::Layer]| {
@@ -606,7 +775,7 @@ impl Editor {
                             Some(file) => file,
                             None => StagedVideo::new(MediaFile::new(&asset.data).ok()?),
                         };
-                        let image = decode_video_file(&file, sample as f64 / 6., &ffmpeg)?;
+                        let image = decode_video_file(&file, sample as f64 / 6., &ffmpeg, true)?;
                         Some((id, file, image))
                     })();
                     let _ = send.send(result);
@@ -708,66 +877,94 @@ impl Editor {
             {
                 continue;
             }
+            let Some(asset) = library.assets.iter().find(|asset| asset.id == clip.asset) else {
+                continue;
+            };
+            let key = VideoSampleKey {
+                asset: clip.asset,
+                frame: clip.offset + frame - clip.start,
+                fps: self.doc.fps,
+                data: asset.data.identity(),
+            };
             let preview = self.media.videos.entry(track.id).or_default();
-            let current = Some((clip.asset, clip.offset + frame - clip.start));
+            let cache = &mut self.media.scene_video_cache;
             if let Some(job) = &preview.job {
                 match job.try_recv() {
                     Ok(result) => {
                         preview.job = None;
                         if let Some((id, file, image)) = result {
+                            let pixels = std::sync::Arc::new(image);
                             preview.file = Some((id, file));
-                            let size = [image.width() as usize, image.height() as usize];
-                            let color = egui::ColorImage::from_rgba_unmultiplied(size, &image);
-                            preview.pixels = Some(std::sync::Arc::new(image));
-                            preview.texture = Some((
-                                id,
-                                painter.ctx().load_texture(
-                                    "video-preview",
-                                    color,
-                                    egui::TextureOptions::LINEAR,
-                                ),
-                            ));
+                            preview.file_owner = preview.request_owner.clone();
+                            if let (Some(decoded), Some(owner)) =
+                                (preview.request, preview.request_owner.take())
+                            {
+                                let mut bytes = pixels.len()
+                                    + cache.iter().map(|frame| frame.pixels.len()).sum::<usize>();
+                                const LIMIT: usize = 48 * 1024 * 1024;
+                                if pixels.len() <= LIMIT {
+                                    while bytes > LIMIT || cache.len() >= 24 {
+                                        bytes -= cache.pop_front().unwrap().pixels.len();
+                                    }
+                                    cache.push_back(CachedVideoSample {
+                                        key: decoded,
+                                        _owner: owner,
+                                        pixels: pixels.clone(),
+                                    });
+                                }
+                            }
+                            if let Some(decoded) = preview.request {
+                                preview.present(painter.ctx(), decoded, pixels);
+                            }
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => preview.job = None,
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
             }
-            let Some((id, source)) = current else {
-                return;
-            };
-            if preview.job.is_none()
-                && preview.request != current
-                && let Some(asset) = library.assets.iter().find(|asset| asset.id == id)
-            {
-                let asset = asset.clone();
-                let time = source as f64 / self.doc.fps as f64;
-                let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
-                let (sender, receiver) = std::sync::mpsc::channel();
-                let ctx = painter.ctx().clone();
-                preview.job = Some(receiver);
-                preview.request = current;
-                let cached = preview
-                    .file
-                    .as_ref()
-                    .filter(|(file_id, _)| *file_id == id)
-                    .map(|(_, file)| file.clone());
-                std::thread::spawn(move || {
-                    let frame = (|| {
-                        let file = match cached {
-                            Some(file) => file,
-                            None => StagedVideo::new(MediaFile::new(&asset.data).ok()?),
-                        };
-                        let image = decode_video_file(&file, time, &ffmpeg)?;
-                        Some((id, file, image))
-                    })();
-                    let _ = sender.send(frame);
-                    ctx.request_repaint();
-                });
+            if preview.job.is_none() && preview.request != Some(key) {
+                preview.request = Some(key);
+                if let Some(index) = cache.iter().position(|sample| sample.key == key) {
+                    let sample = cache.remove(index).unwrap();
+                    preview.present(painter.ctx(), key, sample.pixels.clone());
+                    cache.push_back(sample);
+                } else {
+                    preview.request_owner = Some(asset.data.clone());
+                    let asset = asset.clone();
+                    let time = key.frame as f64 / key.fps as f64;
+                    let ffmpeg = crate::exporter::ffmpeg_path(&self.studio.prefs.ffmpeg);
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let ctx = painter.ctx().clone();
+                    preview.job = Some(receiver);
+                    let cached = preview
+                        .file
+                        .as_ref()
+                        .filter(|(id, _)| {
+                            *id == key.asset
+                                && preview
+                                    .file_owner
+                                    .as_ref()
+                                    .is_some_and(|owner| owner.identity() == key.data)
+                        })
+                        .map(|(_, file)| file.clone());
+                    std::thread::spawn(move || {
+                        let frame = (|| {
+                            let file = match cached {
+                                Some(file) => file,
+                                None => StagedVideo::new(MediaFile::new(&asset.data).ok()?),
+                            };
+                            let image = decode_video_file(&file, time, &ffmpeg, true)?;
+                            Some((key.asset, file, image))
+                        })();
+                        let _ = sender.send(frame);
+                        ctx.request_repaint();
+                    });
+                }
             }
 
             if let Some((preview_id, texture)) = &preview.texture
-                && *preview_id == id
+                && *preview_id == key.asset
+                && preview.presented == Some(key)
             {
                 let mark = transformed_video_mark(&self.doc, texture.size_vec2(), clip.transform);
                 let view = if depth_active {
@@ -2066,14 +2263,19 @@ pub(crate) fn image_mesh(
     Some(mesh)
 }
 
-fn decode_video_file(file: &MediaFile, time: f64, ffmpeg: &Path) -> Option<image::RgbaImage> {
+fn decode_video_file(
+    file: &MediaFile,
+    time: f64,
+    ffmpeg: &Path,
+    preview: bool,
+) -> Option<image::RgbaImage> {
     let mut command = Command::new(ffmpeg);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let output = command
+    command
         .args([
             "-hide_banner",
             "-loglevel",
@@ -2088,17 +2290,12 @@ fn decode_video_file(file: &MediaFile, time: f64, ffmpeg: &Path) -> Option<image
         .arg(format!("{time:.6}"))
         .arg("-i")
         .arg(&file.0)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=1280:720:force_original_aspect_ratio=decrease",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "pipe:1",
-        ])
+        .args(["-frames:v", "1"]);
+    if preview {
+        command.args(["-vf", "scale=1280:720:force_original_aspect_ratio=decrease"]);
+    }
+    let output = command
+        .args(["-f", "image2pipe", "-vcodec", "png", "pipe:1"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -2286,6 +2483,18 @@ fn overlaps(clip: &Clip, start: usize, length: usize) -> bool {
 }
 
 impl MediaLibrary {
+    pub(crate) fn video_intersects(&self, first: usize, last: usize) -> bool {
+        self.tracks.iter().any(|track| {
+            track.kind == Kind::Video
+                && !track.hidden
+                && track.clips.iter().any(|clip| {
+                    clip.length > 0
+                        && clip.start <= last
+                        && first < clip.start.saturating_add(clip.length)
+                })
+        })
+    }
+
     pub(crate) fn has_video_tracks(&self) -> bool {
         self.tracks.iter().any(|track| track.kind == Kind::Video)
     }
@@ -2384,9 +2593,14 @@ impl VideoExport {
                     }
                 };
                 let time = source as f64 / doc.fps as f64;
-                let image = decode_video_file(file, time, ffmpeg)
+                let image = decode_video_file(file, time, ffmpeg, false)
                     .or_else(|| {
-                        decode_video_file(file, (time - 0.5 / doc.fps as f64).max(0.), ffmpeg)
+                        decode_video_file(
+                            file,
+                            (time - 0.5 / doc.fps as f64).max(0.),
+                            ffmpeg,
+                            false,
+                        )
                     })
                     .ok_or_else(|| {
                         format!("Could not decode video {} at {time:.2}s", asset.name)
@@ -3150,6 +3364,72 @@ mod tests {
     }
 
     #[test]
+    fn replacing_library_audio_preserves_clip_timing_and_is_undoable() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        let old = imported_audio(test_wav(), "old.wav".into()).unwrap();
+        let new = imported_audio(test_wav(), "new.wav".into()).unwrap();
+        let (old_id, new_id) = (old.id, new.id);
+        let track = imported_sound_track("Dialogue".into(), vec![(&old, 3, 0, 3)], 24).unwrap();
+        let clip = track.clips[0].clone();
+        editor.doc.extras.media.assets.extend([old, new]);
+        editor.doc.extras.media.tracks.push(track);
+        editor.replace_media_placements(old_id, new_id);
+        let current = &editor.doc.extras.media.tracks[0].clips[0];
+        assert_eq!(current.asset, new_id);
+        assert_eq!(
+            (current.start, current.offset, current.length),
+            (clip.start, clip.offset, clip.length)
+        );
+        assert!(current.audio == clip.audio);
+        editor.history(false);
+        assert_eq!(editor.doc.extras.media.tracks[0].clips[0].asset, old_id);
+    }
+
+    #[test]
+    #[ignore = "requires configured FFmpeg"]
+    fn final_video_sample_preserves_native_resolution() {
+        let ffmpeg = crate::exporter::ffmpeg_path("");
+        let fixture = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=1920x1080",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "ffv1",
+                "-f",
+                "matroska",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            fixture.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fixture.stderr)
+        );
+        let file = MediaFile::new(&fixture.stdout).unwrap();
+        let preview = decode_video_file(&file, 0., &ffmpeg, true).unwrap();
+        let export = decode_video_file(&file, 0., &ffmpeg, false).unwrap();
+        assert_eq!(preview.dimensions(), (1280, 720));
+        assert_eq!(export.dimensions(), (1920, 1080));
+        for (preview, export) in preview
+            .get_pixel(500, 500)
+            .0
+            .into_iter()
+            .zip(export.get_pixel(500, 500).0)
+        {
+            assert!(preview.abs_diff(export) <= 1);
+        }
+    }
+
+    #[test]
     #[ignore = "requires configured FFmpeg"]
     fn media_decodes_video_and_builds_audio_mix() {
         let ffmpeg = crate::exporter::ffmpeg_path("");
@@ -3315,7 +3595,7 @@ fn show_preview(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
 }
 
 impl Editor {
-    pub(crate) fn depth_video_frames(&self, use_camera: bool) -> Vec<ExportVideoFrame> {
+    pub(crate) fn depth_video_frames(&self, use_camera: bool) -> Option<Vec<ExportVideoFrame>> {
         let mut result = vec![];
         for (track, clip) in self
             .doc
@@ -3323,12 +3603,35 @@ impl Editor {
             .media
             .active_videos(self.frame, self.doc.layers.len())
         {
-            if let Some(pixels) = self
+            if use_camera
+                && crate::depth::camera(&self.doc, self.frame).is_some_and(|camera| {
+                    !crate::depth::visible(
+                        &track.depth,
+                        &crate::animation::camera_optics(camera, self.frame),
+                    )
+                })
+            {
+                continue;
+            }
+            let asset = self
+                .doc
+                .extras
+                .media
+                .assets
+                .iter()
+                .find(|asset| asset.id == clip.asset)?;
+            let key = VideoSampleKey {
+                asset: clip.asset,
+                frame: clip.offset + self.frame - clip.start,
+                fps: self.doc.fps,
+                data: asset.data.identity(),
+            };
+            let preview = self
                 .media
                 .videos
                 .get(&track.id)
-                .and_then(|v| v.pixels.clone())
-            {
+                .filter(|preview| preview.presented == Some(key))?;
+            if let Some(pixels) = preview.pixels.clone() {
                 let mut mark = transformed_video_mark(
                     &self.doc,
                     Vec2::new(pixels.width() as f32, pixels.height() as f32),
@@ -3360,7 +3663,7 @@ impl Editor {
             }
         }
         result.sort_by_key(|c| c.slot);
-        result
+        Some(result)
     }
     pub(crate) fn video_depth_rows(&self) -> Vec<(usize, String, crate::depth::LayerDepth)> {
         self.doc

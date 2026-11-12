@@ -154,6 +154,43 @@ impl Default for Document {
 }
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
+        if !crate::palette::valid_main_palettes(&self.extras.main_palettes) {
+            return Err("Invalid main palette".into());
+        }
+        if self.extras.palette.len() > 256
+            || self
+                .extras
+                .palette
+                .iter()
+                .any(|swatch| swatch.name.len() > 256)
+        {
+            return Err("Invalid linked palette".into());
+        }
+        if self.extras.rig_poses.len() > 100
+            || self.extras.rig_poses.iter().any(|pose| {
+                let mut ids = std::collections::HashSet::new();
+                pose.name.is_empty()
+                    || pose.name.len() > 256
+                    || pose.bones.is_empty()
+                    || pose.bones.len() > 128
+                    || pose.bones.iter().any(|(id, key)| {
+                        *id == 0
+                            || !ids.insert(*id)
+                            || key.frame >= 10000
+                            || !key.angle.is_finite()
+                            || key.angle.abs() > 1e7
+                            || key
+                                .translation
+                                .iter()
+                                .any(|v| !v.is_finite() || v.abs() > 1e7)
+                            || !(0.01..=100.).contains(&key.scale)
+                            || !(0.1..=10.).contains(&key.stretch)
+                            || !key.curve.valid()
+                    })
+            })
+        {
+            return Err("Invalid saved rig pose".into());
+        }
         crate::features::validate(self)?;
         self.extras.media.validate(&self.extras.scenes)?;
         if self.version != 1

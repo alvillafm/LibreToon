@@ -310,6 +310,13 @@ impl Editor {
         {
             return None;
         }
+        self.active_tag_range()
+    }
+
+    pub(crate) fn active_tag_range(&self) -> Option<(usize, usize)> {
+        if !self.feature.symbol_stack.is_empty() {
+            return None;
+        }
         let count = self.doc.layers[0].frames.len();
         let tags = &self.doc.extras.tags;
         let tag = tags
