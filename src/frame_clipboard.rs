@@ -164,6 +164,9 @@ impl Remap {
     }
     fn rig(&mut self, rig: &crate::rig::Rig) -> crate::rig::Rig {
         let mut out = rig.clone();
+        out.character_symbol = out
+            .character_symbol
+            .and_then(|id| self.symbols.get(&id).copied());
         for bone in &mut out.bones {
             bone.id = mapped(&mut self.bones, bone.id);
             bone.parent = bone.parent.map(|id| mapped(&mut self.bones, id));
@@ -202,6 +205,12 @@ impl Remap {
             folder.parent = folder.parent.map(|p| mapped(&mut self.folders, p));
         }
         for layer in &mut out.layers {
+            if let Some(piece) = &mut layer.options.character_piece {
+                piece.remap(
+                    |id| mapped(&mut self.tracks, id),
+                    |id| mapped(&mut self.bones, id),
+                );
+            }
             layer.options.folder = layer.options.folder.map(|f| mapped(&mut self.folders, f));
             layer.frames = layer.frames.iter().map(|frame| self.frame(frame)).collect();
         }

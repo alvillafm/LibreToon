@@ -15,4 +15,8 @@ Turns blend the rig's bone transforms. Draw separate view artwork when the silho
 
 ## Lip sync
 
+For a turning character, bind the Lip Sync symbol to the head rig before opening **Bones → Set Up Character**. Select the mouth row and an angle, then open **Face artwork** and choose a mouth pose. Draw that pose for the selected angle. The dialogue keys continue to select the sound pose as the character turns. If an angle has no matching drawing, LibreToon looks for the same mouth pose in the closest available view, then uses the original Lip Sync symbol.
+
+Use **Face artwork** to mark separate eye and brow pieces and draw their variants for each angle. Back on the stage, **Bones → Face Controls** sets or removes expression keys at the playhead. In Character Setup, the onion-skin button and its two range controls show earlier and later angles for the variant you are editing.
+
 Create a Lip Sync symbol and draw its mouth poses. Add a dialogue clip, then open its right-click lip sync command and choose the intended symbol instance. Review and edit the generated mouth keys on the timeline.

@@ -352,11 +352,25 @@ impl Editor {
                 .flat_map(|l| l.frames.iter().flatten())
                 .any(|m| m.style.instance.as_ref().is_some_and(|i| i.symbol == id))
         };
-        self.doc
-            .extras
-            .animation_clips
-            .iter()
-            .any(|clip| clip.symbol == id)
+        self.doc.extras.rig.character_symbol == Some(id)
+            || self
+                .doc
+                .extras
+                .scenes
+                .iter()
+                .any(|scene| scene.rig.character_symbol == Some(id))
+            || self
+                .doc
+                .extras
+                .symbols
+                .iter()
+                .any(|symbol| symbol.rig.character_symbol == Some(id))
+            || self
+                .doc
+                .extras
+                .animation_clips
+                .iter()
+                .any(|clip| clip.symbol == id)
             || references(&self.doc.layers)
             || self
                 .doc

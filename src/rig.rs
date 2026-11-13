@@ -53,6 +53,8 @@ fn identity(m: Matrix) -> bool {
 pub struct Rig {
     pub bones: SharedVec<Bone>,
     pub bindings: SharedVec<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) character_symbol: Option<u64>,
     #[serde(skip_serializing_if = "CharacterTurns::is_empty")]
     pub(crate) character_turns: CharacterTurns,
 }
@@ -98,6 +100,31 @@ pub(crate) struct TurnChannel {
 pub(crate) struct TurnKey {
     pub frame: usize,
     pub value: f32,
+}
+
+impl Rig {
+    pub(crate) fn character_angle(&self, track: u64, frame: usize) -> Option<usize> {
+        self.character_symbol?;
+        let turns = &self.character_turns;
+        let affects = |root| {
+            self.pose_branch(root, None).into_iter().any(|id| {
+                self.bones
+                    .iter()
+                    .any(|bone| bone.id == id && bone.targets.contains(&track))
+            })
+        };
+        let body = turns
+            .body
+            .root
+            .filter(|&root| affects(root))
+            .map_or(0., |_| turns.body.value(frame));
+        let head = turns
+            .head
+            .root
+            .filter(|&root| affects(root))
+            .map_or(0., |_| turns.head.value(frame));
+        Some(((body + head).round() as i32).rem_euclid(8) as usize)
+    }
 }
 
 impl TurnChannel {
@@ -784,7 +811,7 @@ impl Rig {
                 || channel
                     .keys
                     .iter()
-                    .any(|key| key.frame >= 10000 || !(-2.0..=2.0).contains(&key.value))
+                    .any(|key| key.frame >= 10000 || !(-4.0..=4.0).contains(&key.value))
                 || channel.views.iter().flatten().any(|pose| {
                     pose.name.len() > 256
                         || pose.bones.len() > 128

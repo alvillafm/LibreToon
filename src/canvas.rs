@@ -738,6 +738,7 @@ impl Editor {
             );
             self.studio.color_picker = None;
         }
+        let character_bones = self.character_bone_input(ui, &painter, area, view);
         let visual_handled =
             !picker_click && self.visual_canvas_input(ui, area, view, &state.selected);
         let mut guide_handled = if picker_click
@@ -753,6 +754,7 @@ impl Editor {
                         | Tool::Object
                         | Tool::Transform
                 ))
+            || character_bones
             || light_input
             || trim_input
             || folder_input
@@ -2086,10 +2088,7 @@ impl Editor {
         ));
         self.paint_grid(&painter, area, view);
         if self.onion && !self.playing && !self.animation.frame_workflow.tracing() {
-            let count = self.doc.layers[0].frames.len();
-            for f in self.frame.saturating_sub(self.studio.onion_before)
-                ..(self.frame + self.studio.onion_after + 1).min(count)
-            {
+            for f in self.onion_frames() {
                 if f == self.frame {
                     continue;
                 }

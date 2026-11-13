@@ -9,6 +9,7 @@ mod appearance_tests;
 mod brush;
 mod bucket;
 mod canvas;
+mod character;
 #[cfg(test)]
 mod compat_tests;
 mod depth;

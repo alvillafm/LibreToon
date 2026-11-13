@@ -71,6 +71,9 @@ pub(crate) fn default_poses(frame_count: usize) -> SharedVec<Pose> {
 }
 
 impl Pose {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
     pub fn valid(&self) -> bool {
         !self.name.is_empty() && self.name.len() <= 48
     }

@@ -58,6 +58,8 @@ pub struct RigEditor {
     pub strength: f32,
     pub timing: Option<usize>,
     character_setup: bool,
+    pub(crate) edit_character_bones: bool,
+    pub(crate) preview_character_pose: bool,
     turn_drag: Option<(bool, f32, f32)>,
     drag: Option<Gesture>,
 }
@@ -82,6 +84,8 @@ impl Default for RigEditor {
             strength: 0.35,
             timing: None,
             character_setup: false,
+            edit_character_bones: false,
+            preview_character_pose: false,
             turn_drag: None,
             drag: None,
         }
@@ -585,9 +589,13 @@ impl Editor {
             let Some(pose) = channel.root.and_then(|id| poses.get(&id)) else {
                 continue;
             };
-            if channel.views[2].is_none() || channel.views.iter().flatten().count() < 2 {
+            let character = rig.character_symbol.is_some();
+            if !character
+                && (channel.views[2].is_none() || channel.views.iter().flatten().count() < 2)
+            {
                 continue;
             }
+            let spacing = if character { 9.5 } else { 19. };
             let center = view.screen(pose.start) + Vec2::new(0., if head { -24. } else { 24. });
             let rect = Rect::from_center_size(center, Vec2::new(90., 22.));
             let response = ui
@@ -611,19 +619,22 @@ impl Editor {
                 [center - Vec2::X * 38., center + Vec2::X * 38.],
                 Stroke::new(1., color),
             );
-            for (i, pose) in channel.views.iter().enumerate() {
-                if pose.is_some() {
-                    painter.circle_filled(center + Vec2::X * (i as f32 - 2.) * 19., 2.5, color);
+            let range = if character { 4 } else { 2 };
+            for i in -range..=range {
+                if character || channel.views[(i + 2) as usize].is_some() {
+                    painter.circle_filled(center + Vec2::X * i as f32 * spacing, 2.5, color);
                 }
             }
-            painter.circle_filled(center + Vec2::X * channel.value(frame) * 19., 5., color);
+            painter.circle_filled(center + Vec2::X * channel.value(frame) * spacing, 5., color);
             consumed |= response.is_pointer_button_down_on();
             if let Some(pointer) = response.interact_pointer_pos() {
                 if response.clicked() {
-                    let raw = (pointer.x - center.x) / 19.;
+                    let raw = (pointer.x - center.x) / spacing;
                     let index = (raw.round() as i32 + 2).clamp(0, 4) as usize;
                     let view = index as f32 - 2.;
-                    let value = if channel.views[index].is_some() && (view - raw).abs() < 0.25 {
+                    let value = if character {
+                        raw.round()
+                    } else if channel.views[index].is_some() && (view - raw).abs() < 0.25 {
                         view
                     } else {
                         raw
@@ -637,7 +648,7 @@ impl Editor {
                 {
                     edit = Some((
                         head,
-                        value + (pointer.x - start) / 19.,
+                        value + (pointer.x - start) / spacing,
                         false,
                         response.drag_stopped(),
                     ));
@@ -649,12 +660,17 @@ impl Editor {
                 self.checkpoint();
             }
             let turns = &mut self.doc.extras.rig.character_turns;
+            let limit = if self.doc.extras.rig.character_symbol.is_some() {
+                4.
+            } else {
+                2.
+            };
             let channel = if head {
                 &mut turns.head
             } else {
                 &mut turns.body
             };
-            channel.set(frame, value.clamp(-2., 2.));
+            channel.set(frame, value.clamp(-limit, limit));
             if end {
                 self.rigging.turn_drag = None;
                 self.recover();
@@ -1328,9 +1344,22 @@ impl Editor {
             )
             .clicked()
             {
-                self.rigging.character_setup = true;
+                self.open_character_symbol();
+            }
+            if design::button(
+                ui,
+                Icon::Rotate,
+                "Turn controls",
+                "",
+                self.rigging.character_setup,
+                true,
+            )
+            .clicked()
+            {
+                self.rigging.character_setup ^= true;
             }
             self.character_setup(ui.ctx(), rig_frame);
+            self.face_controls(ui);
         }
         design::category(ui, "JERARQUÍA");
         let bones = self.doc.extras.rig.bones.clone();

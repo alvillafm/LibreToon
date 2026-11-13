@@ -945,6 +945,10 @@ impl Editor {
             .max_size(700.)
             .resizable(true)
             .show(ui, |ui| {
+                if self.in_character_symbol() {
+                    self.character_timeline(ui);
+                    return;
+                }
                 let viewport_id = ui.scope_id().with("timeline-viewport");
                 let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
                 let previous_cell = viewport.cell;

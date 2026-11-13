@@ -966,6 +966,13 @@ impl Editor {
                     });
                 });
             });
+        if self.in_character_symbol() {
+            egui::Panel::top("character-symbol-tools")
+                .exact_size(32.)
+                .show(ui, |ui| {
+                    self.character_toolbar(ui);
+                });
+        }
         if !ctx.egui_wants_keyboard_input()
             && !self.animation.scenes_open
             && self.animation.picker.is_none()

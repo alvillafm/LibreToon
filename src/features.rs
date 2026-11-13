@@ -203,6 +203,8 @@ impl ObjectFolder {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayerOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) character_piece: Option<crate::character::Piece>,
     pub composition: crate::folder_groups::LayerGroup,
     pub animation_track: bool,
     pub raster: bool,
@@ -242,6 +244,7 @@ pub struct LayerOptions {
 impl Default for LayerOptions {
     fn default() -> Self {
         Self {
+            character_piece: None,
             composition: Default::default(),
             animation_track: false,
             raster: false,
@@ -631,22 +634,45 @@ fn expand(
             .iter()
             .find(|b| b.target == mark.style.track && b.symbol == instance.symbol);
         let deform = binding.map(|b| crate::rig::Deformer::new(b, poses, parent_frame));
-        for (_, _, mut m) in resolve_internal(
-            &sub,
-            frame,
-            depth + 1,
-            guides,
-            if mark.style.animation_clip.is_some() {
-                frame
-            } else {
-                clock
-                    .saturating_sub(instance.born)
-                    .saturating_add(instance.first)
-            },
-            mouth.as_ref(),
-            surfaces,
-            piece,
-        ) {
+        let replacement = crate::character::artwork(
+            doc,
+            mark.style.track,
+            parent_frame,
+            (!symbol.mouth_poses.is_empty()).then_some(frame),
+        );
+        let resolved = if let Some((layers, view)) = replacement {
+            sub.layers = layers;
+            sub.extras.rig = Default::default();
+            sub.extras.folders = Default::default();
+            resolve_internal(
+                &sub,
+                view,
+                depth + 1,
+                guides,
+                clock,
+                mouth.as_ref(),
+                surfaces,
+                piece,
+            )
+        } else {
+            resolve_internal(
+                &sub,
+                frame,
+                depth + 1,
+                guides,
+                if mark.style.animation_clip.is_some() {
+                    frame
+                } else {
+                    clock
+                        .saturating_sub(instance.born)
+                        .saturating_add(instance.first)
+                },
+                mouth.as_ref(),
+                surfaces,
+                piece,
+            )
+        };
+        for (_, _, mut m) in resolved {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
             }
@@ -715,9 +741,26 @@ fn resolve_internal(
         }
         let folder = crate::folder_groups::layer_matrix(doc, layer);
         let rig_frame = crate::folder_groups::rig_frame(doc, layer, frame);
+        let character_poses = |frame| {
+            let rig = &doc.extras.rig;
+            let joints = crate::character::view_joints(doc, rig, frame);
+            if joints.is_empty() {
+                return rig.poses(frame);
+            }
+            let mut rig = rig.clone();
+            for bone in &mut rig.bones {
+                if let Some((_, [start, end])) = joints.iter().find(|(id, _)| *id == bone.id)
+                    && crate::vector::pos(*start).distance(crate::vector::pos(*end)) > 0.01
+                {
+                    bone.start = *start;
+                    bone.end = *end;
+                }
+            }
+            rig.poses(frame)
+        };
         let poses = pose_cache
             .entry(rig_frame)
-            .or_insert_with(|| doc.extras.rig.poses(rig_frame));
+            .or_insert_with(|| character_poses(rig_frame));
         let mut current = vec![];
         let mask = if let Some(id) = layer.options.masked_by {
             let source = explicit_masks.entry(id).or_insert_with(|| {
@@ -728,7 +771,7 @@ fn resolve_internal(
                 let mut marks = Vec::new();
                 if crate::folder_groups::layer_active(doc, source, frame) {
                     let rig_frame = crate::folder_groups::rig_frame(doc, source, frame);
-                    let poses = doc.extras.rig.poses(rig_frame);
+                    let poses = character_poses(rig_frame);
                     for mark in
                         crate::animation::marks(source, frame.min(source.frames.len() - 1)).iter()
                     {
@@ -768,10 +811,19 @@ fn resolve_internal(
             None
         };
         let first_output = output.len();
-        for (m, mark) in crate::animation::marks(layer, frame.min(layer.frames.len() - 1))
-            .iter()
-            .enumerate()
-        {
+        let marks = crate::animation::marks(layer, frame.min(layer.frames.len() - 1));
+        let mut arranged = Vec::new();
+        let natural = marks.iter().enumerate();
+        let ordered: &mut dyn Iterator<Item = (usize, &Mark)> =
+            if doc.extras.rig.character_symbol.is_some() {
+                arranged.extend(natural);
+                arranged
+                    .sort_by_cached_key(|(_, mark)| crate::character::order(doc, mark, rig_frame));
+                &mut arranged.drain(..)
+            } else {
+                &mut marks.iter().enumerate()
+            };
+        for (m, mark) in ordered {
             if !object_visible(layer, mark, frame) {
                 continue;
             }
@@ -1104,6 +1156,13 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         let count = symbol.layers[0].frames.len();
         if count == 0 || count > 10000 || symbol.layers.iter().any(|l| l.frames.len() != count) {
             return Err("Invalid symbol timeline".into());
+        }
+        if symbol.layers.iter().any(|layer| {
+            layer.options.character_piece.as_ref().is_some_and(|piece| {
+                !matches!(count, 8 | crate::character::FACE_FRAMES) || !piece.valid()
+            })
+        }) {
+            return Err("Invalid character view".into());
         }
     }
     Ok(())
