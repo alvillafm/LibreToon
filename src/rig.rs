@@ -53,11 +53,175 @@ fn identity(m: Matrix) -> bool {
 pub struct Rig {
     pub bones: SharedVec<Bone>,
     pub bindings: SharedVec<Binding>,
+    #[serde(skip_serializing_if = "CharacterTurns::is_empty")]
+    pub(crate) character_turns: CharacterTurns,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CharacterTurns {
+    pub head: TurnChannel,
+    pub body: TurnChannel,
+}
+
+impl CharacterTurns {
+    fn is_empty(&self) -> bool {
+        self.head.root.is_none() && self.body.root.is_none()
+    }
+    pub(crate) fn identity(&self) -> [usize; 14] {
+        let mut ids = [0; 14];
+        for (channel, slots) in [&self.head, &self.body]
+            .into_iter()
+            .zip(ids.chunks_exact_mut(7))
+        {
+            slots[0] = channel.root.unwrap_or_default() as usize;
+            slots[1] = channel.keys.identity();
+            for (slot, view) in slots[2..].iter_mut().zip(&channel.views) {
+                *slot = view
+                    .as_ref()
+                    .map_or(0, |view| std::sync::Arc::as_ptr(view) as usize);
+            }
+        }
+        ids
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct TurnChannel {
+    pub root: Option<u64>,
+    pub views: [Option<std::sync::Arc<SavedPose>>; 5],
+    pub keys: SharedVec<TurnKey>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct TurnKey {
+    pub frame: usize,
+    pub value: f32,
+}
+
+impl TurnChannel {
+    pub fn value(&self, frame: usize) -> f32 {
+        let index = self.keys.partition_point(|key| key.frame <= frame);
+        let Some(a) = index.checked_sub(1).and_then(|i| self.keys.get(i)) else {
+            return 0.;
+        };
+        self.keys.get(index).map_or(a.value, |b| {
+            a.value + (b.value - a.value) * (frame - a.frame) as f32 / (b.frame - a.frame) as f32
+        })
+    }
+
+    pub fn set(&mut self, frame: usize, value: f32) {
+        if self.keys.is_empty() && frame != 0 {
+            self.keys.push(TurnKey {
+                frame: 0,
+                value: 0.,
+            });
+        }
+        match self.keys.binary_search_by_key(&frame, |key| key.frame) {
+            Ok(index) => self.keys[index].value = value,
+            Err(index) => self.keys.insert(index, TurnKey { frame, value }),
+        }
+    }
+
+    fn offsets(&self, branch: Vec<u64>, frame: usize, output: &mut HashMap<u64, BoneKey>) {
+        let Some(neutral) = &self.views[2] else {
+            return;
+        };
+        let value = self.value(frame) + 2.;
+        let mut views = self
+            .views
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.as_ref().map(|p| (i as f32, p)));
+        let Some(mut left) = views.next() else { return };
+        let mut right = left;
+        for view in views {
+            if value <= right.0 {
+                break;
+            }
+            left = right;
+            right = view;
+        }
+        let blend = if right.0 == left.0 {
+            0.
+        } else {
+            ((value - left.0) / (right.0 - left.0)).clamp(0., 1.)
+        };
+        for (id, base) in &neutral.bones {
+            if !branch.contains(id) {
+                continue;
+            }
+            let at = |pose: &SavedPose| {
+                pose.bones
+                    .iter()
+                    .find(|(bone, _)| bone == id)
+                    .map(|(_, key)| key.clone())
+                    .unwrap_or_else(|| base.clone())
+            };
+            let mut offset =
+                blend_pose_key(&at(left.1), &at(right.1), BoneKey::default(), frame, blend);
+            offset.angle = (offset.angle - base.angle + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            for axis in 0..2 {
+                offset.translation[axis] -= base.translation[axis];
+            }
+            offset.scale /= base.scale;
+            offset.stretch /= base.stretch;
+            output.insert(*id, offset);
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SavedPose {
     pub(crate) name: String,
     pub(crate) bones: Vec<(u64, BoneKey)>,
+}
+
+pub(crate) fn blend_pose_key(
+    from: &BoneKey,
+    to: &BoneKey,
+    mut key: BoneKey,
+    frame: usize,
+    blend: f32,
+) -> BoneKey {
+    let mix = |a: f32, b: f32| a + (b - a) * blend;
+    let turn = (to.angle - from.angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    key.frame = frame;
+    key.angle = from.angle + turn * blend;
+    key.translation = std::array::from_fn(|axis| mix(from.translation[axis], to.translation[axis]));
+    key.scale = mix(from.scale, to.scale);
+    key.stretch = mix(from.stretch, to.stretch);
+    key
+}
+
+impl Rig {
+    fn turn_offsets(&self, frame: usize) -> HashMap<u64, BoneKey> {
+        let turns = &self.character_turns;
+        let mut offsets = HashMap::new();
+        for (channel, excluded) in [(&turns.body, turns.head.root), (&turns.head, None)] {
+            if let Some(root) = channel.root {
+                channel.offsets(self.pose_branch(root, excluded), frame, &mut offsets);
+            }
+        }
+        offsets
+    }
+    /// Includes the root while stopping at an optional independently posed branch.
+    pub(crate) fn pose_branch(&self, root: u64, excluded: Option<u64>) -> Vec<u64> {
+        let mut branch = vec![root];
+        let mut cursor = 0;
+        while let Some(&parent) = branch.get(cursor) {
+            for bone in self.bones.iter().filter(|bone| bone.parent == Some(parent)) {
+                if Some(bone.id) != excluded && !branch.contains(&bone.id) {
+                    branch.push(bone.id);
+                }
+            }
+            cursor += 1;
+        }
+        branch
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -300,6 +464,14 @@ impl Rig {
             key.frame = 0;
             b.keys = vec![key].into();
         }
+        for channel in [
+            &mut result.character_turns.head,
+            &mut result.character_turns.body,
+        ] {
+            let value = channel.value(frame);
+            channel.keys.clear();
+            channel.set(0, value);
+        }
         for b in &mut result.bindings {
             for p in &mut b.pins {
                 p.keys = vec![PinKey {
@@ -313,6 +485,12 @@ impl Rig {
         result
     }
     pub fn trim_keys(&mut self, count: usize) {
+        for channel in [
+            &mut self.character_turns.head,
+            &mut self.character_turns.body,
+        ] {
+            channel.keys.retain(|key| key.frame < count);
+        }
         for b in &mut self.bones {
             b.keys.retain(|k| k.frame < count);
         }
@@ -332,6 +510,7 @@ impl Rig {
             lookup: &HashMap<u64, usize>,
             cache: &mut HashMap<u64, Pose>,
             visiting: &mut HashSet<u64>,
+            turns: &HashMap<u64, BoneKey>,
             frame: usize,
         ) -> Option<Pose> {
             let b = &rig.bones[index];
@@ -344,8 +523,16 @@ impl Rig {
             let parent = b
                 .parent
                 .and_then(|id| lookup.get(&id))
-                .and_then(|&i| solve(i, rig, lookup, cache, visiting, frame));
-            let value = bone_value(b, frame);
+                .and_then(|&i| solve(i, rig, lookup, cache, visiting, turns, frame));
+            let mut value = bone_value(b, frame);
+            if let Some(offset) = turns.get(&b.id) {
+                value.angle += offset.angle;
+                for axis in 0..2 {
+                    value.translation[axis] += offset.translation[axis];
+                }
+                value.scale = (value.scale * offset.scale).clamp(0.01, 100.);
+                value.stretch = (value.stretch * offset.stretch).clamp(0.1, 10.);
+            }
             let rest = vector::pos(b.start);
             let rest_angle = (vector::pos(b.end) - rest).angle();
             let angle = rest_angle
@@ -414,8 +601,9 @@ impl Rig {
             .collect();
         let mut cache = HashMap::new();
         let mut visiting = HashSet::new();
+        let turns = self.turn_offsets(frame);
         for i in 0..self.bones.len() {
-            solve(i, self, &lookup, &mut cache, &mut visiting, frame);
+            solve(i, self, &lookup, &mut cache, &mut visiting, &turns, frame);
         }
         cache
     }
@@ -551,6 +739,19 @@ impl Rig {
         }
     }
     pub fn remove_bone(&mut self, id: u64) {
+        for channel in [
+            &mut self.character_turns.head,
+            &mut self.character_turns.body,
+        ] {
+            if channel.root == Some(id) {
+                channel.root = None;
+            }
+            for pose in channel.views.iter_mut().flatten() {
+                std::sync::Arc::make_mut(pose)
+                    .bones
+                    .retain(|(bone, _)| *bone != id);
+            }
+        }
         let parent = self
             .bones
             .iter()
@@ -577,6 +778,27 @@ impl Rig {
             return Err("Rig exceeds resource limits".into());
         }
         let finite = |v: f32| v.is_finite() && v.abs() <= 1e7;
+        for channel in [&self.character_turns.head, &self.character_turns.body] {
+            if channel.keys.len() > 10000
+                || channel.keys.windows(2).any(|w| w[0].frame >= w[1].frame)
+                || channel
+                    .keys
+                    .iter()
+                    .any(|key| key.frame >= 10000 || !(-2.0..=2.0).contains(&key.value))
+                || channel.views.iter().flatten().any(|pose| {
+                    pose.name.len() > 256
+                        || pose.bones.len() > 128
+                        || pose.bones.iter().any(|(_, key)| {
+                            !finite(key.angle)
+                                || key.translation.iter().any(|v| !finite(*v))
+                                || !(0.01..=100.).contains(&key.scale)
+                                || !(0.1..=10.).contains(&key.stretch)
+                        })
+                })
+            {
+                return Err("Invalid character turn".into());
+            }
+        }
         let mut ids = HashSet::new();
         for b in &self.bones {
             if b.id == 0

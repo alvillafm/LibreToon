@@ -14,6 +14,8 @@
 
 ## Features
 
+Read the [LibreToon User Manual](https://alvillafm.github.io/LibreToon/) or browse its [source chapters](manual/index.md).
+
 ### Drawing & Color
 
 - Draw with the **Classic Brush**, **Advanced Vector Brush**, and **Raster Brush**. Edit vector curves with the Pen and Node tools, and use raster brush presets with hardness and opacity controls.

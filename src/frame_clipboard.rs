@@ -183,6 +183,14 @@ impl Remap {
                 pin.id = mapped(&mut self.pins, pin.id);
             }
         }
+        for channel in [&mut out.character_turns.head, &mut out.character_turns.body] {
+            channel.root = channel.root.map(|id| mapped(&mut self.bones, id));
+            for pose in channel.views.iter_mut().flatten() {
+                for (id, _) in &mut std::sync::Arc::make_mut(pose).bones {
+                    *id = mapped(&mut self.bones, *id);
+                }
+            }
+        }
         out
     }
     fn symbol(&mut self, symbol: &Symbol) -> Symbol {

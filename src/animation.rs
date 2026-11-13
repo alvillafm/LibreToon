@@ -252,6 +252,7 @@ pub struct State {
     pub(crate) tag_drag: Option<crate::dialogue::TagDrag>,
     pub(crate) space_press: Option<(f64, bool)>,
     pub(crate) exposure_sheet: bool,
+    pub(crate) rig_channels_open: bool,
     pub(crate) frame_workflow: crate::frame_workflow::State,
     pub scenes_open: bool,
     pub scene_rename: Option<u64>,

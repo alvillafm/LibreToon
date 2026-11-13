@@ -57,6 +57,8 @@ pub struct RigEditor {
     pub radius: f32,
     pub strength: f32,
     pub timing: Option<usize>,
+    character_setup: bool,
+    turn_drag: Option<(bool, f32, f32)>,
     drag: Option<Gesture>,
 }
 impl RigEditor {
@@ -79,6 +81,8 @@ impl Default for RigEditor {
             radius: 40.,
             strength: 0.35,
             timing: None,
+            character_setup: false,
+            turn_drag: None,
             drag: None,
         }
     }
@@ -393,8 +397,287 @@ impl Editor {
             }
         }
     }
-    pub fn rig_input(&mut self, ui: &egui::Ui, area: Rect, view: View) -> bool {
+    fn character_setup(&mut self, ctx: &egui::Context, frame: usize) {
+        if !self.rigging.character_setup {
+            return;
+        }
+        let rig = &self.doc.extras.rig;
+        let mut draft = rig.character_turns.clone();
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new(tr("Character Setup"))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(tr("Assign saved rig poses to the front and side views."));
+                for (title, channel) in [
+                    ("Head turn", &mut draft.head),
+                    ("Body turn", &mut draft.body),
+                ] {
+                    egui::CollapsingHeader::new(tr(title))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            egui::ComboBox::from_id_salt("root")
+                                .selected_text(
+                                    rig.bones
+                                        .iter()
+                                        .find(|bone| Some(bone.id) == channel.root)
+                                        .map_or(tr("Choose root bone"), |bone| bone.name.as_str()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    changed |= ui
+                                        .selectable_value(&mut channel.root, None, tr("None"))
+                                        .changed();
+                                    for bone in &rig.bones {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut channel.root,
+                                                Some(bone.id),
+                                                &bone.name,
+                                            )
+                                            .changed();
+                                    }
+                                });
+                            for (slot, label) in [
+                                "Left profile",
+                                "Left three-quarter",
+                                "Front",
+                                "Right three-quarter",
+                                "Right profile",
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                ui.push_id(slot, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(tr(label));
+                                        let target = &mut channel.views[slot];
+                                        egui::ComboBox::from_id_salt("pose")
+                                            .selected_text(target.as_ref().map_or("—", |p| &p.name))
+                                            .show_ui(ui, |ui| {
+                                                for pose in &self.doc.extras.rig_poses {
+                                                    if ui
+                                                        .selectable_label(false, &pose.name)
+                                                        .clicked()
+                                                    {
+                                                        *target =
+                                                            Some(std::sync::Arc::new(pose.clone()));
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        if design::button(
+                                            ui,
+                                            Icon::Save,
+                                            "",
+                                            "Capture current bone pose",
+                                            false,
+                                            channel.root.is_some(),
+                                        )
+                                        .clicked()
+                                        {
+                                            *target = Some(std::sync::Arc::new(rig::SavedPose {
+                                                name: tr(label).into(),
+                                                bones: rig
+                                                    .bones
+                                                    .iter()
+                                                    .map(|bone| {
+                                                        (bone.id, rig::bone_value(bone, frame))
+                                                    })
+                                                    .collect(),
+                                            }));
+                                            changed = true;
+                                        }
+                                        if design::button(
+                                            ui,
+                                            Icon::Trash,
+                                            "",
+                                            "Clear view",
+                                            false,
+                                            target.is_some(),
+                                        )
+                                        .clicked()
+                                        {
+                                            *target = None;
+                                            changed = true;
+                                        }
+                                    })
+                                });
+                            }
+                        });
+                }
+            });
+        self.rigging.character_setup = open;
+        if changed {
+            self.checkpoint();
+            self.doc.extras.rig.character_turns = draft;
+            self.recover();
+        }
+    }
+
+    fn turn_controls(
+        &mut self,
+        ui: &egui::Ui,
+        area: Rect,
+        view: View,
+        frame: usize,
+        selected: &[(usize, usize)],
+    ) -> bool {
+        if !matches!(self.tool, Tool::Select | Tool::Bones)
+            || self.playing
+            || !self.feature.symbol_stack.is_empty()
+            || (self.tool == Tool::Bones && self.rigging.create)
+        {
+            if self.rigging.turn_drag.take().is_some() {
+                self.recover();
+            }
+            return false;
+        }
+        let rig = &self.doc.extras.rig;
+        let turns = &rig.character_turns;
+        if turns.head.root.is_none() && turns.body.root.is_none() {
+            return false;
+        }
+        let selected_tracks: Vec<_> = if self.tool == Tool::Select {
+            selected
+                .iter()
+                .filter_map(|&(layer, mark)| {
+                    let layer = self.doc.layers.get(layer)?;
+                    let exposure = layer.exposure(self.frame);
+                    layer
+                        .frames
+                        .get(exposure.start)?
+                        .get(mark)
+                        .filter(|mark| mark.style.instance.is_some())
+                        .map(|mark| mark.style.track)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.tool == Tool::Select && self.rigging.turn_drag.is_none() {
+            if selected_tracks.is_empty() {
+                return false;
+            }
+            let belongs_to_character = [turns.head.root, turns.body.root]
+                .into_iter()
+                .flatten()
+                .any(|root| {
+                    let branch = rig.pose_branch(root, None);
+                    rig.bones.iter().any(|bone| {
+                        branch.contains(&bone.id)
+                            && bone
+                                .targets
+                                .iter()
+                                .any(|track| selected_tracks.contains(track))
+                    })
+                });
+            if !belongs_to_character {
+                return false;
+            }
+        }
+        let poses = rig.poses(frame);
+        let mut edit = None;
+        let mut consumed = false;
+        for (head, channel, title) in [
+            (true, &turns.head, "Head turn"),
+            (false, &turns.body, "Body turn"),
+        ] {
+            let Some(pose) = channel.root.and_then(|id| poses.get(&id)) else {
+                continue;
+            };
+            if channel.views[2].is_none() || channel.views.iter().flatten().count() < 2 {
+                continue;
+            }
+            let center = view.screen(pose.start) + Vec2::new(0., if head { -24. } else { 24. });
+            let rect = Rect::from_center_size(center, Vec2::new(90., 22.));
+            let response = ui
+                .interact(
+                    rect.intersect(area),
+                    ui.scope_id().with(("turn-control", head)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text(tr(title));
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Middle,
+                    ui.scope_id().with("character-turn-overlay"),
+                ))
+                .with_clip_rect(area);
+            let color = crate::themes::accent();
+            painter.rect_filled(rect, 5., crate::themes::panel());
+            painter.line_segment(
+                [center - Vec2::X * 38., center + Vec2::X * 38.],
+                Stroke::new(1., color),
+            );
+            for (i, pose) in channel.views.iter().enumerate() {
+                if pose.is_some() {
+                    painter.circle_filled(center + Vec2::X * (i as f32 - 2.) * 19., 2.5, color);
+                }
+            }
+            painter.circle_filled(center + Vec2::X * channel.value(frame) * 19., 5., color);
+            consumed |= response.is_pointer_button_down_on();
+            if let Some(pointer) = response.interact_pointer_pos() {
+                if response.clicked() {
+                    let raw = (pointer.x - center.x) / 19.;
+                    let index = (raw.round() as i32 + 2).clamp(0, 4) as usize;
+                    let view = index as f32 - 2.;
+                    let value = if channel.views[index].is_some() && (view - raw).abs() < 0.25 {
+                        view
+                    } else {
+                        raw
+                    };
+                    edit = Some((head, value, true, true));
+                } else if response.drag_started() {
+                    self.rigging.turn_drag = Some((head, pointer.x, channel.value(frame)));
+                    edit = Some((head, channel.value(frame), true, false));
+                } else if let Some((active, start, value)) = self.rigging.turn_drag
+                    && active == head
+                {
+                    edit = Some((
+                        head,
+                        value + (pointer.x - start) / 19.,
+                        false,
+                        response.drag_stopped(),
+                    ));
+                }
+            }
+        }
+        if let Some((head, value, start, end)) = edit {
+            if start {
+                self.checkpoint();
+            }
+            let turns = &mut self.doc.extras.rig.character_turns;
+            let channel = if head {
+                &mut turns.head
+            } else {
+                &mut turns.body
+            };
+            channel.set(frame, value.clamp(-2., 2.));
+            if end {
+                self.rigging.turn_drag = None;
+                self.recover();
+            }
+            return true;
+        }
+        if !ui.input(|i| i.pointer.primary_down()) && self.rigging.turn_drag.take().is_some() {
+            self.recover();
+        }
+        consumed
+    }
+
+    pub fn rig_input(
+        &mut self,
+        ui: &egui::Ui,
+        area: Rect,
+        view: View,
+        selected: &[(usize, usize)],
+    ) -> bool {
         let rig_frame = self.group_rig_frame();
+        if self.turn_controls(ui, area, view, rig_frame, selected) {
+            return true;
+        }
         if !matches!(self.tool, Tool::Bones | Tool::Puppet) || self.playing {
             return false;
         }
@@ -1034,6 +1317,21 @@ impl Editor {
             }
         });
         self.rig_anchor_mode_button(ui);
+        if self.feature.symbol_stack.is_empty() && !self.doc.extras.rig.bones.is_empty() {
+            if design::button(
+                ui,
+                Icon::Head,
+                "Set Up Character",
+                "",
+                self.rigging.character_setup,
+                true,
+            )
+            .clicked()
+            {
+                self.rigging.character_setup = true;
+            }
+            self.character_setup(ui.ctx(), rig_frame);
+        }
         design::category(ui, "JERARQUÍA");
         let bones = self.doc.extras.rig.bones.clone();
         let targets = self.rig_targets();

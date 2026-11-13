@@ -768,7 +768,7 @@ impl Editor {
                 | self.rulers_ui(ui, &ruler_painter, ruler_area, view)
                 | self.advanced_canvas_input(ui, area, view)
                 | self.mannequin_input(ui, area, view)
-                | self.rig_input(ui, area, view)
+                | self.rig_input(ui, area, view, &state.selected)
         };
         let raster_edit = self.raster_active() && Self::raster_tool(tool);
         let raster_blocked = self.raster_active()

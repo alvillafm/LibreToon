@@ -48,6 +48,7 @@ enum Row {
     Folder(usize, usize),
     Cameras,
     Rigging,
+    Turn(bool),
 }
 #[derive(Default)]
 pub(crate) struct LayerSelection {
@@ -1338,6 +1339,11 @@ impl Editor {
                 }
                 if !self.doc.extras.rig.is_empty() {
                     all.push(Row::Rigging);
+                    if self.animation.rig_channels_open {
+                        let turns = &self.doc.extras.rig.character_turns;
+                        if turns.head.root.is_some() { all.push(Row::Turn(true)); }
+                        if turns.body.root.is_some() { all.push(Row::Turn(false)); }
+                    }
                 }
                 rows(self, &mut all);
                 for (index, track) in self.doc.extras.media.tracks.iter().enumerate().rev() {
@@ -2131,6 +2137,7 @@ impl Editor {
                                 Row::Rigging => {
                                     let trash=Rect::from_min_size(Pos2::new(label.right()-27.,y+3.),Vec2::splat(22.));
                                     let header=ui.interact(Rect::from_min_max(label.min,Pos2::new(trash.left()-3.,label.bottom())),ui.scope_id().with("rigging-track-header"),Sense::click());
+                                    if header.clicked() { self.animation.rig_channels_open ^= true; }
                                     header.context_menu(|ui|{
                                         ui.label(tr("Deleting this track removes its bones, weights and keys. Artwork is kept; Undo restores the rig."));
                                         if button(ui,Icon::Trash,"Delete rigging track","Delete rigging track",false,true).clicked(){delete_rigging=true;ui.close();}
@@ -2157,10 +2164,10 @@ impl Editor {
                                         label.min + Vec2::new(36., 14.),
                                         egui::Align2::LEFT_CENTER,
                                         format!(
-                                            "{} · {} / {}",
+                                            "{} {} · {}",
+                                            if self.animation.rig_channels_open { "▾" } else { "▸" },
                                             tr("Rigging"),
-                                            tr("Huesos"),
-                                            tr("Puppet")
+                                            tr("Bone pose"),
                                         ),
                                         egui::FontId::proportional(11.),
                                         color,
@@ -2253,6 +2260,70 @@ impl Editor {
                                                     if action == 4 { self.delete_rig_keys(f); } else { self.rig_key_action(action); }
                                                     ui.close();
                                                 }
+                                            }
+                                        });
+                                    }
+                                }
+                                Row::Turn(head) => {
+                                    let color = self.studio.prefs.layer_color(crate::studio::LayerColor::Rigging);
+                                    painter.rect_filled(label, 0., color.gamma_multiply(0.18));
+                                    draw(&painter, Rect::from_min_size(label.min + Vec2::new(25., 4.), Vec2::splat(18.)), if head { Icon::Head } else { Icon::Bones }, color);
+                                    painter.text(label.min + Vec2::new(51., row_h / 2.), egui::Align2::LEFT_CENTER, tr(if head { "Head turn" } else { "Body turn" }), egui::FontId::proportional(11.), color);
+                                    ui.set_clip_rect(grid_clip);
+                                    let painter = ui.painter().with_clip_rect(grid_clip);
+                                    let turns = &self.doc.extras.rig.character_turns;
+                                    let keys = if head { turns.head.keys.clone() } else { turns.body.keys.clone() };
+                                    for f in frames.clone() {
+                                        let x = r.left() + label_w + f as f32 * cell;
+                                        let rect = Rect::from_min_size(Pos2::new(x,y),Vec2::new(cell,row_h));
+                                        let key = keys.binary_search_by_key(&f, |key| key.frame).ok();
+                                        let response = ui.interact(rect, ui.scope_id().with(("turn",head,f)), if key.is_some() { Sense::click_and_drag() } else { Sense::click() });
+                                        if key.is_some() {
+                                            let q = rect.center();
+                                            painter.add(egui::Shape::convex_polygon(vec![q - Vec2::Y * 5., q + Vec2::X * 4., q + Vec2::Y * 5., q - Vec2::X * 4.],color,Stroke::NONE));
+                                        }
+                                        if self.frame == f {
+                                            painter.rect_stroke(rect.shrink(1.), 2., Stroke::new(1., color), egui::StrokeKind::Inside);
+                                        }
+                                        if response.clicked() || response.secondary_clicked() {
+                                            self.frame = f;
+                                            self.playing = false;
+                                        }
+                                        let destination = response.interact_pointer_pos().filter(|p| p.y >= y && p.y < y + row_h && p.x >= r.left() + label_w)
+                                            .map(|p| ((p.x - r.left() - label_w) / cell) as usize)
+                                            .filter(|&to| to < count && to != f);
+                                        if let Some(to) = destination && let Some(index) = key {
+                                            let valid = keys.binary_search_by_key(&to, |key| key.frame).is_err();
+                                            if response.dragged() {
+                                                timeline_drop_marker(&painter, rect.translate(Vec2::X * (to as f32 - f as f32) * cell), valid);
+                                            }
+                                            if response.drag_stopped() && valid {
+                                                self.checkpoint();
+                                                let turns = &mut self.doc.extras.rig.character_turns;
+                                                let channel = if head { &mut turns.head } else { &mut turns.body };
+                                                let value = channel.keys.remove(index).value;
+                                                channel.set(to, value);
+                                                self.frame = to;
+                                                self.playing = false;
+                                                self.recover();
+                                            }
+                                        }
+                                        response.context_menu(|ui| {
+                                            if button(ui, Icon::KeyAdd, "Insert keyframe", "", false, key.is_none()).clicked() {
+                                                self.checkpoint();
+                                                let turns = &mut self.doc.extras.rig.character_turns;
+                                                let channel = if head { &mut turns.head } else { &mut turns.body };
+                                                channel.set(f, channel.value(f));
+                                                self.recover();
+                                                ui.close();
+                                            }
+                                            if button(ui, Icon::KeyRemove, "Eliminar fotograma clave", "", false, key.is_some()).clicked() {
+                                                self.checkpoint();
+                                                let turns = &mut self.doc.extras.rig.character_turns;
+                                                let channel = if head { &mut turns.head } else { &mut turns.body };
+                                                channel.keys.retain(|key| key.frame != f);
+                                                self.recover();
+                                                ui.close();
                                             }
                                         });
                                     }

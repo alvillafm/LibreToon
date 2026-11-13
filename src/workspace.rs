@@ -561,6 +561,12 @@ impl Editor {
                         }
                     });
                     top_menu(ui, "Ayuda", |ui| {
+                        if button(ui, Icon::Info, "User Manual", "", false, true).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                "https://alvillafm.github.io/LibreToon/",
+                            ));
+                            ui.close();
+                        }
                         if button(ui, Icon::Rotate, "Buscar actualizaciones", "", false, true)
                             .clicked()
                         {

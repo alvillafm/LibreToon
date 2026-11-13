@@ -271,8 +271,9 @@ struct CachedPreview {
     texture: Option<egui::TextureHandle>,
 }
 
-fn preview_identity(doc: &Document) -> [usize; 11] {
-    [
+fn preview_identity(doc: &Document) -> [usize; 25] {
+    let mut identity = [0; 25];
+    identity[..11].copy_from_slice(&[
         doc.layers.identity(),
         doc.extras.cameras.identity(),
         doc.extras.symbols.identity(),
@@ -284,7 +285,9 @@ fn preview_identity(doc: &Document) -> [usize; 11] {
         doc.extras.animation_clips.identity(),
         doc.width as usize,
         doc.height as usize,
-    ]
+    ]);
+    identity[11..].copy_from_slice(&doc.extras.rig.character_turns.identity());
+    identity
 }
 
 // Only retain a composited frame across changes to light or FX parameters.
