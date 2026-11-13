@@ -894,15 +894,18 @@ fn fit_thumbnail(rect: Rect, size: Vec2) -> Rect {
 }
 
 fn gallery_row(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::ScrollArea::horizontal()
-        .id_salt(id)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.;
-                add(ui);
+    ui.scope(|ui| {
+        ui.style_mut().always_scroll_the_only_direction = true;
+        egui::ScrollArea::horizontal()
+            .id_salt(id)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.;
+                    add(ui);
+                });
             });
-        });
+    });
 }
 
 fn gallery_card(ui: &mut egui::Ui, title: &str, width: f32) -> (Rect, egui::Response) {

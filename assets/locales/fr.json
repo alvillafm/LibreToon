@@ -1627,5 +1627,6 @@
   "Breakdown": "Breakdown",
   "In-between": "In-between",
   "Insert keyframe": "Insert keyframe",
-  "Insert blank keyframe": "Insert blank keyframe"
+  "Insert blank keyframe": "Insert blank keyframe",
+  "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.": "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw."
 }

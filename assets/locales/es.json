@@ -1627,5 +1627,6 @@
   "Breakdown": "Desglose",
   "In-between": "Intermedio",
   "Insert keyframe": "Insertar fotograma clave",
-  "Insert blank keyframe": "Insertar fotograma clave vacío"
+  "Insert blank keyframe": "Insertar fotograma clave vacío",
+  "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.": "Arrastra con Selección para mover la referencia. Usa los tiradores para girar o escalar. Cambia a una herramienta de dibujo para dibujar."
 }

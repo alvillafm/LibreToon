@@ -67,7 +67,14 @@ struct Trace {
     layer: usize,
     references: [Reference; 2],
     active: usize,
-    drag: Option<(Pos2, Transform)>,
+    drag: Option<(Pos2, Transform, TraceGesture)>,
+}
+
+#[derive(Clone, Copy)]
+enum TraceGesture {
+    Move,
+    Rotate,
+    Scale,
 }
 
 struct Batch {
@@ -155,7 +162,7 @@ impl Editor {
                     .open(&mut open)
                     .default_width(250.)
                     .show(ctx, |ui| {
-                        ui.small(tr("Alt-drag on the stage to align the selected reference."));
+                        ui.small(tr("Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw."));
                         for (index, reference) in trace.references.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 if ui
@@ -326,13 +333,23 @@ impl Editor {
     }
 
     pub(crate) fn shift_trace_input(&mut self, ui: &egui::Ui, area: Rect, view: View) -> bool {
+        if self.playing {
+            return false;
+        }
+        let can_align = matches!(
+            self.tool,
+            crate::canvas::Tool::Select
+                | crate::canvas::Tool::Object
+                | crate::canvas::Tool::Transform
+        );
+        let center = Pos2::new(self.doc.width as f32 * 0.5, self.doc.height as f32 * 0.5);
         let Some(trace) = &mut self.animation.frame_workflow.trace else {
             return false;
         };
         let (pos, start, down) = ui.input(|i| {
             (
                 i.pointer.interact_pos(),
-                i.modifiers.alt && i.pointer.primary_pressed(),
+                can_align && i.pointer.primary_pressed() && !i.key_down(egui::Key::Space),
                 i.pointer.primary_down(),
             )
         });
@@ -341,15 +358,39 @@ impl Editor {
             && area.contains(pos)
             && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
         {
-            trace.drag = Some((view.world(pos), trace.references[trace.active].transform));
+            let initial = trace.references[trace.active].transform;
+            let [rotate, scale] = trace_handles(view, center, initial);
+            let gesture = if pos.distance(rotate) < 12. {
+                TraceGesture::Rotate
+            } else if pos.distance(scale) < 12. {
+                TraceGesture::Scale
+            } else {
+                TraceGesture::Move
+            };
+            trace.drag = Some((view.world(pos), initial, gesture));
         }
-        if let Some((origin, initial)) = trace.drag {
+        if let Some((origin, initial, gesture)) = trace.drag {
             if let Some(pos) = pos {
-                let delta = view.world(pos) - origin;
-                trace.references[trace.active].transform.x =
-                    (initial.x + delta.x).clamp(-20000., 20000.);
-                trace.references[trace.active].transform.y =
-                    (initial.y + delta.y).clamp(-20000., 20000.);
+                let world = view.world(pos);
+                let transform = &mut trace.references[trace.active].transform;
+                let pivot = center + Vec2::new(initial.x, initial.y);
+                match gesture {
+                    TraceGesture::Move => {
+                        let delta = world - origin;
+                        transform.x = (initial.x + delta.x).clamp(-20000., 20000.);
+                        transform.y = (initial.y + delta.y).clamp(-20000., 20000.);
+                    }
+                    TraceGesture::Rotate => {
+                        let angle =
+                            ((world - pivot).angle() - (origin - pivot).angle()).to_degrees();
+                        transform.angle = (initial.angle + angle + 180.).rem_euclid(360.) - 180.;
+                    }
+                    TraceGesture::Scale => {
+                        transform.scale = (initial.scale * world.distance(pivot)
+                            / origin.distance(pivot).max(0.01))
+                        .clamp(1., 500.);
+                    }
+                }
             }
             if !down {
                 trace.drag = None;
@@ -423,7 +464,45 @@ impl Editor {
             }
         }
         self.animation.thumbnail_cache = cache;
+        if let Some(trace) = &self.animation.frame_workflow.trace
+            && matches!(
+                self.tool,
+                crate::canvas::Tool::Select
+                    | crate::canvas::Tool::Object
+                    | crate::canvas::Tool::Transform
+            )
+        {
+            let center = Pos2::new(self.doc.width as f32 * 0.5, self.doc.height as f32 * 0.5);
+            let transform = trace.references[trace.active].transform;
+            let pivot = view.screen(center + Vec2::new(transform.x, transform.y));
+            let color = TRACE_COLORS[trace.active];
+            for (position, icon) in trace_handles(view, center, transform)
+                .into_iter()
+                .zip([Icon::Rotate, Icon::Transform])
+            {
+                painter.line_segment(
+                    [pivot, position],
+                    egui::Stroke::new(1., color.gamma_multiply(0.6)),
+                );
+                painter.circle_filled(position, 10., crate::themes::panel());
+                crate::design::draw(
+                    painter,
+                    Rect::from_center_size(position, Vec2::splat(16.)),
+                    icon,
+                    color,
+                );
+            }
+        }
     }
+}
+
+fn trace_handles(view: View, center: Pos2, transform: Transform) -> [Pos2; 2] {
+    let pivot = view.screen(center + Vec2::new(transform.x, transform.y));
+    let angle = transform.angle.to_radians() + view.angle;
+    [
+        pivot + Vec2::angled(angle - std::f32::consts::FRAC_PI_2) * 48.,
+        pivot + Vec2::angled(angle) * 58.,
+    ]
 }
 
 const TRACE_COLORS: [Color32; 2] = [

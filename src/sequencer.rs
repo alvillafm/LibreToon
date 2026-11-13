@@ -1979,8 +1979,10 @@ impl Editor {
                                             self.playing = false;
                                             let anchor = self.feature.frame_selection
                                                 .filter(|s| s.0 == l).map_or(f, |s| s.1.min(count - 1));
-                                            self.feature.frame_selection = Some((l,
-                                                if ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
+                                            if response.clicked() || !self.feature.frame_selection.is_some_and(|(layer,a,b)| layer==l && (a.min(b)..=a.max(b)).contains(&f)) {
+                                                self.feature.frame_selection = Some((l,
+                                                    if response.clicked() && ui.input(|i| i.modifiers.shift) { anchor } else { f }, f));
+                                            }
                                             if has_mouth_key && response.clicked() {
                                                 self.feature.library = false;
                                                 self.clips.open = false;
