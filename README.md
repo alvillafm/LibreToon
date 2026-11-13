@@ -6,7 +6,7 @@
 
 **LibreToon** is a free, open-source 2D animation application built from scratch in **Rust** for Windows, macOS, and Linux. It brings frame-by-frame drawing, vector and raster artwork, character rigging, and compositing into one workspace.
 
-<p align="center"><img src="https://i.imgur.com/O5nKLBy.png" width="1050" alt="LibreToon interface"></p>
+<p align="center"><img src="https://i.imgur.com/0qjDPEz.png" width="1050" alt="LibreToon interface"></p>
 
 **Built with AI. Driven by an animator.** LibreToon is an independent project led by an animator and developed with AI assistance.
 
