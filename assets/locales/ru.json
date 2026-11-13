@@ -1611,5 +1611,21 @@
   "Enter / Esc": "Enter / Esc",
   "Finish / cancel path": "Finish / cancel path",
   "Delete selected anchor": "Delete selected anchor",
-  "Edit one handle independently": "Edit one handle independently"
+  "Edit one handle independently": "Edit one handle independently",
+  "Shift & Trace": "Shift & Trace",
+  "Reference A": "Reference A",
+  "Reference B": "Reference B",
+  "Alt-drag on the stage to align the selected reference.": "Alt-drag on the stage to align the selected reference.",
+  "Reset transform": "Reset transform",
+  "Transform keyframes": "Transform keyframes",
+  "On ones": "On ones",
+  "On twos": "On twos",
+  "On threes": "On threes",
+  "Drawing classification": "Drawing classification",
+  "Clear classification": "Clear classification",
+  "Key drawing": "Key drawing",
+  "Breakdown": "Breakdown",
+  "In-between": "In-between",
+  "Insert keyframe": "Insert keyframe",
+  "Insert blank keyframe": "Insert blank keyframe"
 }

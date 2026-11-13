@@ -649,7 +649,9 @@ impl Editor {
             && press_position.is_some_and(|pos| {
                 area.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
             });
-        let light_input = !picker_click && self.light_gizmo(ui, self.camera_view(stage_view), true);
+        let trace_input = !picker_click && self.shift_trace_input(ui, area, view);
+        let light_input = trace_input
+            || (!picker_click && self.light_gizmo(ui, self.camera_view(stage_view), true));
         let trim_input = !picker_click
             && !light_input
             && !self.raster_active()
@@ -2083,7 +2085,7 @@ impl Editor {
             Stroke::new(1., Color32::from_gray(90)),
         ));
         self.paint_grid(&painter, area, view);
-        if self.onion && !self.playing {
+        if self.onion && !self.playing && !self.animation.frame_workflow.tracing() {
             let count = self.doc.layers[0].frames.len();
             for f in self.frame.saturating_sub(self.studio.onion_before)
                 ..(self.frame + self.studio.onion_after + 1).min(count)
@@ -2428,6 +2430,7 @@ impl Editor {
                 Stroke::new(1., crate::themes::accent()),
             ));
         }
+        self.paint_frame_workflow(&painter, view);
         self.light_gizmo(ui, self.camera_view(stage_view), false);
         self.paint_folder_gizmo(&painter, self.camera_view(stage_view));
         self.paint_vector_trim(&painter, self.camera_view(stage_view));
@@ -2796,7 +2799,7 @@ impl SelectionBox {
             .contains(Pos2::ZERO + rotate(p.to_vec2(), -self.angle))
     }
 }
-fn transformed_in_basis(
+pub(crate) fn transformed_in_basis(
     m: &Mark,
     pivot: Pos2,
     scale: Vec2,

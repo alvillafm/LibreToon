@@ -1611,5 +1611,21 @@
   "Enter / Esc": "Intro / Esc",
   "Finish / cancel path": "Terminar / cancelar el trazado",
   "Delete selected anchor": "Eliminar el nodo seleccionado",
-  "Edit one handle independently": "Editar un tirador de forma independiente"
+  "Edit one handle independently": "Editar un tirador de forma independiente",
+  "Shift & Trace": "Alinear referencias",
+  "Reference A": "Referencia A",
+  "Reference B": "Referencia B",
+  "Alt-drag on the stage to align the selected reference.": "Usa Alt + arrastre en el lienzo para alinear la referencia seleccionada.",
+  "Reset transform": "Restablecer transformación",
+  "Transform keyframes": "Transformar fotogramas clave",
+  "On ones": "A unos",
+  "On twos": "A doses",
+  "On threes": "A treses",
+  "Drawing classification": "Clasificación del dibujo",
+  "Clear classification": "Quitar clasificación",
+  "Key drawing": "Dibujo clave",
+  "Breakdown": "Desglose",
+  "In-between": "Intermedio",
+  "Insert keyframe": "Insertar fotograma clave",
+  "Insert blank keyframe": "Insertar fotograma clave vacío"
 }

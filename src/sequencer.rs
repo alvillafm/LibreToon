@@ -332,6 +332,10 @@ impl Editor {
         for (f, _) in keys {
             layer.options.keys[f] = true;
         }
+        layer.options.drawing_classes = std::mem::take(&mut layer.options.drawing_classes)
+            .into_iter()
+            .map(|(f, c)| (retimed(f, drag, target), c))
+            .collect();
         for span in &mut layer.options.tweens {
             span.start = retimed(span.start, drag, target);
             span.end = retimed(span.end, drag, target);
@@ -453,6 +457,13 @@ impl Editor {
             2 => {
                 if layer.frames.len() < 10000 {
                     let content = layer.frames[f].clone();
+                    layer.options.drawing_classes =
+                        std::mem::take(&mut layer.options.drawing_classes)
+                            .into_iter()
+                            .map(|(frame, class)| {
+                                (frame + usize::from(frame >= exposure.end), class)
+                            })
+                            .collect();
                     for t in &mut layer.options.tweens {
                         if t.start >= exposure.end {
                             t.start += 1;
@@ -467,6 +478,13 @@ impl Editor {
             }
             3 => {
                 if exposure.len() > 1 {
+                    layer.options.drawing_classes =
+                        std::mem::take(&mut layer.options.drawing_classes)
+                            .into_iter()
+                            .map(|(frame, class)| {
+                                (frame - usize::from(frame >= exposure.end), class)
+                            })
+                            .collect();
                     for t in &mut layer.options.tweens {
                         if t.start >= exposure.end {
                             t.start -= 1;
@@ -481,6 +499,7 @@ impl Editor {
             }
             4 => {
                 let at = exposure.start;
+                layer.options.drawing_classes.remove(&at);
                 layer
                     .options
                     .tweens
@@ -644,6 +663,12 @@ impl Editor {
         }
         let mut open = true;
         let mut next = None;
+        let mut edit = None;
+        let mut resize = None;
+        let mut cadence = None;
+        let mut transform = false;
+        let mut label_edit = None;
+        let selected = self.feature.frame_selection;
         let layers = &self.doc.layers;
         let frames = layers
             .iter()
@@ -659,6 +684,25 @@ impl Editor {
             .default_width(660.)
             .resizable(true)
             .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let available = selected.is_some_and(|(layer, _, _)| {
+                        crate::frame_workflow::editable(&layers[layer])
+                    });
+                    for (count, label) in [(1, "On ones"), (2, "On twos"), (3, "On threes")] {
+                        if button(ui, Icon::FrameExtend, label, "", false, available).clicked() {
+                            cadence = Some(count);
+                        }
+                    }
+                    transform = button(
+                        ui,
+                        Icon::Transform,
+                        "",
+                        "Transform keyframes",
+                        false,
+                        available,
+                    )
+                    .clicked();
+                });
                 ui.spacing_mut().item_spacing.y = 0.;
                 let table_height = (ui.available_height() - 36.).max(100.);
                 egui::ScrollArea::both().max_height(table_height).show_rows(
@@ -731,26 +775,106 @@ impl Editor {
                                 let pose = (index == self.layer)
                                     .then(|| self.lip_frame_label(frame))
                                     .flatten();
+                                let class =
+                                    layer
+                                        .options
+                                        .drawing_classes
+                                        .get(&frame)
+                                        .map_or("", |class| match class {
+                                            1 => "  K",
+                                            2 => "  B",
+                                            3 => "  I",
+                                            _ => "",
+                                        });
                                 let text = pose.map_or_else(
                                     || symbol.to_owned(),
                                     |pose| format!("{symbol}  {pose}"),
-                                );
-                                if exposure_cell(
+                                ) + class;
+                                let response = exposure_cell(
                                     ui,
                                     cell,
                                     (index, row),
                                     &text,
-                                    index == self.layer && frame == self.frame,
+                                    (index == self.layer && frame == self.frame)
+                                        || selected.is_some_and(|(l, a, b)| {
+                                            l == index && (a.min(b)..=a.max(b)).contains(&frame)
+                                        }),
                                     row,
                                 )
                                 .on_hover_text(format!(
                                     "{} · {:03} · {label}",
                                     layer.name,
                                     frame + 1
-                                ))
-                                .clicked()
-                                {
+                                ));
+                                if response.clicked() {
                                     next = Some((index, frame));
+                                }
+                                if crate::frame_workflow::editable(layer) {
+                                    response.context_menu(|ui| {
+                                        for (icon, title, action) in [
+                                            (Icon::KeyAdd, "Insert keyframe", 0),
+                                            (Icon::BlankKeyAdd, "Insert blank keyframe", 1),
+                                            (Icon::KeyRemove, "Delete keyframe", 4),
+                                        ] {
+                                            if button(ui, icon, title, "", false, true).clicked() {
+                                                edit = Some((index, frame, action));
+                                                ui.close();
+                                            }
+                                        }
+                                        ui.menu_button(tr("Drawing classification"), |ui| {
+                                            for (code, name) in [
+                                                (0, "Clear classification"),
+                                                (1, "Key drawing"),
+                                                (2, "Breakdown"),
+                                                (3, "In-between"),
+                                            ] {
+                                                if ui.button(tr(name)).clicked() {
+                                                    label_edit = Some((index, frame, code));
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    let id = ui.scope_id().with(("xsheet-edge", index, frame));
+                                    let edge = egui::Rect::from_min_max(
+                                        egui::pos2(cell.left() + 8., cell.bottom() - 5.),
+                                        cell.right_bottom(),
+                                    );
+                                    let current = ui.data(|d| d.get_temp::<(usize, usize)>(id));
+                                    if current.is_some()
+                                        || frame + 1 == layer.frames.len()
+                                        || layer.key(frame + 1)
+                                    {
+                                        let r = ui
+                                            .interact(edge, id, egui::Sense::drag())
+                                            .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                                        if r.drag_started() {
+                                            let span = layer.exposure(frame);
+                                            ui.data_mut(|d| {
+                                                d.insert_temp(id, (span.start, span.end))
+                                            });
+                                        }
+                                        if let Some((start, end)) = current {
+                                            let delta = (r.drag_delta().y / 25.).round() as isize;
+                                            if r.dragged() {
+                                                let y = cell.bottom() + delta as f32 * 25.;
+                                                ui.painter().hline(
+                                                    cell.x_range(),
+                                                    y,
+                                                    egui::Stroke::new(2., crate::themes::accent()),
+                                                );
+                                            }
+                                            if r.drag_stopped() {
+                                                resize = Some((
+                                                    index,
+                                                    start,
+                                                    end,
+                                                    end.saturating_add_signed(delta),
+                                                ));
+                                                ui.data_mut(|d| d.remove::<(usize, usize)>(id));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -772,8 +896,39 @@ impl Editor {
             self.playing = false;
             self.layer = layer;
             self.frame = frame.min(self.doc.layers[layer].frames.len() - 1);
-            self.feature.frame_selection = Some((layer, self.frame, self.frame));
+            let anchor = if ctx.input(|i| i.modifiers.shift) {
+                selected
+                    .filter(|s| s.0 == layer)
+                    .map_or(self.frame, |s| s.1)
+            } else {
+                self.frame
+            };
+            self.feature.frame_selection = Some((layer, anchor, self.frame));
             self.canvas.clear_selection();
+        }
+        if let Some((layer, frame, action)) = edit {
+            self.timeline_cell_action(layer, frame, action);
+            self.feature.frame_selection = Some((layer, self.frame, self.frame));
+        }
+        if let Some((layer, start, end, target)) = resize {
+            self.resize_exposure(layer, start, end, target);
+        }
+        if let Some(step) = cadence {
+            self.set_exposure_step(step);
+        }
+        if transform {
+            self.open_batch_transform();
+        }
+        if let Some((layer, frame, code)) = label_edit {
+            let frame = self.doc.layers[layer].exposure(frame).start;
+            self.checkpoint();
+            let classes = &mut self.doc.layers[layer].options.drawing_classes;
+            if code == 0 {
+                classes.remove(&frame);
+            } else {
+                classes.insert(frame, code);
+            }
+            self.recover();
         }
     }
 
@@ -782,6 +937,7 @@ impl Editor {
         self.folder_dialog(ui.ctx());
         let previous_frame = self.frame;
         self.exposure_sheet(ui.ctx());
+        self.frame_workflow_ui(ui.ctx());
         egui::Panel::bottom("timeline")
             .default_size(300.)
             .min_size(150.)
@@ -945,6 +1101,9 @@ impl Editor {
                     }
                     self.duration_editing = editing;
                     ui.separator();
+                    if button(ui, Icon::Reference, "", "Shift & Trace", self.animation.frame_workflow.tracing(), true).clicked() {
+                        self.toggle_shift_trace();
+                    }
                     if button(ui, Icon::Onion, "", "Papel cebolla", self.onion, true).clicked() {
                         self.onion = !self.onion;
                     }
@@ -1870,6 +2029,11 @@ impl Editor {
                                                 if has_mouth_key {
                                                     self.mouth_timeline_menu(ui, l, f, false);
                                                     ui.separator();
+                                                }
+                                                if button(ui,Icon::Transform,"Transform keyframes","Transform keyframes",false,crate::frame_workflow::editable(&self.doc.layers[l])).clicked(){
+                                                    if !self.feature.frame_selection.is_some_and(|(layer,a,b)| layer==l && (a.min(b)..=a.max(b)).contains(&f)) {self.feature.frame_selection=Some((l,f,f));}
+                                                    self.open_batch_transform();
+                                                    ui.close();
                                                 }
                                                 if button(ui,Icon::Copy,"Copy frames","Copy frames",false,true).clicked(){
                                                     self.frame_clipboard_context(l,f);self.copy_frames_to_clipboard(ui.ctx());ui.close();

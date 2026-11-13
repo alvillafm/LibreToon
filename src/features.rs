@@ -234,6 +234,8 @@ pub struct LayerOptions {
     pub masked_by: Option<u64>,
     pub folder: Option<u64>,
     pub keys: SharedVec<bool>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) drawing_classes: std::collections::BTreeMap<usize, u8>,
     #[serde(skip_serializing_if = "SharedVec::is_empty")]
     pub object_folders: SharedVec<ObjectFolder>,
 }
@@ -261,6 +263,7 @@ impl Default for LayerOptions {
             masked_by: None,
             folder: None,
             keys: Default::default(),
+            drawing_classes: Default::default(),
             object_folders: Default::default(),
         }
     }

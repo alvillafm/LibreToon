@@ -26,6 +26,7 @@ mod fla;
 mod fla_zip;
 mod folder_groups;
 mod frame_clipboard;
+mod frame_workflow;
 mod gpu_lens;
 mod i18n;
 mod inspector;
