@@ -93,22 +93,42 @@ struct Preview {
 }
 struct PreviewFrames {
     pixels: Vec<Vec<u8>>,
+    size: [usize; 2],
     duration: f64,
 }
 fn preview_frames(path: &std::path::Path) -> Result<PreviewFrames, String> {
-    let doc = read_project(path)?;
+    let doc = if path == std::path::Path::new(EXAMPLE_PREVIEW_KEY) {
+        motion_tween_example()?
+    } else {
+        read_project(path)?
+    };
     let count = animation::movie_count(&doc).max(1);
     let samples = count.min(8);
     let ctx = egui::Context::default();
     let mut cache = Default::default();
+    let scale = (192. / doc.width as f32).min(108. / doc.height as f32);
+    let size = [
+        (doc.width as f32 * scale).round().max(1.) as usize,
+        (doc.height as f32 * scale).round().max(1.) as usize,
+    ];
     let mut pixels: Vec<Vec<u8>> = (0..samples)
-        .map(|i| crate::exporter::raster(&doc, i * count / samples, 192, 108, &ctx, &mut cache))
+        .map(|i| {
+            crate::exporter::raster(
+                &doc,
+                i * count / samples,
+                size[0] as u32,
+                size[1] as u32,
+                &ctx,
+                &mut cache,
+            )
+        })
         .collect();
     if pixels.iter().all(|p| p == &pixels[0]) {
         pixels.truncate(1);
     }
     Ok(PreviewFrames {
         pixels,
+        size,
         duration: count as f64 / doc.fps as f64,
     })
 }
@@ -701,7 +721,7 @@ impl Editor {
                     .map(|(i, pixels)| {
                         ui.ctx().load_texture(
                             format!("gallery-{}-{i}", path.display()),
-                            egui::ColorImage::from_rgb([192, 108], pixels),
+                            egui::ColorImage::from_rgb(frames.size, pixels),
                             egui::TextureOptions::LINEAR,
                         )
                     })
@@ -729,107 +749,94 @@ impl Editor {
                         .desired_width(width));
                 });
             });
-            ui.add_space(12.);
-            crate::design::category(ui, "EJEMPLOS");
-            if crate::design::button(ui, crate::design::Icon::Film, "Motion Tween Example", "Open a copy of the example", false, true).clicked() {
-                match motion_tween_example() {
-                    Ok(doc) => {
-                        self.add_document(doc, None);
-                        if let Some(index) = self.hub.active {
-                            self.hub.tabs[index].record.name = "Motion Tween Example".into();
-                        }
-                    }
-                    Err(error) => self.status = error,
-                }
-            }
-            ui.add_space(12.);
-            crate::design::category(ui, "EN CURSO");
             let query = self.hub.search.to_lowercase();
-            let paths: Vec<_> = self.hub.catalogue.recent.iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&query))).cloned().collect();
-            let columns = ((ui.available_width() / 270.).floor() as usize).clamp(1, 8);
-            let width = (ui.available_width() - (columns - 1) as f32 * 14.) / columns as f32;
-            let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
+            let paths: Vec<_> = self.hub.catalogue.recent.iter().filter(|path| {
+                path.file_name().is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&query))
+            }).cloned().collect();
             let in_progress: Vec<_> = self.hub.tabs.iter().enumerate()
                 .filter_map(|(index, tab)| tab.record.name.to_lowercase().contains(&query).then_some(index))
                 .collect();
-            let mut selected_tab=None;
+            let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
+            let width = (ui.available_width() / 4. - 10.).clamp(175., 264.);
+            let mut open_example = false;
+            let mut selected_tab = None;
+            let mut open_path = None;
             self.hub.live_cache.begin_frame();
-            if in_progress.is_empty() {
-                ui.label(egui::RichText::new(crate::i18n::tr(if query.is_empty() { "No open projects." } else { "No open projects match the search." })).color(crate::themes::muted()));
-                ui.add_space(8.);
-            } else {
-                egui::ScrollArea::vertical().id_salt("live-projects").max_height(440.).show_rows(ui,216.,in_progress.len().div_ceil(columns),|ui,rows| {
-                    for row in rows {ui.horizontal(|ui| {
-                        for &i in in_progress.iter().skip(row*columns).take(columns) {
-                             let doc = if self.hub.active == Some(i) {
-                                 Some(self.project_document())
-                             } else {
-                                 self.hub.tabs[i].state.as_ref().map(|session| session.doc.clone())
-                             };
-                             let record = &self.hub.tabs[i].record;
-                             let name = &record.name;
-                             let preview_path = if record.dirty {
-                                 &record.recovery
-                             } else {
-                                 record.path.as_ref().unwrap_or(&record.recovery)
-                             };
-                            let (r,response)=ui.allocate_exact_size(Vec2::new(width,202.),egui::Sense::click());
-                            ui.painter().rect_filled(r,10.,if response.hovered(){crate::themes::color(Color32::from_rgb(48,55,70))}else{crate::themes::color(Color32::from_rgb(34,37,46))});
-                            let preview=Rect::from_min_max(r.min+Vec2::splat(8.),r.max-Vec2::new(8.,48.));
-                            ui.painter().rect_filled(preview,5.,Color32::WHITE);
-                            if let Some(doc)=&doc {
-                            let count=animation::movie_count(doc).max(1);let f=(seconds*doc.fps as f64) as usize%count;
-                            let view=crate::canvas::View{center:preview.center(),stage_center:Pos2::new(doc.width as f32/2.,doc.height as f32/2.),scale:(preview.width()/doc.width as f32).min(preview.height()/doc.height as f32),angle:0.};
-                            let painter=ui.painter().with_clip_rect(preview);
-                            for (_,_,m) in animation::resolve_movie(doc,f,true){crate::paint::draw(&painter,&m,view,false,false,Some(&mut self.hub.live_cache));}
-                            } else if let Some(preview_data)=self.hub.previews.iter().find(|p| &p.path==preview_path) {
-                                if let Ok((textures,duration))=&preview_data.frames {
-                                    let index=((seconds%duration.max(0.01))/duration.max(0.01)*textures.len() as f64) as usize;
-                                    ui.painter().image(textures[index.min(textures.len()-1)].id(),preview,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.,1.)),Color32::WHITE);
+            egui::ScrollArea::vertical().id_salt("home-sections").show(ui, |ui| {
+                ui.add_space(12.);
+                crate::design::category(ui, "EJEMPLOS");
+                gallery_row(ui, "examples", |ui| {
+                    let (preview, response) = gallery_card(ui, EXAMPLE_TITLE, width);
+                    if preview.intersects(ui.clip_rect()) {
+                        self.hub.paint_file_preview(ui, preview, std::path::Path::new(EXAMPLE_PREVIEW_KEY), seconds);
+                    }
+                    open_example = response.on_hover_text(crate::i18n::tr("Open a copy of the example")).clicked();
+                });
+                ui.add_space(12.);
+                crate::design::category(ui, "EN CURSO");
+                if in_progress.is_empty() {
+                    ui.label(egui::RichText::new(crate::i18n::tr(if query.is_empty() { "No open projects." } else { "No open projects match the search." })).color(crate::themes::muted()));
+                } else {
+                    gallery_row(ui, "live-projects", |ui| {
+                        for &index in &in_progress {
+                            let record = &self.hub.tabs[index].record;
+                            let (preview, response) = gallery_card(ui, &record.name, width);
+                            if response.clicked() { selected_tab = Some(index); }
+                            if !preview.intersects(ui.clip_rect()) { continue; }
+                            let doc = if self.hub.active == Some(index) {
+                                Some(self.project_document())
+                            } else {
+                                self.hub.tabs[index].state.as_ref().map(|session| session.doc.clone())
+                            };
+                            if let Some(doc) = doc {
+                                let image = fit_thumbnail(preview, Vec2::new(doc.width as f32, doc.height as f32));
+                                ui.painter().rect_filled(image, 3., Color32::WHITE);
+                                let count = animation::movie_count(&doc).max(1);
+                                let frame = (seconds * doc.fps as f64) as usize % count;
+                                let view = crate::canvas::View {
+                                    center: image.center(), stage_center: Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5),
+                                    scale: image.width() / doc.width as f32, angle: 0.,
+                                };
+                                let painter = ui.painter().with_clip_rect(image.intersect(ui.clip_rect()));
+                                for (_, _, mark) in animation::resolve_movie(&doc, frame, true) {
+                                    if mark.style.media_image.is_none() {
+                                        crate::paint::draw(&painter, &mark, view, false, false, Some(&mut self.hub.live_cache));
+                                    }
                                 }
                             } else {
-                                crate::design::draw(ui.painter(),preview,crate::design::Icon::Film,Color32::GRAY);
-                                if self.hub.pending.is_none() && self.hub.request.try_send(preview_path.clone()).is_ok() {self.hub.pending=Some(preview_path.clone());}
+                                let path = if record.dirty { &record.recovery } else { record.path.as_ref().unwrap_or(&record.recovery) }.clone();
+                                self.hub.paint_file_preview(ui, preview, &path, seconds);
                             }
-                            caption(ui,r,name,width);
-                            if response.clicked(){selected_tab=Some(i);}
                         }
-                    });}
-                });
-            }
-            crate::design::category(ui,"ARCHIVOS");
-            if let Some(i)=selected_tab{self.activate_document(i);}
-            let mut open = None;
-            if paths.is_empty() && in_progress.is_empty() { ui.add_space(50.); ui.label(crate::i18n::tr("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta.")); }
-            let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
-            egui::ScrollArea::vertical().show_rows(ui, 216., paths.len().div_ceil(columns), |ui, rows| {
-                for row in rows { ui.horizontal(|ui| {
-                    for path in paths.iter().skip(row * columns).take(columns) {
-                        let (r, response) = ui.allocate_exact_size(Vec2::new(width, 202.), egui::Sense::click());
-                        let preview = Rect::from_min_max(r.min + Vec2::splat(8.), r.max - Vec2::new(8., 48.));
-                        ui.painter().rect_filled(r, 10., if response.hovered() { crate::themes::color(Color32::from_rgb(48,55,70)) } else { crate::themes::color(Color32::from_rgb(34,37,46)) });
-                        ui.painter().rect_filled(preview, 5., Color32::WHITE);
-                        if let Some(item) = self.hub.previews.iter_mut().find(|p| &p.path == path) {
-                            match &item.frames {
-                                Ok((textures,duration)) => {
-                                    let index = ((seconds % duration.max(0.01)) / duration.max(0.01) * textures.len() as f64) as usize;
-                                    let texture = &textures[index.min(textures.len()-1)];
-                                    let image = egui::Rect::from_center_size(preview.center(), egui::vec2(192.,108.) * (preview.width()/192.).min(preview.height()/108.));
-                                    ui.painter().image(texture.id(), image, Rect::from_min_max(Pos2::ZERO,Pos2::new(1.,1.)),Color32::WHITE);
-                                }
-                                Err(error) => { crate::design::draw(ui.painter(), preview, crate::design::Icon::Film, Color32::GRAY); if response.hovered() { ui.ctx().debug_painter().text(preview.center(),egui::Align2::CENTER_CENTER,"Vista previa no disponible",egui::FontId::proportional(11.),Color32::GRAY); } let _=error; }
-                            }
-                        } else {
-                            crate::design::draw(ui.painter(), preview, crate::design::Icon::Film, Color32::GRAY);
-                            if self.hub.pending.is_none() && self.hub.request.try_send(path.clone()).is_ok() { self.hub.pending = Some(path.clone()); }
-                        }
+                    });
+                }
+                ui.add_space(12.);
+                crate::design::category(ui, "ARCHIVOS");
+                if paths.is_empty() && in_progress.is_empty() {
+                    ui.label(crate::i18n::tr("Tu galería empieza aquí. Crea un proyecto, abre un archivo o añade una carpeta."));
+                }
+                gallery_row(ui, "recent-projects", |ui| {
+                    for path in &paths {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
-                        caption(ui,r,&name,width);
-                        if response.on_hover_text(path.display().to_string()).clicked() { open = Some(path.clone()); }
+                        let (preview, response) = gallery_card(ui, &name, width);
+                        if preview.intersects(ui.clip_rect()) { self.hub.paint_file_preview(ui, preview, path, seconds); }
+                        if response.on_hover_text(path.display().to_string()).clicked() { open_path = Some(path.clone()); }
                     }
-                }); }
+                });
             });
-            if let Some(path) = open { self.open_document_path(path); }
+            if open_example {
+                match motion_tween_example() {
+                    Ok(doc) => {
+                        self.add_document(doc, None);
+                        if let Some(index) = self.hub.active { self.hub.tabs[index].record.name = EXAMPLE_TITLE.into(); }
+                    }
+                    Err(error) => self.status = error,
+                }
+            } else if let Some(index) = selected_tab {
+                self.activate_document(index);
+            } else if let Some(path) = open_path {
+                self.open_document_path(path);
+            }
 
         });
         ui.ctx()
@@ -837,21 +844,107 @@ impl Editor {
     }
 }
 
-fn caption(ui: &egui::Ui, rect: Rect, title: &str, width: f32) {
+const EXAMPLE_TITLE: &str = "Motion Tween Example";
+const EXAMPLE_PREVIEW_KEY: &str = ":builtin-motion-tween-example";
+
+impl Hub {
+    fn paint_file_preview(
+        &mut self,
+        ui: &egui::Ui,
+        preview: Rect,
+        path: &std::path::Path,
+        seconds: f64,
+    ) {
+        let item = self.previews.iter().find(|item| item.path == path);
+        if let Some(Ok((textures, duration))) = item.map(|item| &item.frames)
+            && !textures.is_empty()
+        {
+            let duration = duration.max(0.01);
+            let index = ((seconds % duration) / duration * textures.len() as f64) as usize;
+            let texture = &textures[index.min(textures.len() - 1)];
+            let image = fit_thumbnail(preview, texture.size_vec2());
+            ui.painter().image(
+                texture.id(),
+                image,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                Color32::WHITE,
+            );
+        } else {
+            crate::design::draw(
+                ui.painter(),
+                Rect::from_center_size(preview.center(), Vec2::splat(32.)),
+                crate::design::Icon::Film,
+                crate::themes::muted(),
+            );
+            if item.is_none()
+                && self.pending.is_none()
+                && self.request.try_send(path.to_owned()).is_ok()
+            {
+                self.pending = Some(path.to_owned());
+            }
+        }
+    }
+}
+
+fn fit_thumbnail(rect: Rect, size: Vec2) -> Rect {
+    Rect::from_center_size(
+        rect.center(),
+        size * (rect.width() / size.x).min(rect.height() / size.y),
+    )
+}
+
+fn gallery_row(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::horizontal()
+        .id_salt(id)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.;
+                add(ui);
+            });
+        });
+}
+
+fn gallery_card(ui: &mut egui::Ui, title: &str, width: f32) -> (Rect, egui::Response) {
+    let image_height = (width - 12.) * 9. / 16.;
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, image_height + 41.), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !rect.intersects(ui.clip_rect()) {
+        return (rect, response);
+    }
+    ui.painter().rect_filled(
+        rect,
+        8.,
+        if response.hovered() {
+            crate::themes::color(Color32::from_rgb(48, 55, 70))
+        } else {
+            crate::themes::color(Color32::from_rgb(34, 37, 46))
+        },
+    );
+    let preview = Rect::from_min_size(
+        rect.min + Vec2::splat(6.),
+        Vec2::new(width - 12., image_height),
+    );
+    ui.painter()
+        .rect_filled(preview, 4., crate::themes::palette().canvas);
     let mut job = egui::text::LayoutJob::simple(
         title.into(),
-        egui::FontId::proportional(14.),
-        crate::themes::color(Color32::from_rgb(231, 235, 245)),
-        width - 26.,
+        egui::FontId::proportional(13.),
+        crate::themes::palette().text,
+        width - 20.,
     );
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let text = ui.painter().layout_job(job);
-    ui.painter().with_clip_rect(rect).galley(
-        rect.min + Vec2::new(13., 161.),
-        text,
-        crate::themes::color(Color32::WHITE),
-    );
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .galley(
+            Pos2::new(rect.left() + 10., preview.bottom() + 9.),
+            text,
+            crate::themes::palette().text,
+        );
+    (preview, response)
 }
 
 fn motion_tween_example() -> Result<Document, String> {
@@ -874,4 +967,22 @@ fn motion_tween_example_is_compact_and_retains_its_animation() {
         4
     );
     assert!(include_bytes!("../assets/examples/MotionTween_Example.ltoon").len() < 1024 * 1024);
+}
+
+#[cfg(test)]
+#[test]
+fn gallery_example_has_a_valid_preview_and_widescreen_fills_its_card() {
+    let frames = preview_frames(std::path::Path::new(EXAMPLE_PREVIEW_KEY)).unwrap();
+    assert!(frames.pixels.len() > 1);
+    assert!(
+        frames
+            .pixels
+            .iter()
+            .all(|frame| frame.len() == frames.size[0] * frames.size[1] * 3)
+    );
+    let card = Rect::from_min_size(Pos2::ZERO, Vec2::new(240., 135.));
+    assert_eq!(fit_thumbnail(card, Vec2::new(192., 108.)), card);
+    let portrait = fit_thumbnail(card, Vec2::new(90., 160.));
+    assert_eq!(portrait.center(), card.center());
+    assert!(portrait.width() < card.width());
 }
