@@ -287,6 +287,43 @@ fn preview_identity(doc: &Document) -> [usize; 11] {
     ]
 }
 
+// Only retain a composited frame across changes to light or FX parameters.
+// Artwork, camera, visibility and other document changes use the live stage.
+fn only_compositing_changed(before: &Document, after: &Document) -> bool {
+    let previous = preview_identity(before);
+    let current = preview_identity(after);
+    if previous[1..] != current[1..]
+        || before.fps != after.fps
+        || before.layers.len() != after.layers.len()
+    {
+        return false;
+    }
+    let mut changed = false;
+    for (old, new) in before.layers.iter().zip(after.layers.iter()) {
+        if old.frames.identity() != new.frames.identity()
+            || old.visible != new.visible
+            || old.name != new.name
+            || old.options.light.is_some() != new.options.light.is_some()
+            || old.options.adjustment.is_some() != new.options.adjustment.is_some()
+        {
+            return false;
+        }
+        let (mut old, mut new) = (old.options.clone(), new.options.clone());
+        changed |= old.adjustment != new.adjustment
+            || old.adjustment_bands != new.adjustment_bands
+            || old.light != new.light;
+        for options in [&mut old, &mut new] {
+            options.adjustment = None;
+            options.adjustment_bands = None;
+            options.light = None;
+        }
+        if old != new {
+            return false;
+        }
+    }
+    changed
+}
+
 #[derive(Default)]
 pub struct DepthEditor {
     pub open: bool,
@@ -303,6 +340,8 @@ pub struct DepthEditor {
     cached: std::collections::VecDeque<CachedPreview>,
     prepare: Option<(usize, usize)>,
     shown: Vec<usize>,
+    held_preview: bool,
+    interactive_job: bool,
     focus: Option<(Vec<usize>, std::time::Instant)>,
     preview_scope: Option<(
         usize,
@@ -366,6 +405,8 @@ impl DepthEditor {
         self.preview = None;
         self.prepare = None;
         self.shown.clear();
+        self.held_preview = false;
+        self.interactive_job = false;
         self.cached.clear();
         self.focus = None;
         self.owner = None;
@@ -383,10 +424,21 @@ impl DepthEditor {
             .as_ref()
             .is_none_or(|owner| preview_identity(owner) != preview_identity(doc))
         {
-            self.cancel_job();
+            let editing = self
+                .owner
+                .as_ref()
+                .is_some_and(|owner| only_compositing_changed(owner, doc));
+            let displayed_latest = self.shown.first() == Some(&self.preview_epoch);
+            let requested_latest = self.requested.first() == Some(&self.preview_epoch);
+            self.held_preview = editing && (displayed_latest || self.held_preview);
+            self.interactive_job =
+                editing && !self.job_is_prefetch && (requested_latest || self.interactive_job);
+            if !self.interactive_job {
+                self.cancel_job();
+            }
             self.preview_epoch = self.preview_epoch.wrapping_add(1);
             self.cached.clear();
-            self.requested.clear();
+
             self.owner = Some(doc.clone());
             self.render_doc = None;
             self.independent_clock = None;
@@ -1038,8 +1090,10 @@ impl Editor {
             .is_none_or(|(focus, _)| *focus != key)
         {
             if (self.depth.job_is_prefetch || !self.playing)
-                && self.depth.requested.get(1) != Some(&self.frame)
+                && (self.depth.requested.get(1) != Some(&self.frame)
+                    || self.depth.interactive_job && self.depth.requested.get(1..) != key.get(1..))
             {
+                self.depth.interactive_job = false;
                 self.depth.cancel_job();
             }
             self.depth.focus = Some((key.clone(), now));
@@ -1049,6 +1103,19 @@ impl Editor {
                 Ok((done, pixels, size)) => {
                     self.depth.work = None;
                     self.depth.job_is_prefetch = false;
+                    let interactive = std::mem::take(&mut self.depth.interactive_job);
+                    // Publish intermediate results for the same shot while the
+                    // user keeps dragging. Only exact results enter the cache.
+                    if interactive
+                        && !self.playing
+                        && done != key
+                        && done.get(1..) == key.get(1..)
+                        && !pixels.is_empty()
+                    {
+                        self.depth.preview = Some(preview_texture(painter.ctx(), size, &pixels));
+                        self.depth.shown.clone_from(&done);
+                        self.depth.held_preview = true;
+                    }
                     if done.first() == Some(&self.depth.preview_epoch) && !pixels.is_empty() {
                         let show = done == key;
                         let texture = (show
@@ -1057,6 +1124,7 @@ impl Editor {
                                     <= PREVIEW_TEXTURE_BYTES))
                             .then(|| preview_texture(painter.ctx(), size, &pixels));
                         if show {
+                            self.depth.held_preview = false;
                             self.depth.preview = texture.clone();
                             self.depth.shown.clone_from(&done);
                         }
@@ -1079,11 +1147,15 @@ impl Editor {
                     self.depth.work = None;
                     self.depth.job_is_prefetch = false;
                     self.depth.requested.clear();
+                    self.depth.interactive_job = false;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
         self.depth.show_cached(&key, painter.ctx());
+        if self.depth.shown == key {
+            self.depth.held_preview = false;
+        }
         let mut next = None;
         if self.depth.job.is_none() {
             if self.depth.shown != key {
@@ -1214,7 +1286,9 @@ impl Editor {
                 ctx.request_repaint();
             });
         }
-        if (!use_camera && !post && !reduced) || self.depth.shown != key {
+        let hold =
+            !self.playing && self.depth.held_preview && self.depth.shown.get(1..) == key.get(1..);
+        if (!use_camera && !post && !reduced) || (self.depth.shown != key && !hold) {
             return false;
         }
         let Some(texture) = &self.depth.preview else {
@@ -1507,6 +1581,53 @@ mod tests {
             assert_eq!(e.depth.requested[1], 3);
             e.post.hidden = true;
             assert!(!e.camera_blur_preview(ui.painter(), view));
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn compositing_edits_keep_displaying_completed_previews_while_dragging() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = doc();
+        e.frame = e.doc.layers[0].frames.len() - 1;
+        let mut layer = e.doc.layers[0].clone();
+        layer.options.adjustment =
+            Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        e.doc.layers.push(layer);
+        let view = View {
+            center: Pos2::ZERO,
+            scale: 1.,
+            stage_center: Pos2::ZERO,
+            angle: 0.,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let complete = |e: &mut Editor| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send((e.depth.requested.clone(), vec![30, 60, 90], [1, 1]))
+                    .unwrap();
+                e.depth.job = Some(rx);
+            };
+            let preview = |e: &mut Editor| e.camera_blur_preview(ui.painter(), view);
+            preview(&mut e);
+            complete(&mut e);
+            assert!(preview(&mut e));
+            let first = e.depth.preview.as_ref().unwrap().id();
+            e.doc.layers[1].options.adjustment =
+                Some(vec![crate::post::Effect::new(crate::post::Kind::Curves)].into());
+            assert!(preview(&mut e));
+            assert_eq!(e.depth.preview.as_ref().unwrap().id(), first);
+            let work = e.depth.work.as_ref().unwrap().clone();
+            complete(&mut e);
+            e.doc.layers[1].options.adjustment =
+                Some(vec![crate::post::Effect::new(crate::post::Kind::Levels)].into());
+            assert!(preview(&mut e));
+            assert!(!work.canceled());
+            assert_ne!(e.depth.preview.as_ref().unwrap().id(), first);
+            assert_ne!(e.depth.shown[0], e.depth.preview_epoch);
+            assert_eq!(e.depth.ready_frames(&e.doc).count(), 0);
+            e.doc.layers[0].frames[0].push(Mark::default());
+            assert!(!preview(&mut e));
         });
         output.textures_delta.clear();
     }
