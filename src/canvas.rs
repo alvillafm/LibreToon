@@ -156,7 +156,8 @@ struct TransformDrag {
     bounds: SelectionBox,
     originals: Vec<((usize, usize), Mark)>,
     changed: bool,
-    last_input: Option<(Pos2, bool)>,
+    last_input: Option<(Pos2, bool, bool)>,
+    toggle_on_click: Option<(usize, usize)>,
 }
 enum Drag {
     Area {
@@ -185,6 +186,8 @@ enum Drag {
     PenNode {
         index: usize,
         start: Pos2,
+        original: crate::document::Node,
+        convert: bool,
     },
     Node(NodeDrag),
     Width(WidthDrag),
@@ -967,7 +970,9 @@ impl Editor {
                 self.commit_pen(pen);
             }
         }
-        if tool == Tool::Node && !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+        if matches!(tool, Tool::Node | Tool::Pen)
+            && !wants_keyboard
+            && ctx.input(|i| i.key_pressed(egui::Key::Delete))
         {
             if let Some((l, m, index)) = state.node_selection.take() {
                 let mut mark = editable_nodes(&self.doc.layers[l].frames[self.frame][m]);
@@ -1160,7 +1165,7 @@ impl Editor {
                 && tool == Tool::Select
                 && selected_node_hit(self, &state, world, view)
             {
-                self.start_node_drag(&mut state, world, view);
+                self.start_node_drag(&mut state, world, view, alt);
             } else if tool == Tool::RotateView {
                 let delta = screen - view.center;
                 state.drag = Some(Drag::ViewRotate {
@@ -1173,10 +1178,12 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                if self.feature.pen_edit_only {
-                    self.start_node_drag(&mut state, world, view);
-                } else if state.pen.is_some() || !self.grab_selected_node(&mut state, world, view) {
-                    self.begin_pen(&mut state, world, view);
+                if self.feature.pen_edit_only || (alt && state.pen.is_none()) {
+                    self.start_node_drag(&mut state, world, view, alt);
+                } else if state.pen.is_some()
+                    || !self.grab_selected_node(&mut state, world, view, alt)
+                {
+                    self.begin_pen(&mut state, world, view, alt);
                 }
             } else if !self.playing
                 && tool == Tool::Bucket
@@ -1192,7 +1199,7 @@ impl Editor {
             } else if !self.playing && tool == Tool::Width {
                 self.start_width_drag(&mut state, world, view);
             } else if !self.playing && tool == Tool::Node {
-                self.start_node_drag(&mut state, world, view);
+                self.start_node_drag(&mut state, world, view, alt);
             } else if !self.playing
                 && matches!(
                     tool,
@@ -1319,6 +1326,7 @@ impl Editor {
                         op = Some(Operation::Move);
                     }
                 }
+                let mut toggle_on_click = None;
                 if op.is_none() {
                     let mut found = None;
                     'layers: for (l, layer) in self
@@ -1343,11 +1351,8 @@ impl Editor {
                     if let Some(mut id) = found {
                         if tool == Tool::Object {
                             if shift && state.selected.contains(&id) {
-                                let mut connected = Canvas::default();
-                                self.select_connected_object(&mut connected, id, false);
-                                state
-                                    .selected
-                                    .retain(|item| !connected.selected.contains(item));
+                                toggle_on_click = Some(id);
+                                op = Some(Operation::Move);
                             } else {
                                 self.select_connected_object(&mut state, id, shift);
                                 self.layer = id.0;
@@ -1389,9 +1394,8 @@ impl Editor {
                                 }
                             }
                             if shift && state.selected.contains(&id) {
-                                state.selected.retain(|x| *x != id);
-                                state.partial.remove(&id);
-                                state.pivot = state.bounds(self).map(|b| b.center());
+                                toggle_on_click = Some(id);
+                                op = Some(Operation::Move);
                             } else {
                                 if !shift && !state.selected.contains(&id) {
                                     state.selected.clear();
@@ -1440,6 +1444,7 @@ impl Editor {
                         originals,
                         changed: false,
                         last_input: None,
+                        toggle_on_click,
                     }));
                 }
             }
@@ -1538,9 +1543,30 @@ impl Editor {
                         state.drag = None;
                     }
                 }
-                Some(Drag::PenNode { index, start }) => {
+                Some(Drag::PenNode {
+                    index,
+                    start,
+                    original,
+                    convert,
+                }) => {
                     if let Some(pen) = &mut state.pen {
-                        if primary_down
+                        if *convert && (primary_down || released) {
+                            let delta = world - *start;
+                            if delta.length() > 2. / view.scale {
+                                let handle = crate::vector::pos(original.out_handle) + delta;
+                                pen.mark.nodes[*index].out_handle = crate::vector::xy(handle);
+                                if original.in_handle == original.position
+                                    && original.out_handle == original.position
+                                {
+                                    pen.mark.nodes[*index].in_handle = crate::vector::xy(
+                                        crate::vector::pos(original.position) - delta,
+                                    );
+                                }
+                            } else if released {
+                                pen.mark.nodes[*index] =
+                                    crate::document::Node::corner(original.position);
+                            }
+                        } else if primary_down
                             && (!pen.closing || world.distance(*start) > 1. / view.scale)
                         {
                             let node = &mut pen.mark.nodes[*index];
@@ -1598,13 +1624,36 @@ impl Editor {
                         .input(|i| node_contact_position(&i.events, primary_down))
                         .map(|p| self.depth_point(view.world(p), self.layer, d.id.0));
                     if let Some(world) = world.filter(|p| p.is_finite()) {
-                        if world.distance(d.start) > 0.001 || d.changed {
+                        if (d.handle == 3 && released)
+                            || world.distance(d.start)
+                                > if d.handle == 3 {
+                                    2. / view.scale
+                                } else {
+                                    0.001
+                                }
+                            || d.changed
+                        {
                             if !d.changed {
                                 self.checkpoint();
                                 d.changed = true;
                             }
+                            let delta = world - d.start;
                             let mark =
-                                move_node(&d.original, d.index, d.handle, world - d.start, alt);
+                                if d.handle == 3 && delta.length() <= 2. / view.scale && !d.moved {
+                                    let mut mark = editable_nodes(&d.original);
+                                    let node = &mut mark.nodes[d.index];
+                                    *node = crate::document::Node::corner(node.position);
+                                    mark
+                                } else {
+                                    d.moved = true;
+                                    move_node(
+                                        &d.original,
+                                        d.index,
+                                        d.handle,
+                                        delta,
+                                        alt || d.independent,
+                                    )
+                                };
                             self.doc.layers[d.id.0].frames[self.frame][d.id.1] = mark;
                         }
                     }
@@ -1818,10 +1867,10 @@ impl Editor {
                     }
                 }
                 Some(Drag::Transform(d)) => {
-                    if d.last_input != Some((world, shift))
+                    if d.last_input != Some((world, shift, alt))
                         && (d.changed || world.distance(d.start) * view.scale > 2.)
                     {
-                        d.last_input = Some((world, shift));
+                        d.last_input = Some((world, shift, alt));
                         if !d.changed && !matches!(d.operation, Operation::Pivot) {
                             self.checkpoint();
                             if !state.partial.is_empty() {
@@ -1853,11 +1902,19 @@ impl Editor {
                                 let mut translation = Vec2::ZERO;
                                 match operation {
                                     Operation::Move => {
-                                        translation = self.snap_translation(
+                                        translation = world - d.start;
+                                        let axis = shift.then(|| {
+                                            usize::from(translation.y.abs() > translation.x.abs())
+                                        });
+                                        if let Some(axis) = axis {
+                                            translation[1 - axis] = 0.;
+                                        }
+                                        translation = self.snap_translation_axes(
                                             Rect::from_points(&d.bounds.handles()),
-                                            world - d.start,
+                                            translation,
                                             view,
                                             alt,
+                                            axis,
                                         );
                                         state.pivot = Some(d.pivot + translation);
                                     }
@@ -1932,6 +1989,20 @@ impl Editor {
                         }
                         if d.changed {
                             self.recover();
+                        } else if let Some(id) = d.toggle_on_click {
+                            if tool == Tool::Object {
+                                let mut connected = Canvas::default();
+                                self.select_connected_object(&mut connected, id, false);
+                                state
+                                    .selected
+                                    .retain(|item| !connected.selected.contains(item));
+                            } else {
+                                state.selected.retain(|item| *item != id);
+                            }
+                            state
+                                .partial
+                                .retain(|item, _| state.selected.contains(item));
+                            state.pivot = state.bounds(self).map(|bounds| bounds.center());
                         }
                         state.drag = None;
                     }
@@ -2828,6 +2899,8 @@ struct NodeDrag {
     start: Pos2,
     original: Mark,
     changed: bool,
+    moved: bool,
+    independent: bool,
 }
 
 impl Canvas {
@@ -2901,7 +2974,7 @@ impl Editor {
         self.recover();
         self.status = "Trazado Bézier creado".into();
     }
-    fn begin_pen(&mut self, state: &mut Canvas, world: Pos2, view: View) {
+    fn begin_pen(&mut self, state: &mut Canvas, world: Pos2, view: View, alt: bool) {
         state.pen_redo.clear();
         if state.pen.is_none() {
             if !self.stroke_enabled && !self.fill_enabled {
@@ -2924,6 +2997,21 @@ impl Editor {
             });
         }
         let pen = state.pen.as_mut().unwrap();
+        if alt
+            && let Some(index) = pen.mark.nodes.iter().position(|node| {
+                view.screen(crate::vector::pos(node.position))
+                    .distance(view.screen(world))
+                    < 9.
+            })
+        {
+            state.drag = Some(Drag::PenNode {
+                index,
+                start: world,
+                original: pen.mark.nodes[index].clone(),
+                convert: true,
+            });
+            return;
+        }
         if pen.mark.nodes.len() >= 2
             && view
                 .screen(crate::vector::pos(pen.mark.nodes[0].position))
@@ -2935,6 +3023,8 @@ impl Editor {
             state.drag = Some(Drag::PenNode {
                 index: 0,
                 start: world,
+                original: pen.mark.nodes[0].clone(),
+                convert: false,
             });
         } else {
             let index = pen.mark.nodes.len();
@@ -2944,11 +3034,13 @@ impl Editor {
             state.drag = Some(Drag::PenNode {
                 index,
                 start: world,
+                original: pen.mark.nodes[index].clone(),
+                convert: false,
             });
         }
         self.status="Pluma: clic crea esquina · arrastrar crea curva · primer nodo cierra · Enter termina · Esc cancela".into();
     }
-    fn grab_selected_node(&self, state: &mut Canvas, world: Pos2, view: View) -> bool {
+    fn grab_selected_node(&self, state: &mut Canvas, world: Pos2, view: View, alt: bool) -> bool {
         let mut found = None;
         let mut best = 8.;
         for &(l, m) in &state.selected {
@@ -2977,17 +3069,19 @@ impl Editor {
             state.drag = Some(Drag::Node(NodeDrag {
                 id,
                 index,
-                handle,
+                handle: if alt && handle == 0 { 3 } else { handle },
                 start: self.depth_point(world, self.layer, id.0),
                 original: self.doc.layers[id.0].frames[self.frame][id.1].clone(),
                 changed: false,
+                moved: false,
+                independent: alt,
             }));
             return true;
         }
         false
     }
-    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View) {
-        if self.grab_selected_node(state, world, view) {
+    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View, alt: bool) {
+        if self.grab_selected_node(state, world, view, alt) {
             return;
         }
         'layers: for (l, layer) in self
@@ -3021,10 +3115,12 @@ impl Editor {
                         state.drag = Some(Drag::Node(NodeDrag {
                             id: (l, m),
                             index,
-                            handle: 0,
+                            handle: if alt { 3 } else { 0 },
                             start: self.depth_point(world, self.layer, l),
                             original: mark.clone(),
                             changed: false,
+                            moved: false,
+                            independent: alt,
                         }));
                     }
                     break 'layers;
@@ -3160,6 +3256,9 @@ fn move_node(original: &Mark, index: usize, handle: u8, delta: Vec2, independent
         node.position = crate::vector::xy(anchor + delta);
         node.in_handle = crate::vector::xy(crate::vector::pos(node.in_handle) + delta);
         node.out_handle = crate::vector::xy(crate::vector::pos(node.out_handle) + delta);
+    } else if handle == 3 && node.in_handle == node.position && node.out_handle == node.position {
+        node.in_handle = crate::vector::xy(anchor - delta);
+        node.out_handle = crate::vector::xy(anchor + delta);
     } else {
         let (moved, opposite) = if handle == 1 {
             (&mut node.in_handle, &mut node.out_handle)
@@ -3247,6 +3346,15 @@ mod vector_gesture_tests {
         }
     }
     fn tick(ctx: &egui::Context, e: &mut Editor, events: Vec<egui::Event>) {
+        tick_with_modifiers(ctx, e, events, egui::Modifiers::NONE);
+    }
+    fn tick_with_modifiers(
+        ctx: &egui::Context,
+        e: &mut Editor,
+        mut events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let mut out = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
@@ -3366,6 +3474,42 @@ mod vector_gesture_tests {
             assert!(bounds.height() > 130., "{bounds:?}");
         });
     }
+    #[test]
+    fn pen_alt_click_converts_existing_curve_without_adding_an_anchor() {
+        run(|ctx, e| {
+            e.tool = Tool::Pen;
+            let anchor = Pos2::new(200., 200.);
+            let handle = Pos2::new(235., 170.);
+            tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(anchor), button(anchor, true)],
+            );
+            tick(ctx, e, vec![egui::Event::PointerMoved(handle)]);
+            tick(ctx, e, vec![button(handle, false)]);
+            let alt = egui::Modifiers::ALT;
+            tick_with_modifiers(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(anchor), button(anchor, true)],
+                alt,
+            );
+            tick_with_modifiers(ctx, e, vec![button(anchor, false)], alt);
+            let pen = e.canvas.pen.as_ref().unwrap();
+            assert_eq!(pen.mark.nodes.len(), 1);
+            let node = &pen.mark.nodes[0];
+            assert_eq!(node.position, node.in_handle);
+            assert_eq!(node.position, node.out_handle);
+            let handle = Pos2::new(230., 215.);
+            tick_with_modifiers(ctx, e, vec![button(anchor, true)], alt);
+            tick_with_modifiers(ctx, e, vec![egui::Event::PointerMoved(handle)], alt);
+            tick_with_modifiers(ctx, e, vec![button(handle, false)], alt);
+            let node = &e.canvas.pen.as_ref().unwrap().mark.nodes[0];
+            assert_ne!(node.position, node.in_handle);
+            assert_ne!(node.position, node.out_handle);
+        });
+    }
+
     #[test]
     fn pen_click_drag_creates_real_handles_and_enter_finishes_open_path() {
         run(|ctx, e| {

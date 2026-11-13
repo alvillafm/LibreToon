@@ -731,6 +731,17 @@ impl Editor {
             });
             ui.add_space(12.);
             crate::design::category(ui, "EJEMPLOS");
+            if crate::design::button(ui, crate::design::Icon::Film, "Motion Tween Example", "Open a copy of the example", false, true).clicked() {
+                match motion_tween_example() {
+                    Ok(doc) => {
+                        self.add_document(doc, None);
+                        if let Some(index) = self.hub.active {
+                            self.hub.tabs[index].record.name = "Motion Tween Example".into();
+                        }
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
             ui.add_space(12.);
             crate::design::category(ui, "EN CURSO");
             let query = self.hub.search.to_lowercase();
@@ -841,4 +852,26 @@ fn caption(ui: &egui::Ui, rect: Rect, title: &str, width: f32) {
         text,
         crate::themes::color(Color32::WHITE),
     );
+}
+
+fn motion_tween_example() -> Result<Document, String> {
+    crate::native_project::decode_if_native(include_bytes!(
+        "../assets/examples/MotionTween_Example.ltoon"
+    ))?
+    .ok_or_else(|| "Missing LibreToon example document".into())
+}
+
+#[cfg(test)]
+#[test]
+fn motion_tween_example_is_compact_and_retains_its_animation() {
+    let doc = motion_tween_example().unwrap();
+    assert_eq!(doc.layers[0].frames.len(), 80);
+    assert_eq!(
+        doc.layers
+            .iter()
+            .map(|layer| layer.options.tweens.len())
+            .sum::<usize>(),
+        4
+    );
+    assert!(include_bytes!("../assets/examples/MotionTween_Example.ltoon").len() < 1024 * 1024);
 }

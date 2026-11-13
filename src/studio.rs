@@ -637,6 +637,7 @@ impl Editor {
             Tool::Puppet => &[("Shift + drag", "Move pin anchor")],
             Tool::Select | Tool::Object => &[
                 ("Shift + click", "Add or remove from selection"),
+                ("Shift + drag", "Move along one axis"),
                 ("Double-click a stroke", "Select connected strokes"),
                 ("Double-click a symbol", "Edit symbol"),
                 ("{cmd} + C / X / V", "Copy / Cut / Paste"),
@@ -646,9 +647,23 @@ impl Editor {
                 ("Shift + drag", "Constrain proportions or angle"),
                 ("Alt + drag", "Ignore snapping"),
             ],
-            Tool::Pen | Tool::Node => &[("Alt + drag", "Edit one handle independently")],
+            Tool::Pen => &[
+                ("Click / drag", "Create a corner / curve"),
+                ("Shift + drag", "Snap new tangent to 45°"),
+                ("Alt + click an anchor", "Convert anchor to a corner"),
+                ("Alt + drag", "Edit one handle independently"),
+                ("Click first anchor", "Close path"),
+                ("Enter / Esc", "Finish / cancel path"),
+                ("Delete", "Delete selected anchor"),
+            ],
+            Tool::Node => &[
+                ("Alt + click an anchor", "Convert anchor to a corner"),
+                ("Alt + drag", "Edit one handle independently"),
+                ("Delete", "Delete selected anchor"),
+            ],
             Tool::Zoom => &[("Alt + click", "Reverse zoom direction")],
             Tool::Transform => &[
+                ("Shift + drag object", "Move along one axis"),
                 ("Shift + drag corner", "Keep proportions"),
                 ("Shift + drag rotation handle", "Snap rotation to 15°"),
                 ("Alt + drag", "Ignore snapping"),

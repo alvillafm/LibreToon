@@ -1600,5 +1600,16 @@
   "Grain frame interval (0 = fixed)": "Grain frame interval (0 = fixed)",
   "Effect target": "Effect target",
   "Effects apply to the selected layer or folder below.": "Effects apply to the selected layer or folder below.",
-  "Outline follows the nearest artwork below, or the chosen effect target.": "Outline follows the nearest artwork below, or the chosen effect target."
+  "Outline follows the nearest artwork below, or the chosen effect target.": "Outline follows the nearest artwork below, or the chosen effect target.",
+  "Click / drag": "Click / drag",
+  "Create a corner / curve": "Create a corner / curve",
+  "Snap new tangent to 45°": "Snap new tangent to 45°",
+  "Alt + click an anchor": "Alt + click an anchor",
+  "Convert anchor to a corner": "Convert anchor to a corner",
+  "Click first anchor": "Click first anchor",
+  "Close path": "Close path",
+  "Enter / Esc": "Enter / Esc",
+  "Finish / cancel path": "Finish / cancel path",
+  "Delete selected anchor": "Delete selected anchor",
+  "Edit one handle independently": "Edit one handle independently"
 }

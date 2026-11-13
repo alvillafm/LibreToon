@@ -1600,5 +1600,16 @@
   "Grain frame interval (0 = fixed)": "Intervalo del grano en fotogramas (0 = fijo)",
   "Effect target": "Destino de los efectos",
   "Effects apply to the selected layer or folder below.": "Los efectos se aplican a la capa o carpeta seleccionada debajo.",
-  "Outline follows the nearest artwork below, or the chosen effect target.": "El contorno sigue el dibujo más cercano debajo o el destino elegido."
+  "Outline follows the nearest artwork below, or the chosen effect target.": "El contorno sigue el dibujo más cercano debajo o el destino elegido.",
+  "Click / drag": "Clic / arrastre",
+  "Create a corner / curve": "Crear esquina / curva",
+  "Snap new tangent to 45°": "Ajustar la tangente nueva a 45°",
+  "Alt + click an anchor": "Alt + clic en un nodo",
+  "Convert anchor to a corner": "Convertir el nodo en esquina",
+  "Click first anchor": "Clic en el primer nodo",
+  "Close path": "Cerrar trazado",
+  "Enter / Esc": "Intro / Esc",
+  "Finish / cancel path": "Terminar / cancelar el trazado",
+  "Delete selected anchor": "Eliminar el nodo seleccionado",
+  "Edit one handle independently": "Editar un tirador de forma independiente"
 }

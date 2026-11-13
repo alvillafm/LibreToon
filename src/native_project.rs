@@ -8,7 +8,7 @@ const MANIFEST_V1: &[u8] = br#"{"format":"LibreToon","version":1}"#;
 const MANIFEST_V2: &[u8] = br#"{"format":"LibreToon","version":2}"#;
 const LEGACY_DOCUMENT_LIMIT: usize = 64 * 1024 * 1024;
 // Switch before the legacy ceiling so there is room for continued editing.
-const COMPACT_THRESHOLD: usize = 16 * 1024 * 1024;
+const COMPACT_THRESHOLD: usize = 1024 * 1024;
 const COMPACT_DOCUMENT_LIMIT: usize = 128 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
