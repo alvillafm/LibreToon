@@ -24,6 +24,44 @@ fn editor() -> Editor {
 fn close(a: f32, b: f32) {
     assert!((a - b).abs() < 0.01, "{a} != {b}");
 }
+
+#[test]
+fn shape_tween_interpolates_bezier_geometry_and_round_trips() {
+    let mut e = editor();
+    let mut first = rect();
+    first.rectangle = false;
+    first.points = Default::default();
+    first.nodes = vec![
+        crate::document::Node::corner([10., 10.]),
+        crate::document::Node::corner([50., 10.]),
+        crate::document::Node::corner([30., 40.]),
+    ]
+    .into();
+    let mut last = first.clone();
+    last.nodes[0].position = [20., 10.];
+    last.nodes[0].out_handle = [30., 0.];
+    last.fill = Some([100, 50, 200, 255]);
+    let layer = &mut e.doc.layers[0];
+    layer.init_keys();
+    layer.frames[0] = vec![first.clone()].into();
+    layer.frames[4] = vec![last.clone()].into();
+    layer.options.keys[4] = true;
+    e.create_shape_tween(0, 2);
+    let saved = serde_json::to_vec(&e.doc).unwrap();
+    let doc: crate::Document = serde_json::from_slice(&saved).unwrap();
+    assert!(span(&doc.layers[0], 2).unwrap().shape);
+    let frame = marks(&doc.layers[0], 2);
+    assert_eq!(frame[0].nodes[0].position, [15., 10.]);
+    assert_eq!(frame[0].nodes[0].out_handle, [20., 5.]);
+    assert_eq!(frame[0].fill, Some([150, 50, 150, 255]));
+    assert!(marks(&doc.layers[0], 0)[0] == first);
+    assert!(marks(&doc.layers[0], 4)[0] == last);
+    e.history(false);
+    assert!(span(&e.doc.layers[0], 2).is_none());
+    e.doc.layers[0].frames[4][0].nodes.pop();
+    e.create_shape_tween(0, 2);
+    assert!(span(&e.doc.layers[0], 2).is_none());
+}
 #[test]
 fn motion_interpolates_translation_rotation_scale_and_symbol_frame() {
     let mut a = rect();
@@ -77,6 +115,7 @@ fn explicitly_enabled_motion_preserves_source_and_undo() {
     }
     e.doc.layers[0].options.keys[10] = true;
     e.doc.layers[0].options.tweens.push(Tween {
+        shape: false,
         start: 0,
         end: 10,
         curve: Default::default(),
@@ -225,6 +264,7 @@ fn gradient_fit_preserves_orientation() {
 fn invalid_scene_and_tween_metadata_are_rejected() {
     let mut e = editor();
     e.doc.layers[0].options.tweens.push(Tween {
+        shape: false,
         start: 5,
         end: 500,
         curve: Default::default(),
@@ -255,6 +295,7 @@ fn benchmark_motion_resolution() {
     d.layers[0].frames[23] = last;
     d.layers[0].options.keys[23] = true;
     d.layers[0].options.tweens.push(Tween {
+        shape: false,
         start: 0,
         end: 23,
         curve: Default::default(),

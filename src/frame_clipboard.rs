@@ -899,6 +899,7 @@ mod tests {
         e.doc.layers[0].options.keys[0] = true;
         e.doc.layers[0].options.keys[10] = true;
         e.doc.layers[0].options.tweens = vec![crate::animation::Tween {
+            shape: false,
             start: 0,
             end: 10,
             curve: Default::default(),

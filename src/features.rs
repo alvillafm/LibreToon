@@ -672,7 +672,8 @@ fn expand(
                 piece,
             )
         };
-        for (_, _, mut m) in resolved {
+        let eyes = crate::character::rigged_eye_artwork(doc, mark.style.track, parent_frame);
+        for mut m in resolved.into_iter().map(|(_, _, mark)| mark).chain(eyes) {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
             }
@@ -741,23 +742,7 @@ fn resolve_internal(
         }
         let folder = crate::folder_groups::layer_matrix(doc, layer);
         let rig_frame = crate::folder_groups::rig_frame(doc, layer, frame);
-        let character_poses = |frame| {
-            let rig = &doc.extras.rig;
-            let joints = crate::character::view_joints(doc, rig, frame);
-            if joints.is_empty() {
-                return rig.poses(frame);
-            }
-            let mut rig = rig.clone();
-            for bone in &mut rig.bones {
-                if let Some((_, [start, end])) = joints.iter().find(|(id, _)| *id == bone.id)
-                    && crate::vector::pos(*start).distance(crate::vector::pos(*end)) > 0.01
-                {
-                    bone.start = *start;
-                    bone.end = *end;
-                }
-            }
-            rig.poses(frame)
-        };
+        let character_poses = |frame| crate::character::poses(doc, &doc.extras.rig, frame);
         let poses = pose_cache
             .entry(rig_frame)
             .or_insert_with(|| character_poses(rig_frame));

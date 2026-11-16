@@ -422,7 +422,29 @@ pub(crate) fn selection_pattern(
     if !bounds.is_positive() || !bounds.is_finite() {
         return;
     }
-    let step = ((bounds.area() / 12000.).sqrt().ceil() as i32).max(4);
+    let step = ((bounds.area() / 12000.).sqrt().ceil() as i32).max(5);
+    let color = mark
+        .style
+        .gradient
+        .as_ref()
+        .filter(|_| mark.fill.is_some())
+        .map_or_else(
+            || mark.fill.unwrap_or(mark.color),
+            |gradient| gradient.color(view.world(bounds.center())),
+        );
+    let luminance =
+        0.2126 * f32::from(color[0]) + 0.7152 * f32::from(color[1]) + 0.0722 * f32::from(color[2]);
+    let light = luminance * (f32::from(color[3]) / 255.) + 255. - f32::from(color[3]) < 130.;
+    let dot = if light {
+        Color32::from_gray(225)
+    } else {
+        Color32::from_gray(40)
+    };
+    let edge = if light {
+        Color32::from_black_alpha(150)
+    } else {
+        Color32::from_white_alpha(170)
+    };
     let mut crossings = Vec::new();
     let mut row = (bounds.top().ceil() as i32).div_euclid(step) * step;
     while row < bounds.bottom().ceil() as i32 {
@@ -442,16 +464,19 @@ pub(crate) fn selection_pattern(
             let mut column = (left / step as f32).ceil() as i32 * step;
             while (column as f32) < right {
                 let point = Pos2::new(column as f32, y);
-                painter.circle_filled(point, 1.05, Color32::from_black_alpha(195));
-                painter.circle_filled(point, 0.62, Color32::from_white_alpha(225));
+                painter.circle_filled(point, 1.85, edge);
+                painter.circle_filled(point, 1.35, dot);
                 column += step;
             }
         }
         row += step;
     }
-    if mark.stroke && mark.fill.is_none() {
+    if mark.stroke
+        && mark.fill.is_none()
+        && let Some(outline) = prepared.rings.first()
+    {
         let mut carry = 0.;
-        for pair in prepared.rings[0].windows(2) {
+        for pair in outline.windows(2) {
             let (a, b) = (view.screen(pair[0]), view.screen(pair[1]));
             let delta = b - a;
             let length = delta.length();

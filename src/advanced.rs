@@ -29,6 +29,9 @@ pub(crate) fn assemble_project(
             s.perspective = child.extras.perspective.clone();
         }
         crate::animation_clips::normalize_asset_ranges(&mut next, *id);
+        if next.extras.rig.character_symbol == Some(*id) {
+            crate::character::apply_bone_names(&mut next.extras.rig, &child.layers);
+        }
         child = next;
     }
     crate::animation::store_scene(&mut child);
@@ -258,6 +261,9 @@ impl Editor {
                 s.perspective = self.doc.extras.perspective.clone();
             }
             crate::animation_clips::normalize_asset_ranges(&mut parent, id);
+            if parent.extras.rig.character_symbol == Some(id) {
+                crate::character::apply_bone_names(&mut parent.extras.rig, &self.doc.layers);
+            }
             self.doc = parent;
             self.rigging = Default::default();
             self.feature.selected_folder = None;

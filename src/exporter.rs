@@ -2921,6 +2921,7 @@ mod tests {
             vec![crate::vector::transform(&mark, |p| p + Vec2::new(40., 0.))].into();
         d.layers[0].options.keys[10] = true;
         d.layers[0].options.tweens.push(crate::animation::Tween {
+            shape: false,
             start: 0,
             end: 10,
             curve: Default::default(),

@@ -75,6 +75,35 @@ fn cell(out: &egui::FullOutput, frame: usize) -> Pos2 {
         .expect("layer label");
     Pos2::new(p.x + 243. + 22. * (frame as f32 + 0.5), p.y + 6.)
 }
+
+#[test]
+fn character_tools_float_above_the_view_grid() {
+    let ctx = egui::Context::default();
+    let mut e = editor();
+    e.doc.layers[0].frames.truncate(8);
+    e.doc.extras.rig.character_symbol = Some(1);
+    e.feature.symbol_stack.push((e.doc.clone(), 0, 0, 1));
+    tick(&ctx, &mut e, vec![], true, false);
+    let out = tick(&ctx, &mut e, vec![], true, false);
+    let label = |name: &str| {
+        out.shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.job.text == name && shape.clip_rect.contains(text.pos) =>
+                {
+                    Some(text.pos)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing visible label: {name}"))
+    };
+    let tools = label("Character Tools");
+    let front = label("Front");
+    let right = label("Right");
+    assert!(tools.y < front.y);
+    assert!((front.y - right.y).abs() < 1.);
+}
 fn tag(i: usize) -> Mark {
     Mark {
         points: vec![[i as f32, 10.], [i as f32 + 4., 20.]].into(),
@@ -244,6 +273,7 @@ fn frame_move_preserves_motion_span_and_rejects_inverted_keys_or_locked_layers()
         .options
         .tweens
         .push(crate::animation::Tween {
+            shape: false,
             start: 0,
             end: 4,
             curve: Curve::default(),
@@ -416,6 +446,7 @@ fn canvas_path_can_be_bent_directly_and_undone_without_changing_endpoint_artwork
         .options
         .tweens
         .push(crate::animation::Tween {
+            shape: false,
             start: 0,
             end: 4,
             curve: Curve::default(),

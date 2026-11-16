@@ -59,8 +59,9 @@ pub struct RigEditor {
     pub timing: Option<usize>,
     character_setup: bool,
     pub(crate) edit_character_bones: bool,
-    pub(crate) preview_character_pose: bool,
     turn_drag: Option<(bool, f32, f32)>,
+    selection_rotation: Option<(u64, usize, f32, Pos2, bool)>,
+    turn_slider: Option<(bool, usize, Rect)>,
     drag: Option<Gesture>,
 }
 impl RigEditor {
@@ -85,8 +86,9 @@ impl Default for RigEditor {
             timing: None,
             character_setup: false,
             edit_character_bones: false,
-            preview_character_pose: false,
             turn_drag: None,
+            selection_rotation: None,
+            turn_slider: None,
             drag: None,
         }
     }
@@ -518,15 +520,33 @@ impl Editor {
         }
     }
 
-    fn turn_controls(
-        &mut self,
-        ui: &egui::Ui,
-        area: Rect,
-        view: View,
-        frame: usize,
-        selected: &[(usize, usize)],
-    ) -> bool {
-        if !matches!(self.tool, Tool::Select | Tool::Bones)
+    fn selected_bone_ids(&self, selected: &[(usize, usize)]) -> std::collections::HashSet<u64> {
+        let rig = &self.doc.extras.rig;
+        let mut visible = std::collections::HashSet::new();
+        let tracks = self.selected_rig_tracks(selected);
+        for bone in &rig.bones {
+            if !bone.targets.iter().any(|track| tracks.contains(track)) {
+                continue;
+            }
+            let mut root = bone;
+            for _ in 0..rig.bones.len() {
+                let Some(parent) = root
+                    .parent
+                    .and_then(|id| rig.bones.iter().find(|bone| bone.id == id))
+                else {
+                    break;
+                };
+                root = parent;
+            }
+            if !visible.contains(&root.id) {
+                visible.extend(rig.pose_branch(root.id, None));
+            }
+        }
+        visible
+    }
+
+    fn turn_controls(&mut self, ui: &egui::Ui, area: Rect, view: View, frame: usize) -> bool {
+        if self.tool != Tool::Bones
             || self.playing
             || !self.feature.symbol_stack.is_empty()
             || (self.tool == Tool::Bones && self.rigging.create)
@@ -541,45 +561,7 @@ impl Editor {
         if turns.head.root.is_none() && turns.body.root.is_none() {
             return false;
         }
-        let selected_tracks: Vec<_> = if self.tool == Tool::Select {
-            selected
-                .iter()
-                .filter_map(|&(layer, mark)| {
-                    let layer = self.doc.layers.get(layer)?;
-                    let exposure = layer.exposure(self.frame);
-                    layer
-                        .frames
-                        .get(exposure.start)?
-                        .get(mark)
-                        .filter(|mark| mark.style.instance.is_some())
-                        .map(|mark| mark.style.track)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if self.tool == Tool::Select && self.rigging.turn_drag.is_none() {
-            if selected_tracks.is_empty() {
-                return false;
-            }
-            let belongs_to_character = [turns.head.root, turns.body.root]
-                .into_iter()
-                .flatten()
-                .any(|root| {
-                    let branch = rig.pose_branch(root, None);
-                    rig.bones.iter().any(|bone| {
-                        branch.contains(&bone.id)
-                            && bone
-                                .targets
-                                .iter()
-                                .any(|track| selected_tracks.contains(track))
-                    })
-                });
-            if !belongs_to_character {
-                return false;
-            }
-        }
-        let poses = rig.poses(frame);
+        let poses = crate::character::poses(&self.doc, rig, frame);
         let mut edit = None;
         let mut consumed = false;
         for (head, channel, title) in [
@@ -595,7 +577,8 @@ impl Editor {
             {
                 continue;
             }
-            let spacing = if character { 9.5 } else { 19. };
+            let half_rail = 38.;
+            let spacing = half_rail / if character { 4. } else { 2. };
             let center = view.screen(pose.start) + Vec2::new(0., if head { -24. } else { 24. });
             let rect = Rect::from_center_size(center, Vec2::new(90., 22.));
             let response = ui
@@ -616,7 +599,7 @@ impl Editor {
             let color = crate::themes::accent();
             painter.rect_filled(rect, 5., crate::themes::panel());
             painter.line_segment(
-                [center - Vec2::X * 38., center + Vec2::X * 38.],
+                [center - Vec2::X * half_rail, center + Vec2::X * half_rail],
                 Stroke::new(1., color),
             );
             let range = if character { 4 } else { 2 };
@@ -683,6 +666,248 @@ impl Editor {
         consumed
     }
 
+    fn selection_bone_input(
+        &mut self,
+        ui: &egui::Ui,
+        area: Rect,
+        view: View,
+        frame: usize,
+        selected: &[(usize, usize)],
+    ) -> bool {
+        let active = self.rigging.selection_rotation;
+        let (pointer, pressed, down, cancel, panning) = ui.input(|i| {
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.key_pressed(egui::Key::Escape),
+                i.key_down(egui::Key::Space) || i.pointer.middle_down(),
+            )
+        });
+        if let Some((id, frame, offset, start, mut edited)) = active {
+            if cancel {
+                self.rigging.selection_rotation = None;
+                if edited {
+                    self.history(false);
+                }
+                return true;
+            }
+            if !edited && pointer.is_some_and(|pointer| pointer.distance(start) >= 3.) {
+                self.checkpoint();
+                edited = true;
+                self.rigging.selection_rotation = Some((id, frame, offset, start, edited));
+            }
+            let rig = &self.doc.extras.rig;
+            if edited
+                && let Some(pointer) = pointer
+                && let Some(bone) = rig.bones.iter().find(|bone| bone.id == id)
+                && let Some(pose) = crate::character::poses(&self.doc, rig, frame).get(&id)
+            {
+                let direction = view.world(pointer) - pose.start;
+                if direction.length_sq() > 1e-6 {
+                    let mut key = rig::bone_value(bone, frame);
+                    key.frame = frame;
+                    key.angle +=
+                        crate::animation::shortest(direction.angle() + offset - pose.angle);
+                    self.doc.extras.rig.set_bone_key(id, key);
+                }
+            }
+            if !down {
+                self.rigging.selection_rotation = None;
+                if edited {
+                    self.recover();
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            return true;
+        }
+        let Some(pointer) =
+            pointer.filter(|&p| area.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id()))
+        else {
+            return false;
+        };
+        if panning || selected.is_empty() {
+            return false;
+        }
+        let visible = self.selected_bone_ids(selected);
+        if visible.is_empty() {
+            return false;
+        }
+        let poses = crate::character::poses(&self.doc, &self.doc.extras.rig, frame);
+        let hit = poses
+            .iter()
+            .filter(|(id, _)| visible.contains(id))
+            .filter_map(|(&id, pose)| {
+                let start = view.screen(pose.start);
+                let axis = view.screen(pose.end) - start;
+                let t = ((pointer - start).dot(axis) / axis.length_sq().max(1e-6)).clamp(0., 1.);
+                let distance = pointer.distance(start + axis * t);
+                (distance < 9.).then_some((distance, id, pose))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let Some((_, id, pose)) = hit else {
+            return false;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        if !pressed {
+            return false;
+        }
+        self.rigging.bone = Some(id);
+        self.rigging.selection_rotation = Some((
+            id,
+            frame,
+            pose.angle - (view.world(pointer) - pose.start).angle(),
+            pointer,
+            false,
+        ));
+        true
+    }
+
+    fn selection_turn_slider(
+        &mut self,
+        ui: &egui::Ui,
+        area: Rect,
+        view: View,
+        frame: usize,
+        selected: &[(usize, usize)],
+    ) -> bool {
+        let rig = &self.doc.extras.rig;
+        let Some((layer, index)) = selected.last().copied() else {
+            return false;
+        };
+        let Some(layer) = self.doc.layers.get(layer) else {
+            return false;
+        };
+        let marks = crate::animation::marks(layer, self.frame);
+        let Some(mark) = marks.get(index) else {
+            return false;
+        };
+        if mark.style.instance.is_none() || mark.style.track == 0 {
+            return false;
+        }
+        if rig.character_symbol.is_none() {
+            return false;
+        }
+        let turns = &rig.character_turns;
+        let drives_piece = |root| {
+            rig.pose_branch(root, None).iter().any(|id| {
+                rig.bones
+                    .iter()
+                    .any(|bone| bone.id == *id && bone.targets.contains(&mark.style.track))
+            })
+        };
+        let head = self
+            .rigging
+            .turn_slider
+            .map(|(head, _, _)| head)
+            .or_else(|| {
+                if turns.head.root.is_some_and(drives_piece) {
+                    Some(true)
+                } else {
+                    turns
+                        .body
+                        .root
+                        .filter(|&root| drives_piece(root))
+                        .map(|_| false)
+                }
+            });
+        let Some(head) = head else { return false };
+        let frame = self
+            .rigging
+            .turn_slider
+            .map_or(frame, |(_, frame, _)| frame);
+        let channel = if head { &turns.head } else { &turns.body };
+        let value = channel.value(frame);
+        let name = channel
+            .root
+            .and_then(|id| rig.bones.iter().find(|bone| bone.id == id))
+            .map_or(tr(if head { "Head turn" } else { "Body turn" }), |bone| {
+                bone.name.as_str()
+            });
+        let bounds = crate::vector::control_bounds(mark);
+        if !bounds.is_finite() || area.width() < 120. {
+            return false;
+        }
+        let bounds = Rect::from_two_pos(view.screen(bounds.min), view.screen(bounds.max));
+        let width = area.width().min(198.);
+        let right = bounds.right() + 12.;
+        let x = if right + width <= area.right() {
+            right
+        } else {
+            bounds.left() - width - 12.
+        };
+        let rect = Rect::from_min_size(
+            Pos2::new(
+                x.clamp(area.left(), area.right() - width),
+                (bounds.center().y - 25.).clamp(area.top(), (area.bottom() - 50.).max(area.top())),
+            ),
+            Vec2::new(width, 50.),
+        );
+        let rect = self.rigging.turn_slider.map_or(rect, |(_, _, rect)| rect);
+        let center = rect.center() + Vec2::Y * 10.;
+        let rail = rect.width() / 2. - 14.;
+        let response = ui
+            .interact(
+                rect.intersect(area),
+                ui.scope_id().with("selection-turn-slider"),
+                egui::Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        let painter = ui
+            .ctx()
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                ui.scope_id().with("selection-turn-overlay"),
+            ))
+            .with_clip_rect(area);
+        let color = crate::themes::accent();
+        painter.rect(
+            rect,
+            7.,
+            crate::themes::panel(),
+            Stroke::new(1., crate::themes::line()),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center() - Vec2::Y * 12.,
+            egui::Align2::CENTER_CENTER,
+            format!("{name} · {}  {:.0}°", tr("Turnaround"), value * 45.),
+            egui::FontId::proportional(11.),
+            crate::themes::muted(),
+        );
+        painter.line_segment(
+            [center - Vec2::X * rail, center + Vec2::X * rail],
+            Stroke::new(1., color),
+        );
+        painter.circle_filled(
+            center + Vec2::X * rail * (value / 4.).clamp(-1., 1.),
+            5.,
+            color,
+        );
+        if let Some(pointer) = response.interact_pointer_pos()
+            && (response.clicked()
+                || response.drag_started()
+                || response.dragged()
+                || response.drag_stopped())
+        {
+            if self.rigging.turn_slider.is_none() {
+                self.checkpoint();
+                self.rigging.turn_slider = Some((head, frame, rect));
+            }
+            let turns = &mut self.doc.extras.rig.character_turns;
+            let channel = if head {
+                &mut turns.head
+            } else {
+                &mut turns.body
+            };
+            channel.set(frame, ((pointer.x - center.x) / rail).clamp(-1., 1.) * 4.);
+        }
+        if !ui.input(|i| i.pointer.primary_down()) && self.rigging.turn_slider.take().is_some() {
+            self.recover();
+        }
+        response.is_pointer_button_down_on() || response.clicked() || response.drag_stopped()
+    }
+
     pub fn rig_input(
         &mut self,
         ui: &egui::Ui,
@@ -691,8 +916,12 @@ impl Editor {
         selected: &[(usize, usize)],
     ) -> bool {
         let rig_frame = self.group_rig_frame();
-        if self.turn_controls(ui, area, view, rig_frame, selected) {
+        if self.turn_controls(ui, area, view, rig_frame) {
             return true;
+        }
+        if self.tool == Tool::Select && !self.playing {
+            return self.selection_turn_slider(ui, area, view, rig_frame, selected)
+                || self.selection_bone_input(ui, area, view, rig_frame, selected);
         }
         if !matches!(self.tool, Tool::Bones | Tool::Puppet) || self.playing {
             return false;
@@ -1105,13 +1334,64 @@ impl Editor {
         }
         true
     }
-    pub fn rig_overlays(&self, p: &egui::Painter, view: View) {
+    pub fn rig_overlays(&self, p: &egui::Painter, view: View, selected: &[(usize, usize)]) {
         let rig_frame = self.group_rig_frame();
-        if self.playing || !matches!(self.tool, Tool::Bones | Tool::Puppet) {
+        if self.playing || !matches!(self.tool, Tool::Bones | Tool::Puppet | Tool::Select) {
             return;
         }
-        let poses = self.doc.extras.rig.poses(rig_frame);
-        if self.rigging.paint || self.rigging.show_weights {
+        let rig = &self.doc.extras.rig;
+        let mut visible = std::collections::HashSet::new();
+        let selecting = self.tool == Tool::Select;
+        if selecting {
+            visible = self.selected_bone_ids(selected);
+            if visible.is_empty() {
+                for &(layer, index) in selected {
+                    let Some(layer) = self.doc.layers.get(layer) else {
+                        continue;
+                    };
+                    let marks = crate::animation::marks(layer, self.frame);
+                    let Some(instance) = marks
+                        .get(index)
+                        .and_then(|mark| mark.style.instance.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(symbol) = self
+                        .doc
+                        .extras
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.id == instance.symbol)
+                    else {
+                        continue;
+                    };
+                    if symbol.rig.bones.is_empty() {
+                        continue;
+                    }
+                    let Some(layer) = symbol.layers.first() else {
+                        continue;
+                    };
+                    let frame = crate::features::symbol_frame(
+                        instance,
+                        layer.frames.len(),
+                        self.frame,
+                        self.animation.clock,
+                    );
+                    let poses = crate::character::poses(&self.doc, &symbol.rig, frame);
+                    let color = Color32::from_rgb(86, 211, 214);
+                    for pose in poses.values() {
+                        let a = view.screen(rig::point(instance.matrix, pose.start));
+                        let b = view.screen(rig::point(instance.matrix, pose.end));
+                        p.line_segment([a, b], Stroke::new(2., color));
+                        p.circle(a, 4., Color32::from_gray(30), Stroke::new(1.5, color));
+                        p.circle(b, 4., Color32::from_gray(30), Stroke::new(1.5, color));
+                    }
+                }
+                return;
+            }
+        }
+        let poses = crate::character::poses(&self.doc, rig, rig_frame);
+        if !selecting && (self.rigging.paint || self.rigging.show_weights) {
             if let Some(id) = self.rigging.bone {
                 self.weight_overlay(p, view, id, &poses);
             }
@@ -1128,8 +1408,11 @@ impl Editor {
             p.circle_stroke(start, 6., Stroke::new(2., color));
             p.circle_stroke(end, 4., Stroke::new(1., color));
         }
-        if self.tool == Tool::Bones {
+        if self.tool == Tool::Bones || selecting {
             for b in &self.doc.extras.rig.bones {
+                if selecting && !visible.contains(&b.id) {
+                    continue;
+                }
                 let Some(pose) = poses.get(&b.id) else {
                     continue;
                 };
@@ -1150,7 +1433,8 @@ impl Editor {
                 ));
                 p.circle(a, 4., Color32::from_gray(30), Stroke::new(1.5, c));
                 p.circle(z, 5., Color32::from_gray(30), Stroke::new(1.5, c));
-                if !self.rigging.paint
+                if !selecting
+                    && !self.rigging.paint
                     && self.rigging.drag.is_none()
                     && p.ctx()
                         .input(|i| i.pointer.hover_pos().is_some_and(|q| q.distance(z) < 28.))

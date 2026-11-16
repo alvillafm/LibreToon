@@ -194,6 +194,8 @@ pub struct Tween {
     pub start: usize,
     pub end: usize,
     pub curve: Curve,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shape: bool,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraKey {
@@ -479,6 +481,19 @@ pub fn marks(layer: &Layer, frame: usize) -> SharedVec<Mark> {
         return layer.frames[frame].clone();
     };
     let t = (frame - a) as f32 / (b - a) as f32;
+    if span.shape {
+        let first = &layer.frames[a];
+        let last = &layer.frames[b];
+        if !shape_pair(first, last) {
+            return first.clone();
+        }
+        let t = span.curve.time(t);
+        return first
+            .iter()
+            .zip(last.iter())
+            .map(|(a, b)| morph(a, b, t))
+            .collect();
+    }
     let targets: std::collections::HashMap<_, _> = layer.frames[b]
         .iter()
         .filter(|m| m.style.track != 0)
@@ -495,6 +510,153 @@ pub fn marks(layer: &Layer, frame: usize) -> SharedVec<Mark> {
             target.map_or_else(|| m.clone(), |n| interpolate(m, n, t, &span.curve))
         })
         .collect()
+}
+
+pub(crate) fn shape_pair(first: &[Mark], last: &[Mark]) -> bool {
+    !first.is_empty()
+        && first.len() == last.len()
+        && first.iter().zip(last).all(|(a, b)| {
+            [a, b].iter().all(|m| {
+                m.style.instance.is_none()
+                    && m.style.text.is_none()
+                    && m.style.media_image.is_none()
+                    && !m.style.raster_tile
+                    && !m.style.guide
+                    && (!m.nodes.is_empty() || !m.points.is_empty())
+            }) && (a.style.track == 0 || b.style.track == 0 || a.style.track == b.style.track)
+                && a.closed == b.closed
+                && a.rectangle == b.rectangle
+                && a.stroke == b.stroke
+                && a.nodes.len() == b.nodes.len()
+                && a.points.len() == b.points.len()
+                && a.holes.len() == b.holes.len()
+                && a.holes
+                    .iter()
+                    .zip(b.holes.iter())
+                    .all(|(a, b)| a.len() == b.len())
+                && a.width_profile.len() == b.width_profile.len()
+                && a.fill.is_some() == b.fill.is_some()
+                && match (&a.style.gradient, &b.style.gradient) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.radial == b.radial && a.stops.len() == b.stops.len(),
+                    _ => false,
+                }
+        })
+}
+
+pub(crate) fn morph(a: &Mark, b: &Mark, t: f32) -> Mark {
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    let point = |a: [f32; 2], b: [f32; 2]| std::array::from_fn(|i| mix(a[i], b[i]));
+    let color = |a: [u8; 4], b: [u8; 4]| {
+        std::array::from_fn(|i| mix(a[i].into(), b[i].into()).round() as u8)
+    };
+    let points =
+        |a: &[[f32; 2]], b: &[[f32; 2]]| a.iter().zip(b).map(|(&a, &b)| point(a, b)).collect();
+    let mut out = a.clone();
+    out.points = points(&a.points, &b.points);
+    out.nodes = a
+        .nodes
+        .iter()
+        .zip(b.nodes.iter())
+        .map(|(a, b)| crate::document::Node {
+            position: point(a.position, b.position),
+            in_handle: point(a.in_handle, b.in_handle),
+            out_handle: point(a.out_handle, b.out_handle),
+        })
+        .collect();
+    out.holes = a
+        .holes
+        .iter()
+        .zip(b.holes.iter())
+        .map(|(a, b)| points(a, b))
+        .collect();
+    out.width = mix(a.width, b.width);
+    out.width_profile = a
+        .width_profile
+        .iter()
+        .zip(b.width_profile.iter())
+        .map(|(a, b)| crate::width::WidthStop {
+            t: mix(a.t, b.t),
+            width: mix(a.width, b.width),
+        })
+        .collect();
+    out.color = color(a.color, b.color);
+    out.fill = a.fill.zip(b.fill).map(|(a, b)| color(a, b));
+    if a.style.palette_fill != b.style.palette_fill {
+        out.style.palette_fill = None;
+    }
+    if a.style.palette_stroke != b.style.palette_stroke {
+        out.style.palette_stroke = None;
+    }
+    if let (Some(gradient), Some(b)) = (&mut out.style.gradient, &b.style.gradient) {
+        gradient.start = point(gradient.start, b.start);
+        gradient.end = point(gradient.end, b.end);
+        for (a, b) in gradient.stops.iter_mut().zip(b.stops.iter()) {
+            a.t = mix(a.t, b.t);
+            a.color = color(a.color, b.color);
+        }
+    }
+    out
+}
+
+impl Editor {
+    pub(crate) fn create_shape_tween(&mut self, layer: usize, frame: usize) {
+        self.finish_pending_pen();
+        let drawing = &self.doc.layers[layer];
+        if drawing.options.raster || !crate::frame_workflow::editable(drawing) {
+            return;
+        }
+        let start = drawing.exposure(frame).start;
+        let end = drawing.exposure(frame).end;
+        if end >= drawing.frames.len() || end - start < 2 {
+            self.status =
+                crate::i18n::tr("Shape Tween needs two keyframes with room in between.").into();
+            return;
+        }
+        if !shape_pair(&drawing.frames[start], &drawing.frames[end]) {
+            self.status = crate::i18n::tr("Duplicate the first drawing and edit its nodes to create a compatible Shape Tween.").into();
+            return;
+        }
+        self.checkpoint();
+        let tweens = &mut self.doc.layers[layer].options.tweens;
+        let curve = tweens
+            .iter()
+            .find(|span| span.start == start && span.end == end)
+            .map_or_else(Curve::default, |span| span.curve.clone());
+        // Keep adjacent segments when converting part of an existing tween.
+        let mut spans = Vec::new();
+        for span in tweens.iter() {
+            if span.end <= start || span.start >= end {
+                spans.push(span.clone());
+            } else {
+                if span.start < start {
+                    spans.push(Tween {
+                        end: start,
+                        ..span.clone()
+                    });
+                }
+                if span.end > end {
+                    spans.push(Tween {
+                        start: end,
+                        ..span.clone()
+                    });
+                }
+            }
+        }
+        spans.push(Tween {
+            start,
+            end,
+            curve,
+            shape: true,
+        });
+        spans.sort_by_key(|span| span.start);
+        *tweens = spans.into();
+        self.layer = layer;
+        self.frame = frame;
+        self.playing = false;
+        self.restart_media_audio();
+        self.recover();
+    }
 }
 pub fn camera_at(camera: &Camera, frame: usize) -> CameraKey {
     let local = frame.saturating_sub(camera.start).min(camera.duration - 1);
@@ -686,6 +848,7 @@ impl Editor {
             start,
             end,
             curve: Default::default(),
+            shape: false,
         });
         layer.options.tweens.sort_by_key(|s| s.start);
         self.canvas.selected = ids;

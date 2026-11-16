@@ -678,7 +678,12 @@ impl Importer<'_> {
                             layer.frames[f] = a.clone();
                         }
                         layer.frames[end] = b;
-                        layer.options.tweens.push(Tween { start, end, curve });
+                        layer.options.tweens.push(Tween {
+                            start,
+                            end,
+                            curve,
+                            shape: false,
+                        });
                         self.warn("Interpolaciones clásicas importadas: transformación y aceleración; trayectorias y giros múltiples pueden variar");
                         continue;
                     }

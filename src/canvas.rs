@@ -739,6 +739,7 @@ impl Editor {
             self.studio.color_picker = None;
         }
         let character_bones = self.character_bone_input(ui, &painter, area, view);
+        let pupil_area = !character_bones && self.pupil_area_input(ui, area, view);
         let visual_handled =
             !picker_click && self.visual_canvas_input(ui, area, view, &state.selected);
         let mut guide_handled = if picker_click
@@ -755,6 +756,7 @@ impl Editor {
                         | Tool::Transform
                 ))
             || character_bones
+            || pupil_area
             || light_input
             || trim_input
             || folder_input
@@ -2113,7 +2115,7 @@ impl Editor {
         let mut marks = if blur_rendered {
             vec![]
         } else {
-            crate::features::resolve_at(
+            let resolved = crate::features::resolve_at(
                 &self.doc,
                 self.frame,
                 false,
@@ -2122,7 +2124,24 @@ impl Editor {
                 } else {
                     self.frame
                 },
-            )
+            );
+            if self.face_reference() {
+                let mut reference =
+                    crate::features::resolve_at(&self.doc, self.frame % 8, false, self.frame % 8);
+                reference.retain(|(layer, _, _)| *layer != self.layer);
+                for (_, _, mark) in &mut reference {
+                    crate::features::apply_color(mark, [1., 1., 1., 0.28, 0., 0., 0., 0.]);
+                }
+                reference.extend(
+                    resolved
+                        .into_iter()
+                        .filter(|(layer, _, _)| *layer == self.layer),
+                );
+                reference.sort_by_key(|(layer, _, _)| *layer);
+                reference
+            } else {
+                resolved
+            }
         }
         .into_iter()
         .peekable();
@@ -2226,7 +2245,7 @@ impl Editor {
         }
         self.advanced_overlays(&painter, area, view);
         self.visual_canvas_overlays(&painter, view, &state.selected);
-        self.rig_overlays(&painter, view);
+        self.rig_overlays(&painter, view, &state.selected);
         self.paint_guides(&painter, area, view);
         if tool == Tool::Width {
             for &(l, m) in &state.selected {
@@ -2520,6 +2539,7 @@ impl Editor {
         self.command_helper_ui(ui, area);
         self.sync_selected_style(&state.selected);
         self.canvas = state;
+        self.face_rig_panel(ui.ctx(), area);
         self.animation_canvas_drop(ui, area, view);
         self.finish_animation_clip_ui(&ctx);
     }

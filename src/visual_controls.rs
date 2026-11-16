@@ -41,7 +41,7 @@ impl Editor {
             .options
             .tweens
             .iter()
-            .position(|s| self.frame >= s.start && self.frame <= s.end)?;
+            .position(|s| !s.shape && self.frame >= s.start && self.frame <= s.end)?;
         let t = &layer.options.tweens[index];
         let a = crate::vector::control_bounds(layer.frames[t.start].get(m)?).center();
         let b = crate::vector::control_bounds(layer.frames[t.end].get(m)?).center();
@@ -749,7 +749,7 @@ impl Editor {
                 ui,
                 Icon::Trash,
                 "",
-                "Remove motion tween",
+                "Quitar interpolación",
                 false,
                 has_motion,
             )

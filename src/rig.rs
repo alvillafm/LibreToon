@@ -104,6 +104,11 @@ pub(crate) struct TurnKey {
 
 impl Rig {
     pub(crate) fn character_angle(&self, track: u64, frame: usize) -> Option<usize> {
+        self.character_turn(track, frame)
+            .map(|turn| (turn.round() as i32).rem_euclid(8) as usize)
+    }
+
+    pub(crate) fn character_turn(&self, track: u64, frame: usize) -> Option<f32> {
         self.character_symbol?;
         let turns = &self.character_turns;
         let affects = |root| {
@@ -123,7 +128,7 @@ impl Rig {
             .root
             .filter(|&root| affects(root))
             .map_or(0., |_| turns.head.value(frame));
-        Some(((body + head).round() as i32).rem_euclid(8) as usize)
+        Some(body + head)
     }
 }
 

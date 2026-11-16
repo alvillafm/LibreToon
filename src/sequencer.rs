@@ -939,16 +939,26 @@ impl Editor {
         let previous_frame = self.frame;
         self.exposure_sheet(ui.ctx());
         self.frame_workflow_ui(ui.ctx());
-        egui::Panel::bottom("timeline")
+        if self.in_character_symbol() {
+            let timeline = egui::Panel::bottom("character-view-timeline")
+                .default_size(240.)
+                .min_size(150.)
+                .max_size(700.)
+                .resizable(true)
+                .show(ui, |ui| self.character_timeline(ui));
+            self.floating_character_tools(
+                ui.ctx(),
+                timeline.response.rect,
+                ui.available_rect_before_wrap(),
+            );
+            return;
+        }
+        let timeline = egui::Panel::bottom("timeline")
             .default_size(300.)
             .min_size(150.)
             .max_size(700.)
             .resizable(true)
             .show(ui, |ui| {
-                if self.in_character_symbol() {
-                    self.character_timeline(ui);
-                    return;
-                }
                 let viewport_id = ui.scope_id().with("timeline-viewport");
                 let mut viewport = ui.data(|data| data.get_temp::<TimelineViewport>(viewport_id)).unwrap_or_default();
                 let previous_cell = viewport.cell;
@@ -1902,11 +1912,10 @@ impl Editor {
                                         let color =
                                             if self.doc.layers[l].options.mannequin.is_some() {
                                                 layer_color.gamma_multiply(0.36)
-                                            } else if crate::animation::span(&self.doc.layers[l], f)
-                                                .is_some()
+                                            } else if let Some(span) = crate::animation::span(&self.doc.layers[l], f)
                                                 && f != self.frame
                                             {
-                                                crate::themes::color(Color32::from_rgb(95, 61, 145))
+                                                crate::themes::color(if span.shape { Color32::from_rgb(36, 109, 81) } else { Color32::from_rgb(95, 61, 145) })
                                             } else if f == self.frame {
                                                 crate::themes::color(Color32::from_rgb(50, 88, 130))
                                             } else if key {
@@ -2071,6 +2080,7 @@ impl Editor {
                                                     (4, "Borrar este fotograma clave"),
                                                     (5, "Aplicar interpolación a la capa"),
                                                     (6, "Quitar interpolación"),
+                                                    (7, "Create Shape Tween"),
                                                 ] {
                                                     let enabled = editable
                                                         && match action {
@@ -2091,6 +2101,7 @@ impl Editor {
                                                                 f,
                                                             )
                                                             .is_some(),
+                                                            7 => !self.doc.layers[l].options.raster,
                                                             _ => true,
                                                         };
                                                     if button(
@@ -2101,6 +2112,7 @@ impl Editor {
                                                             2 => Icon::FrameExtend,
                                                             3 => Icon::FrameShorten,
                                                             4 => Icon::KeyRemove,
+                                                            7 => Icon::Node,
                                                             _ => Icon::Tween,
                                                         },
                                                         label,
@@ -2110,7 +2122,11 @@ impl Editor {
                                                     )
                                                     .clicked()
                                                     {
-                                                        self.timeline_cell_action(l, f, action);
+                                                        if action == 7 {
+                                                            self.create_shape_tween(l, f);
+                                                        } else {
+                                                            self.timeline_cell_action(l, f, action);
+                                                        }
                                                         ui.close();
                                                     }
                                                 }
@@ -2653,6 +2669,11 @@ impl Editor {
                     }
                 }
             });
+        self.floating_character_tools(
+            ui.ctx(),
+            timeline.response.rect,
+            ui.available_rect_before_wrap(),
+        );
         if self.frame != previous_frame
             && !self.playing
             && ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())
