@@ -477,6 +477,13 @@ impl Editor {
                         self.gap = gap;
                     }
                 }
+                ui.checkbox(
+                    &mut self.feature.bucket_link_outline,
+                    crate::i18n::tr("Link fill to outline"),
+                )
+                .on_hover_text(crate::i18n::tr(
+                    "Fill a closed curve directly so the color follows its nodes.",
+                ));
                 ui.small(crate::i18n::tr(
                     "Shift + click to recalculate an existing fill",
                 ));

@@ -156,7 +156,7 @@ impl Editor {
                 let (outside, inside) = split(mark);
                 if !inside.is_empty() {
                     state.selected.push(id);
-                    if !outside.is_empty() {
+                    if !outside.is_empty() && !self.keeps_outline_fill(l, mark) {
                         state.partial.insert(id, (outside, inside));
                     }
                 }

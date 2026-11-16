@@ -946,11 +946,9 @@ impl Editor {
                 .max_size(700.)
                 .resizable(true)
                 .show(ui, |ui| self.character_timeline(ui));
-            self.floating_character_tools(
-                ui.ctx(),
-                timeline.response.rect,
-                ui.available_rect_before_wrap(),
-            );
+            let canvas = ui.available_rect_before_wrap();
+            self.floating_character_tools(ui.ctx(), timeline.response.rect, canvas);
+            self.character_rig_checks(ui.ctx(), canvas);
             return;
         }
         let timeline = egui::Panel::bottom("timeline")

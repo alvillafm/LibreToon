@@ -513,6 +513,14 @@ pub fn marks(layer: &Layer, frame: usize) -> SharedVec<Mark> {
 }
 
 pub(crate) fn shape_pair(first: &[Mark], last: &[Mark]) -> bool {
+    shape_pair_with(first, last, |a, b| a == 0 || b == 0 || a == b)
+}
+
+pub(crate) fn shape_pair_with(
+    first: &[Mark],
+    last: &[Mark],
+    match_tracks: impl Fn(u64, u64) -> bool,
+) -> bool {
     !first.is_empty()
         && first.len() == last.len()
         && first.iter().zip(last).all(|(a, b)| {
@@ -523,7 +531,7 @@ pub(crate) fn shape_pair(first: &[Mark], last: &[Mark]) -> bool {
                     && !m.style.raster_tile
                     && !m.style.guide
                     && (!m.nodes.is_empty() || !m.points.is_empty())
-            }) && (a.style.track == 0 || b.style.track == 0 || a.style.track == b.style.track)
+            }) && match_tracks(a.style.track, b.style.track)
                 && a.closed == b.closed
                 && a.rectangle == b.rectangle
                 && a.stroke == b.stroke

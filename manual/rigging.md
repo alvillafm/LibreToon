@@ -23,7 +23,7 @@ Choose **Add Rigged Layer → Eye** above the view grid. Select a cell in **Open
 
 Enable **Horizontal Shape Tween** from the first view of a transition to blend into the next drawn view at the current eyelid closure. Blank views are skipped. Double-click a row name to rename it, then press Enter. Renaming artwork linked to one bone also renames that bone. Use the arrow next to an eye to fold its three drawing rows.
 
-Choose **Add Rigged Layer → Pupil**, draw the pupil for each angle, and use **Area Tool** to drag its travel rectangle. Back on the stage, drag the dot in the pupil's circular control in **Face Rig**. To draw an eye over its pupil, right-click the pupil row and use **Move up** until it appears before the eye in the drawing order.
+Choose **Add Rigged Layer → Pupil**, draw the pupil for each angle, and use **Area Tool** to drag from the center of its travel circle to the edge. Back on the stage, drag the dot in the pupil's circular control in **Face Rig**. To draw an eye over its pupil, right-click the pupil row and use **Move up** until it appears before the eye in the drawing order.
 
 ## Lip sync
 

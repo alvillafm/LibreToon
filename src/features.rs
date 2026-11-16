@@ -134,6 +134,8 @@ pub struct MarkStyle {
     pub(crate) palette_stroke: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primitive: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) linked_outline_fill: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_pivot: Option<[f32; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,6 +207,8 @@ impl ObjectFolder {
 pub struct LayerOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) character_piece: Option<crate::character::Piece>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) rig_check_tweens: bool,
     pub composition: crate::folder_groups::LayerGroup,
     pub animation_track: bool,
     pub raster: bool,
@@ -245,6 +249,7 @@ impl Default for LayerOptions {
     fn default() -> Self {
         Self {
             character_piece: None,
+            rig_check_tweens: false,
             composition: Default::default(),
             animation_track: false,
             raster: false,
@@ -430,6 +435,7 @@ pub struct FeatureState {
     pub frame_selection: Option<(usize, usize, usize)>,
     pub(crate) bucket_range_armed: bool,
     pub(crate) bucket_next: bool,
+    pub(crate) bucket_link_outline: bool,
     pub(crate) bucket_next_count: usize,
     pub(crate) bucket_range: Option<crate::canvas::BucketRange>,
     pub frame_drag: Option<FrameDrag>,
@@ -458,6 +464,7 @@ impl Default for FeatureState {
             frame_selection: None,
             bucket_range_armed: false,
             bucket_next: false,
+            bucket_link_outline: false,
             bucket_next_count: 2,
             bucket_range: None,
             frame_drag: None,
@@ -672,7 +679,12 @@ fn expand(
                 piece,
             )
         };
-        let eyes = crate::character::rigged_eye_artwork(doc, mark.style.track, parent_frame);
+        let eyes = crate::character::rigged_eye_artwork(
+            doc,
+            mark.style.track,
+            parent_frame,
+            mouth.as_ref(),
+        );
         for mut m in resolved.into_iter().map(|(_, _, mark)| mark).chain(eyes) {
             if let Some(c) = mark.style.instance_color {
                 apply_color(&mut m, c);
@@ -1144,7 +1156,12 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         }
         if symbol.layers.iter().any(|layer| {
             layer.options.character_piece.as_ref().is_some_and(|piece| {
-                !matches!(count, 8 | crate::character::FACE_FRAMES) || !piece.valid()
+                !(count == 8
+                    || ((crate::character::FACE_FRAMES..=crate::character::MAX_FACE_FRAMES)
+                        .contains(&count)
+                        && count % 8 == 0))
+                    || (piece.lip_poses.len() + 1) * 8 > count
+                    || !piece.valid()
             })
         }) {
             return Err("Invalid character view".into());

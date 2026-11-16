@@ -91,11 +91,94 @@ impl Editor {
     pub fn project_document(&self) -> Document {
         crate::advanced::assemble_project(&self.doc, &self.feature)
     }
+    #[cfg(test)]
     pub fn convert_symbol(&mut self) {
-        self.convert_symbol_kind(false);
+        self.convert_symbol_configured(false, None);
+    }
+
+    pub(crate) fn request_symbol_conversion(&self, ctx: &egui::Context) {
+        if self.canvas.selected.is_empty()
+            || self.doc.layers[self.layer].options.locked
+            || self.doc.extras.symbols.len() >= 500
+        {
+            return;
+        }
+        let name = format!("Symbol {}", self.doc.extras.symbols.len() + 1);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique("convert-symbol"),
+                (name, Playback::Loop, SymbolClock::Scene, true),
+            )
+        });
+    }
+
+    pub(crate) fn symbol_conversion_ui(&mut self, ctx: &egui::Context) {
+        let id = egui::Id::unique("convert-symbol");
+        let Some((mut name, mut mode, mut clock, focus)) =
+            ctx.data(|data| data.get_temp::<(String, Playback, SymbolClock, bool)>(id))
+        else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(id).show(ctx, |ui| {
+            ui.set_width(300.);
+            ui.heading(tr("Convertir a símbolo"));
+            ui.separator();
+            ui.label(tr("Name"));
+            let field = ui.text_edit_singleline(&mut name);
+            if focus {
+                field.request_focus();
+            }
+            ui.label(tr("Playback"));
+            ui.horizontal(|ui| {
+                for (value, label) in [
+                    (Playback::Loop, "Loop"),
+                    (Playback::Once, "Play once"),
+                    (Playback::Single, "Single frame"),
+                ] {
+                    ui.selectable_value(&mut mode, value, tr(label));
+                }
+            });
+            ui.add_enabled_ui(mode != Playback::Single, |ui| {
+                let mut linked = clock == SymbolClock::Scene;
+                if ui.checkbox(&mut linked, tr("Link to timeline")).changed() {
+                    clock = if linked {
+                        SymbolClock::Scene
+                    } else {
+                        SymbolClock::Independent
+                    };
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let valid = !name.trim().is_empty();
+                confirm = design::button(ui, Icon::Symbol, "Convert", "", false, valid).clicked()
+                    || (valid
+                        && field.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                cancel = ui.button(tr("Cancelar")).clicked();
+            });
+        });
+        if confirm || cancel || modal.should_close() {
+            ctx.data_mut(|data| data.remove::<(String, Playback, SymbolClock, bool)>(id));
+            if confirm {
+                self.convert_symbol_configured(false, Some((name.trim().to_owned(), mode, clock)));
+            }
+        } else {
+            ctx.data_mut(|data| data.insert_temp(id, (name, mode, clock, false)));
+        }
     }
 
     pub(crate) fn convert_symbol_kind(&mut self, lip: bool) {
+        self.convert_symbol_configured(lip, None);
+    }
+
+    fn convert_symbol_configured(
+        &mut self,
+        lip: bool,
+        settings: Option<(String, Playback, SymbolClock)>,
+    ) {
         if lip && self.enable_lip_symbol_on_selection() {
             return;
         }
@@ -147,6 +230,21 @@ impl Editor {
         let count = mouth_poses.len().max(1);
         let id = id();
         let number = self.doc.extras.symbols.len() + 1;
+        let (name, mode, clock) = settings.unwrap_or_else(|| {
+            if lip {
+                (
+                    format!("{} {number}", tr("Lip Sync symbol")),
+                    Playback::Single,
+                    SymbolClock::Scene,
+                )
+            } else {
+                (
+                    format!("Symbol {number}"),
+                    Playback::Loop,
+                    SymbolClock::Scene,
+                )
+            }
+        });
         if !partial {
             self.checkpoint();
         }
@@ -168,11 +266,7 @@ impl Editor {
             folders: Default::default(),
             perspective: Default::default(),
             id,
-            name: if lip {
-                format!("{} {number}", tr("Lip Sync symbol"))
-            } else {
-                format!("Symbol {number}")
-            },
+            name,
             layers: vec![layer].into(),
         });
         let mut sorted = ids;
@@ -189,14 +283,10 @@ impl Editor {
             ..Default::default()
         };
         mark.style.instance = Some(Instance {
-            clock: Default::default(),
+            clock,
             symbol: id,
             matrix: [1., 0., 0., 1., 0., 0.],
-            mode: if lip {
-                Playback::Single
-            } else {
-                Playback::Loop
-            },
+            mode,
             first: 0,
             born: self.frame,
         });

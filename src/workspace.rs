@@ -520,7 +520,7 @@ impl Editor {
                         )
                         .clicked()
                         {
-                            self.convert_symbol();
+                            self.request_symbol_conversion(&ctx);
                             ui.close();
                         }
                         ui.separator();
@@ -636,6 +636,7 @@ impl Editor {
             self.document_settings_ui(&ctx);
             self.preferences_ui(&ctx);
             self.notice_ui(&ctx);
+            self.symbol_conversion_ui(&ctx);
             return;
         }
         egui::Panel::left("tools")
@@ -996,7 +997,7 @@ impl Editor {
                 self.fill_enabled = true;
             }
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F8)) {
-                self.convert_symbol();
+                self.request_symbol_conversion(&ctx);
             }
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Comma)) {
                 self.frame = self.frame.saturating_sub(1);
@@ -1017,6 +1018,7 @@ impl Editor {
         self.frame_picker_ui(&ctx);
         self.export_ui(&ctx);
         self.notice_ui(&ctx);
+        self.symbol_conversion_ui(&ctx);
     }
     pub(crate) fn new_document(&mut self) {
         self.playing = false;

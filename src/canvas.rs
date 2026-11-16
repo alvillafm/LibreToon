@@ -739,7 +739,11 @@ impl Editor {
             self.studio.color_picker = None;
         }
         let character_bones = self.character_bone_input(ui, &painter, area, view);
-        let pupil_area = !character_bones && self.pupil_area_input(ui, area, view);
+        let facial_setup = !character_bones
+            && !picker_click
+            && (self.pupil_area_input(ui, area, view)
+                || self.brow_point_input(ui, area, view)
+                || self.wrist_point_input(ui, area, view));
         let visual_handled =
             !picker_click && self.visual_canvas_input(ui, area, view, &state.selected);
         let mut guide_handled = if picker_click
@@ -756,7 +760,7 @@ impl Editor {
                         | Tool::Transform
                 ))
             || character_bones
-            || pupil_area
+            || facial_setup
             || light_input
             || trim_input
             || folder_input
@@ -904,7 +908,11 @@ impl Editor {
         }
         if convert || lip_symbol {
             self.canvas = state;
-            self.convert_symbol_kind(lip_symbol);
+            if lip_symbol {
+                self.convert_symbol_kind(true);
+            } else {
+                self.request_symbol_conversion(&ctx);
+            }
             state = std::mem::take(&mut self.canvas);
             ctx.request_repaint();
         }
@@ -1370,6 +1378,10 @@ impl Editor {
                         } else {
                             let mut segment = None;
                             if tool == Tool::Select
+                                && !self.keeps_outline_fill(
+                                    id.0,
+                                    &self.doc.layers[id.0].frames[self.frame][id.1],
+                                )
                                 && !state.selected.contains(&id)
                                 && self.doc.layers[id.0].frames[self.frame][id.1]
                                     .style
@@ -2115,32 +2127,19 @@ impl Editor {
         let mut marks = if blur_rendered {
             vec![]
         } else {
-            let resolved = crate::features::resolve_at(
-                &self.doc,
-                self.frame,
-                false,
-                if self.playing {
-                    self.animation.clock
-                } else {
-                    self.frame
-                },
-            );
-            if self.face_reference() {
-                let mut reference =
-                    crate::features::resolve_at(&self.doc, self.frame % 8, false, self.frame % 8);
-                reference.retain(|(layer, _, _)| *layer != self.layer);
-                for (_, _, mark) in &mut reference {
-                    crate::features::apply_color(mark, [1., 1., 1., 0.28, 0., 0., 0., 0.]);
-                }
-                reference.extend(
-                    resolved
-                        .into_iter()
-                        .filter(|(layer, _, _)| *layer == self.layer),
-                );
-                reference.sort_by_key(|(layer, _, _)| *layer);
-                reference
+            if self.in_character_symbol() {
+                self.character_edit_artwork()
             } else {
-                resolved
+                crate::features::resolve_at(
+                    &self.doc,
+                    self.frame,
+                    false,
+                    if self.playing {
+                        self.animation.clock
+                    } else {
+                        self.frame
+                    },
+                )
             }
         }
         .into_iter()
@@ -3186,6 +3185,13 @@ impl Editor {
             }
         }
     }
+    pub(crate) fn keeps_outline_fill(&self, layer: usize, mark: &Mark) -> bool {
+        mark.stroke
+            && mark.fill.is_some()
+            && (mark.closed || mark.rectangle)
+            && (mark.style.linked_outline_fill || self.edits_rigged_eye(layer))
+    }
+
     pub(crate) fn separate_component(
         &mut self,
         state: &mut Canvas,
@@ -3193,7 +3199,7 @@ impl Editor {
         stroke: bool,
     ) -> (usize, usize) {
         let mark = &self.doc.layers[id.0].frames[self.frame][id.1];
-        if mark.fill.is_none() || !mark.stroke {
+        if mark.fill.is_none() || !mark.stroke || self.keeps_outline_fill(id.0, mark) {
             return id;
         }
         let mut fill = mark.clone();
@@ -3724,6 +3730,7 @@ impl Editor {
             recalculate,
             self.gap,
             self.fill_color.to_array(),
+            self.bucket_outline_mode(layer),
         ) {
             Ok(edit) => {
                 self.checkpoint();
@@ -3759,17 +3766,26 @@ impl Editor {
             })
         };
         match edit {
-            BucketEdit::Recolor { index, color } => {
+            BucketEdit::Recolor {
+                index,
+                color,
+                replaced,
+                linked,
+            } => {
                 let link = (!gradient_on)
                     .then(|| self.track_vector_color(color))
                     .flatten();
                 let marks = &mut self.doc.layers[layer].frames[frame];
                 let mark = &mut marks[index];
                 mark.fill = Some(color);
+                mark.style.linked_outline_fill |= linked;
                 mark.style.palette_fill = link;
                 mark.style.gradient = fit_gradient(mark);
                 mark.style.shade = 0;
                 mark.style.light = 0;
+                for index in replaced.into_iter().rev() {
+                    marks.remove(index);
+                }
             }
             BucketEdit::Replace {
                 shapes,
@@ -3801,6 +3817,16 @@ impl Editor {
                 }
                 marks.splice(0..0, shapes);
             }
+        }
+    }
+
+    fn bucket_outline_mode(&self, layer: usize) -> OutlineFill {
+        if !self.feature.bucket_link_outline {
+            OutlineFill::Off
+        } else if self.edits_rigged_eye(layer) {
+            OutlineFill::Eye
+        } else {
+            OutlineFill::Link
         }
     }
 
@@ -3842,6 +3868,7 @@ impl Editor {
                 .then(|| (self.frame, crate::animation::marks(source, self.frame)));
         let color = self.fill_color.to_array();
         let gap = self.gap;
+        let outline = self.bucket_outline_mode(layer);
         let ctx = ctx.clone();
         self.feature.bucket_range = Some(BucketRange {
             layer,
@@ -3861,7 +3888,10 @@ impl Editor {
                         .as_ref()
                         .filter(|(current, _)| *current == frame)
                         .map_or(&worker_snapshot[layer].frames[frame], |(_, marks)| marks);
-                    (frame, bucket_edit(marks, world, recalculate, gap, color))
+                    (
+                        frame,
+                        bucket_edit(marks, world, recalculate, gap, color, outline),
+                    )
                 })
                 .collect();
             let _ = tx.send(edits);
@@ -3973,10 +4003,19 @@ fn following_bucket_keys(layer: &crate::document::Layer, frame: usize, count: us
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutlineFill {
+    Off,
+    Link,
+    Eye,
+}
+
 enum BucketEdit {
     Recolor {
         index: usize,
         color: [u8; 4],
+        replaced: Vec<usize>,
+        linked: bool,
     },
     Replace {
         shapes: Vec<Mark>,
@@ -4004,7 +4043,69 @@ fn bucket_edit(
     recalculate: bool,
     gap: crate::bucket::Gap,
     color: [u8; 4],
+    outline_mode: OutlineFill,
 ) -> Result<BucketEdit, String> {
+    if outline_mode != OutlineFill::Off {
+        let Some(index) = marks.iter().rposition(|mark| {
+            if !mark.stroke
+                || (!mark.closed && !mark.rectangle)
+                || mark.style.guide
+                || mark.style.raster_tile
+                || mark.style.instance.is_some()
+                || mark.style.text.is_some()
+                || mark.style.media_image.is_some()
+                || !crate::vector::control_bounds(mark).contains(world)
+            {
+                return false;
+            }
+            let mut outline = mark.clone();
+            outline.fill = Some(color);
+            crate::vector::contains_fill(&outline, world)
+        }) else {
+            return Err(
+                crate::i18n::tr("Click inside a closed vector outline to link the fill.").into(),
+            );
+        };
+        let outline = &marks[index];
+        let eye_fill =
+            outline_mode == OutlineFill::Eye && crate::character::has_fragmented_eye_fill(marks);
+        let mut replaced = Vec::new();
+        for (other, fill) in marks.iter().enumerate() {
+            if other == index
+                || fill.stroke
+                || fill.fill.is_none()
+                || fill.style.guide
+                || fill.style.raster_tile
+                || fill.style.instance.is_some()
+                || fill.style.text.is_some()
+                || fill.style.media_image.is_some()
+            {
+                continue;
+            }
+            if eye_fill
+                || (fill.closed == outline.closed
+                    && fill.rectangle == outline.rectangle
+                    && fill.points == outline.points
+                    && fill.nodes == outline.nodes
+                    && fill.holes == outline.holes)
+            {
+                replaced.push(other);
+            } else if crate::vector::control_bounds(fill).contains(world)
+                && crate::vector::contains_fill(fill, world)
+            {
+                return Err(crate::i18n::tr(
+                    "Remove the separate fill before linking this outline.",
+                )
+                .into());
+            }
+        }
+        return Ok(BucketEdit::Recolor {
+            index,
+            color,
+            replaced,
+            linked: true,
+        });
+    }
     let existing = marks.iter().rposition(|mark| {
         mark.style.instance.is_none()
             && mark.style.media_image.is_none()
@@ -4014,8 +4115,15 @@ fn bucket_edit(
             && crate::vector::control_bounds(mark).contains(world)
             && crate::vector::contains_fill(mark, world)
     });
-    if !recalculate && let Some(index) = existing {
-        return Ok(BucketEdit::Recolor { index, color });
+    if let Some(index) = existing
+        && (!recalculate || marks[index].style.linked_outline_fill)
+    {
+        return Ok(BucketEdit::Recolor {
+            index,
+            color,
+            replaced: Vec::new(),
+            linked: false,
+        });
     }
     let shapes = if let Some(index) = existing.filter(|&index| !marks[index].bucket) {
         let mut contours = marks.to_vec();
@@ -4154,6 +4262,45 @@ mod styling_gesture_tests {
         assert_eq!(following_bucket_keys(layer, 1, 2), vec![1, 3, 7]);
         assert_eq!(following_bucket_keys(layer, 3, 2), vec![3, 7, 9]);
         assert_eq!(following_bucket_keys(layer, 9, 2), vec![9]);
+    }
+
+    #[test]
+    fn linked_bucket_fill_follows_edited_nodes_and_survives_undo() {
+        run(|_, e| {
+            let node = |x, y| crate::document::Node::corner([x, y]);
+            e.doc.layers[0].frames[0].push(Mark {
+                nodes: vec![
+                    node(100., 100.),
+                    node(300., 100.),
+                    node(300., 300.),
+                    node(100., 300.),
+                ]
+                .into(),
+                closed: true,
+                ..Default::default()
+            });
+            e.feature.bucket_link_outline = true;
+            e.fill_enabled = true;
+            e.fill_color = Color32::RED;
+            let mut state = Canvas::default();
+            e.bucket_at(&mut state, Pos2::new(200., 200.), false);
+            assert_eq!(e.separate_component(&mut state, (0, 0), true), (0, 0));
+            let area = Rect::from_min_max(Pos2::new(75., 75.), Pos2::new(220., 325.));
+            e.cut_selection(&mut state, area, false);
+            assert_eq!(state.selected, vec![(0, 0)]);
+            assert!(state.partial.is_empty());
+            let marks = &mut e.doc.layers[0].frames[0];
+            assert_eq!(marks.len(), 1);
+            let mark = &mut marks[0];
+            assert!(mark.stroke);
+            assert_eq!(mark.fill, Some(Color32::RED.to_array()));
+            mark.nodes[0] = node(100., 180.);
+            mark.nodes[1] = node(300., 180.);
+            assert!(!crate::vector::contains_fill(mark, Pos2::new(200., 150.)));
+            assert!(crate::vector::contains_fill(mark, Pos2::new(200., 220.)));
+            e.history(false);
+            assert!(e.doc.layers[0].frames[0][0].fill.is_none());
+        });
     }
 
     #[test]

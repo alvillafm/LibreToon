@@ -38,7 +38,8 @@ fn tick(
             if workspace {
                 e.workspace(ui)
             } else {
-                e.canvas_ui(ui)
+                e.canvas_ui(ui);
+                e.symbol_conversion_ui(ctx);
             }
         },
     );
@@ -176,7 +177,7 @@ fn symbol_context_conversion_still_draws_the_stage_on_the_conversion_frame() {
         vec![button(p, false, egui::PointerButton::Primary)],
         false,
     );
-    assert_eq!(e.doc.extras.symbols.len(), 1);
+    assert!(e.doc.extras.symbols.is_empty());
     assert!(
         out.shapes
             .iter()
@@ -185,8 +186,27 @@ fn symbol_context_conversion_still_draws_the_stage_on_the_conversion_frame() {
             } else {
                 false
             }),
-        "conversion frame must paint the white stage"
+        "opening the conversion dialog must paint the white stage"
     );
+    let out = tick(&ctx, &mut e, vec![], false);
+    let p = label(&out, "Convert");
+    tick(
+        &ctx,
+        &mut e,
+        vec![
+            egui::Event::PointerMoved(p),
+            button(p, true, egui::PointerButton::Primary),
+        ],
+        false,
+    );
+    tick(
+        &ctx,
+        &mut e,
+        vec![button(p, false, egui::PointerButton::Primary)],
+        false,
+    );
+    assert_eq!(e.doc.extras.symbols.len(), 1);
+    assert_eq!(e.doc.extras.symbols[0].name, "Symbol 1");
 }
 #[test]
 fn text_boxes_can_be_drawn_typed_reopened_and_saved() {

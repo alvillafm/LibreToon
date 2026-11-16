@@ -39,9 +39,9 @@ impl Shape {
     ];
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
-    name: String,
+    pub(crate) name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shape: Option<Shape>,
 }
@@ -150,6 +150,15 @@ pub(crate) struct RouteScope<'a> {
     prefix: Vec<Slot>,
 }
 
+pub(crate) fn character_mouth_slot(symbol: u64, track: u64) -> Slot {
+    Slot {
+        layer: 0,
+        mark: 0,
+        symbol,
+        track,
+    }
+}
+
 impl<'a> RouteScope<'a> {
     pub(crate) fn new(routes: &'a [Route], frame: usize) -> Self {
         Self {
@@ -178,14 +187,17 @@ impl<'a> RouteScope<'a> {
     }
 
     pub(crate) fn child(&self, layer: usize, mark: usize, artwork: &crate::Mark) -> Option<Self> {
-        let symbol = artwork.style.instance.as_ref()?.symbol;
-        let mut prefix = self.prefix.clone();
-        prefix.push(Slot {
+        self.child_slot(Slot {
             layer,
             mark,
-            symbol,
+            symbol: artwork.style.instance.as_ref()?.symbol,
             track: artwork.style.track,
-        });
+        })
+    }
+
+    pub(crate) fn child_slot(&self, slot: Slot) -> Option<Self> {
+        let mut prefix = self.prefix.clone();
+        prefix.push(slot);
         self.routes
             .iter()
             .any(|route| route.path.len() >= prefix.len() && Self::matches(&route.path, &prefix))
@@ -293,6 +305,7 @@ impl Editor {
                     };
                     collect_targets(
                         &self.doc,
+                        &self.doc.extras.rig,
                         root,
                         instance,
                         &mut Vec::new(),
@@ -411,15 +424,35 @@ impl Editor {
                         }
                     });
                 let target = &session.targets[session.target];
-                let _ = self.symbol_thumbnail(
-                    ui,
-                    target
-                        .path
-                        .last()
-                        .map_or(target.root.symbol, |slot| slot.symbol),
-                    session.pose.min(target.poses.len() - 1),
-                    egui::vec2(100., 52.),
-                );
+                let symbol = target
+                    .path
+                    .last()
+                    .map_or(target.root.symbol, |slot| slot.symbol);
+                let pose = session.pose.min(target.poses.len() - 1);
+                let preview_frame = target
+                    .path
+                    .last()
+                    .and_then(|slot| {
+                        self.doc
+                            .extras
+                            .symbols
+                            .iter()
+                            .find(|s| s.id == slot.symbol)?
+                            .layers
+                            .iter()
+                            .find(|layer| {
+                                layer.options.character_piece.as_ref().is_some_and(|piece| {
+                                    piece.track == slot.track && piece.is_lip()
+                                })
+                            })
+                    })
+                    .map_or(pose, |layer| {
+                        let first = (pose + 1) * 8;
+                        (first..first + 8)
+                            .find(|&frame| !layer.frames[frame].is_empty())
+                            .unwrap_or(first)
+                    });
+                let _ = self.symbol_thumbnail(ui, symbol, preview_frame, egui::vec2(100., 52.));
                 let Some(artwork) = self
                     .doc
                     .layers
@@ -891,6 +924,7 @@ impl Editor {
             .filter(|s| !s.mouth_poses.is_empty())
             .map(|s| s.mouth_poses.clone())
         else {
+            self.character_lip_properties(ui, l, m);
             return false;
         };
         let Some(mark) = self.doc.layers[l].frames[self.frame].get(m) else {
@@ -1051,6 +1085,7 @@ impl Editor {
             };
             collect_targets(
                 &self.doc,
+                &self.doc.extras.rig,
                 root,
                 instance,
                 &mut Vec::new(),
@@ -1183,6 +1218,104 @@ impl Editor {
                     design::button(ui, Icon::Mouth, &format!("{label}  ›"), "", false, true);
                 egui::containers::menu::SubMenu::new().show(ui, &button, actions);
             }
+        }
+    }
+
+    fn character_lip_properties(&mut self, ui: &mut egui::Ui, layer: usize, mark: usize) {
+        let frame = self.frame;
+        let Some(artwork) = self.doc.layers[layer].frames[frame].get(mark) else {
+            return;
+        };
+        let Some(instance) = artwork.style.instance.as_ref() else {
+            return;
+        };
+        let root = Slot {
+            layer,
+            mark,
+            symbol: instance.symbol,
+            track: artwork.style.track,
+        };
+        let mut channels = Vec::new();
+        collect_targets(
+            &self.doc,
+            &self.doc.extras.rig,
+            root,
+            instance,
+            &mut Vec::new(),
+            "",
+            frame,
+            &mut channels,
+            &mut 256,
+        );
+        channels.retain(|target| {
+            target.path.last().is_some_and(|slot| {
+                self.doc
+                    .extras
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.id == slot.symbol)
+                    .is_some_and(|symbol| {
+                        symbol.layers.iter().any(|l| {
+                            l.options
+                                .character_piece
+                                .as_ref()
+                                .is_some_and(|piece| piece.track == slot.track && piece.is_lip())
+                        })
+                    })
+            })
+        });
+        if channels.is_empty() {
+            return;
+        }
+        design::category(ui, "LIPSYNC");
+        let mut edit = None;
+        for (index, target) in channels.iter().enumerate() {
+            let keys = channel_keys(artwork, &target.path);
+            let current = pose_at(keys, frame).unwrap_or(0);
+            ui.push_id(index, |ui| {
+                ui.small(target.name.trim_start_matches(" › "));
+                ui.horizontal_wrapped(|ui| {
+                    for (pose, entry) in target.poses.iter().enumerate() {
+                        if design::button(
+                            ui,
+                            Icon::Mouth,
+                            &entry.name,
+                            "",
+                            current == pose,
+                            target.drawn[pose] && !self.doc.layers[layer].options.locked,
+                        )
+                        .clicked()
+                        {
+                            edit = Some((index, Some(pose)));
+                        }
+                    }
+                    if design::button(
+                        ui,
+                        Icon::Minus,
+                        "",
+                        "Delete mouth key",
+                        false,
+                        !self.doc.layers[layer].options.locked
+                            && keys.iter().any(|key| key.frame == frame),
+                    )
+                    .clicked()
+                    {
+                        edit = Some((index, None));
+                    }
+                });
+            });
+        }
+        if let Some((index, pose)) = edit {
+            self.change_mouth_channel(layer, mark, frame, &channels[index].path, |keys| {
+                keys.retain(|key| key.frame != frame);
+                if let Some(pose) = pose {
+                    keys.push(Key {
+                        frame,
+                        pose,
+                        manual: true,
+                    });
+                }
+            });
         }
     }
 
@@ -1367,6 +1500,7 @@ impl Editor {
 
 fn collect_targets(
     doc: &crate::Document,
+    rig: &crate::rig::Rig,
     root: Slot,
     instance: &crate::features::Instance,
     path: &mut Vec<Slot>,
@@ -1383,7 +1517,40 @@ fn collect_targets(
         return;
     };
     let label = format!("{label} › {}", symbol.name);
-    if !symbol.mouth_poses.is_empty() {
+    let track = path.last().map_or(root.track, |slot| slot.track);
+    if path.len() < 8
+        && track != 0
+        && let Some(character) = doc
+            .extras
+            .symbols
+            .iter()
+            .find(|s| Some(s.id) == rig.character_symbol)
+    {
+        for (layer, piece) in crate::character::mouth_layers(character, track) {
+            if out.len() >= 64 {
+                return;
+            }
+            let mut route = path.clone();
+            route.push(character_mouth_slot(character.id, piece.track));
+            out.push(Target {
+                root,
+                path: route,
+                name: format!("{label} › {}", layer.name),
+                poses: piece.lip_poses.clone(),
+                drawn: (0..piece.lip_poses.len())
+                    .map(|pose| {
+                        (0..8).any(|view| {
+                            layer
+                                .frames
+                                .get((pose + 1) * 8 + view)
+                                .is_some_and(|marks| !marks.is_empty())
+                        })
+                    })
+                    .collect(),
+            });
+        }
+    }
+    if !symbol.mouth_poses.is_empty() && out.len() < 64 {
         let drawn = (0..symbol.mouth_poses.len())
             .map(|pose| {
                 symbol.layers.iter().any(|layer| {
@@ -1421,6 +1588,7 @@ fn collect_targets(
                 });
                 collect_targets(
                     doc,
+                    &symbol.rig,
                     root,
                     instance,
                     path,
