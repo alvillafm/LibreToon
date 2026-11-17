@@ -1,8 +1,26 @@
 <p align="center"><img src="https://i.imgur.com/RNhNwtU.png" width="250" alt="LibreToon logo"></p>
 
+<p align="center">
+  <a href="https://discord.gg/SVFTGRrzB">
+    <img src="https://shieldcn.dev/discord/members/SVFTGRrzB.svg?variant=branded" alt="Discord Members">
+  </a>
+</p>
+
 # LibreToon
 
 ### Made by an animator, for animators.
+
+<p align="center">
+  <a href="https://github.com/alvillafm/LibreToon/releases">
+    <img src="https://img.shields.io/github/downloads/alvillafm/LibreToon/total" alt="Downloads">
+  </a>
+  <a href="https://github.com/alvillafm/LibreToon/stargazers">
+    <img src="https://img.shields.io/github/stars/alvillafm/LibreToon" alt="Stars">
+  </a>
+</p>
+
+
+
 
 **LibreToon** is a free, open-source 2D animation application built from scratch in **Rust** for Windows, macOS, and Linux. It brings frame-by-frame drawing, vector and raster artwork, character rigging, and compositing into one workspace.
 
