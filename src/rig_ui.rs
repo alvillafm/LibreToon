@@ -811,6 +811,8 @@ impl Editor {
             .or_else(|| {
                 if turns.head.root.is_some_and(drives_piece) {
                     Some(true)
+                } else if rig.artwork_turn_target(mark.style.track) {
+                    Some(false)
                 } else {
                     turns
                         .body

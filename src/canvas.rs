@@ -843,6 +843,7 @@ impl Editor {
             }
         }
         let mut convert = false;
+        let mut create_character = false;
         let mut lip_symbol = false;
         let mut arrange = None;
         let mut clipboard = None;
@@ -866,6 +867,19 @@ impl Editor {
                 ui.separator();
                 arrange = crate::ordering::menu(ui, !state.selected.is_empty() && !self.playing);
                 ui.separator();
+                if crate::design::button(
+                    ui,
+                    Icon::Head,
+                    "Create Character",
+                    "",
+                    false,
+                    self.can_create_character(&state.selected),
+                )
+                .clicked()
+                {
+                    create_character = true;
+                    ui.close();
+                }
                 if crate::design::button(
                     ui,
                     Icon::Symbol,
@@ -907,9 +921,11 @@ impl Editor {
         if let Some(action) = arrange {
             self.arrange_selection(&mut state, action);
         }
-        if convert || lip_symbol {
+        if convert || lip_symbol || create_character {
             self.canvas = state;
-            if lip_symbol {
+            if create_character {
+                self.create_character_from_selection();
+            } else if lip_symbol {
                 self.convert_symbol_kind(true);
             } else {
                 self.request_symbol_conversion(&ctx);
@@ -2540,6 +2556,7 @@ impl Editor {
         self.sync_selected_style(&state.selected);
         self.canvas = state;
         self.face_rig_panel(ui.ctx(), area);
+        self.character_rig_checks(ui.ctx(), area);
         self.animation_canvas_drop(ui, area, view);
         self.finish_animation_clip_ui(&ctx);
     }

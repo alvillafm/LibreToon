@@ -19,11 +19,11 @@ To blend between adjacent character views, copy the first view into the next one
 
 Select a bound piece on the stage and click **Edit Character Symbol** in the floating panel above the timeline. Inside the symbol, **Character Tools** floats above the view grid. Switch between **Artwork** and **Edit Bones**, or use **Copy from View**. Drag the view grid's top edge to resize the timeline. The onion-skin controls are directly above the view names.
 
-Choose **Add Rigged Layer → Eye** above the view grid. Select a cell in **Open**, **Half closed**, or **Closed** and draw the eye for that angle. To interpolate, copy an eye drawing from another state in the cell menu, reshape its nodes, and enable **Vertical Shape Tween**. If the middle drawing is empty, the tween can interpolate directly between Open and Closed. In the scene, select the character and use **Eye closure** in **Face Rig** to key the eyelid.
+Choose **Add Rigged Layer → Eye** above the view grid. Select a cell in **Open**, **Half closed**, or **Closed** and draw the eye for that angle. To interpolate, copy an eye drawing from another state in the cell menu, reshape its nodes, and enable **Vertical Shape Tween**. If the middle drawing is empty, the tween can interpolate directly between Open and Closed. In the scene, select the character and use **Eye closure** in **Character Rig Controllers** to key the eyelid.
 
 Enable **Horizontal Shape Tween** from the first view of a transition to blend into the next drawn view at the current eyelid closure. Blank views are skipped. Double-click a row name to rename it, then press Enter. Renaming artwork linked to one bone also renames that bone. Use the arrow next to an eye to fold its three drawing rows.
 
-Choose **Add Rigged Layer → Pupil**, draw the pupil for each angle, and use **Area Tool** to drag from the center of its travel circle to the edge. Back on the stage, drag the dot in the pupil's circular control in **Face Rig**. To draw an eye over its pupil, right-click the pupil row and use **Move up** until it appears before the eye in the drawing order.
+Choose **Add Rigged Layer → Pupil**, draw the pupil for each angle, and use **Area Tool** to drag from the center of its travel circle to the edge. Back on the stage, drag the dot in the pupil's circular control in **Character Rig Controllers**. To draw an eye over its pupil, right-click the pupil row and use **Move up** until it appears before the eye in the drawing order.
 
 ## Lip sync
 

@@ -975,7 +975,6 @@ impl Editor {
                 .show(ui, |ui| self.character_timeline(ui));
             let canvas = ui.available_rect_before_wrap();
             self.floating_character_tools(ui.ctx(), timeline.response.rect, canvas);
-            self.character_rig_checks(ui.ctx(), canvas);
             return;
         }
         let timeline = egui::Panel::bottom("timeline")
@@ -1386,7 +1385,7 @@ impl Editor {
                     if self.animation.rig_channels_open {
                         let turns = &self.doc.extras.rig.character_turns;
                         if turns.head.root.is_some() { all.push(Row::Turn(true)); }
-                        if turns.body.root.is_some() { all.push(Row::Turn(false)); }
+                        if turns.body.root.is_some() || self.doc.extras.rig.bindings.iter().any(|binding| self.doc.extras.rig.artwork_turn_target(binding.target)) { all.push(Row::Turn(false)); }
                         all.extend(control_channels.iter().enumerate().map(|(index, (track, continuous, _))| Row::RigControl(*track, *continuous, index)));
                     }
                 }

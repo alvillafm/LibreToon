@@ -679,8 +679,8 @@ pub(crate) fn artwork(
                 } else {
                     match piece.face {
                         FacePart::Pupil => crate::vector::transform(mark, |p| p + gaze),
-                        FacePart::Brow => crate::vector::transform(mark, |p| {
-                            p + egui::vec2(0., brow(p, from) * (1. - blend) + brow(p, next) * blend)
+                        FacePart::Brow => deform_brow_mark(mark, |p| {
+                            brow(p, from) * (1. - blend) + brow(p, next) * blend
                         }),
                         _ => mark.clone(),
                     }
@@ -769,14 +769,24 @@ pub(crate) fn apply_bone_names(rig: &mut rig::Rig, layers: &[Layer]) {
 
 fn brow_profile_offset(x: f32, anchors: [f32; 3], width: f32, motion: [f32; 3]) -> f32 {
     let [left, center, right] = anchors;
-    let (x0, x1, v0, v1) = if x <= center {
-        (left, center, motion[0], motion[1])
+    let left_slope = (motion[1] - motion[0]) / (center - left).max(0.01);
+    let right_slope = (motion[2] - motion[1]) / (right - center).max(0.01);
+    let center_slope = if left_slope * right_slope > 0. {
+        2. * left_slope * right_slope / (left_slope + right_slope)
     } else {
-        (center, right, motion[1], motion[2])
+        0.
     };
-    let t = ((x - x0) / (x1 - x0).max(0.01)).clamp(0., 1.);
-    let t = t * t * (3. - 2. * t);
-    width * 0.35 * (v0 * (1. - t) + v1 * t)
+    let (x0, x1, v0, v1, slope0, slope1) = if x <= center {
+        (left, center, motion[0], motion[1], 0., center_slope)
+    } else {
+        (center, right, motion[1], motion[2], center_slope, 0.)
+    };
+    let span = (x1 - x0).max(0.01);
+    let t = ((x - x0) / span).clamp(0., 1.);
+    let smooth = t * t * (3. - 2. * t);
+    width
+        * 0.35
+        * (egui::lerp(v0..=v1, smooth) + span * t * (1. - t) * (slope0 * (1. - t) - slope1 * t))
 }
 
 fn brow_offset(
@@ -794,32 +804,51 @@ fn brow_offset(
 }
 
 fn deform_brow_mark(mark: &Mark, offset: impl Fn(egui::Pos2) -> f32) -> Mark {
-    let mut mark = mark.clone();
+    let warp = |point| point + egui::vec2(0., offset(point));
+    let mut warped = crate::vector::transform(mark, warp);
     if mark.style.instance.is_none()
         && mark.style.text.is_none()
         && mark.style.media_image.is_none()
         && (mark.nodes.len() > 1 || mark.points.len() > 1)
     {
-        let curves = crate::vector::cubics(&mark);
-        let spacing = (crate::vector::control_bounds(&mark).width() * 0.25).max(1.);
+        let curves = crate::vector::cubics(mark);
+        let width = crate::vector::control_bounds(mark).width();
+        let spacing = (width * 0.25).max(1.);
+        let probe = (width * 0.0001).max(0.01);
+        // Transport the tangent at the anchor through the warp. Warping the
+        // handle as an independent point can kink a previously smooth join.
+        let tangent = |anchor: egui::Pos2, handle: egui::Pos2| {
+            let vector = handle - anchor;
+            let dx = egui::vec2(probe, 0.);
+            let slope = (offset(anchor + dx) - offset(anchor - dx)) / (2. * probe);
+            warp(anchor) + vector + egui::vec2(0., slope * vector.x)
+        };
         let segments: Vec<_> = curves
             .into_iter()
-            .flat_map(|curve| {
+            .flat_map(|mut curve| {
                 let [a, b, c, d] = curve.0;
+                if a == b && c == d {
+                    curve.0 = [a, a.lerp(d, 1. / 3.), a.lerp(d, 2. / 3.), d];
+                }
                 let span = a.x.max(b.x).max(c.x).max(d.x) - a.x.min(b.x).min(c.x).min(d.x);
                 let steps = ((span / spacing).ceil() as usize).clamp(1, 4);
                 (0..steps).map(move |part| {
                     curve.sub(part as f32 / steps as f32, (part + 1) as f32 / steps as f32)
                 })
             })
+            .map(|curve| {
+                let [a, b, c, d] = curve.0;
+                crate::vector::Cubic([warp(a), tangent(a, b), tangent(d, c), warp(d)])
+            })
             .collect();
         if !segments.is_empty() {
-            let mut subdivided = crate::vector::from_cubics(&segments, &mark);
-            subdivided.holes = mark.holes;
-            mark = subdivided;
+            let mut subdivided = crate::vector::from_cubics(&segments, &warped);
+            subdivided.holes = warped.holes;
+            subdivided.closed = mark.closed || mark.rectangle;
+            warped = subdivided;
         }
     }
-    crate::vector::transform(&mark, |point| point + egui::vec2(0., offset(point)))
+    warped
 }
 
 pub(crate) fn mouth_layers(symbol: &Symbol, track: u64) -> impl Iterator<Item = (&Layer, &Piece)> {
@@ -2486,31 +2515,36 @@ impl Editor {
         else {
             return;
         };
-        let has_control = symbol
-            .layers
-            .iter()
-            .filter(|layer| layer.visible)
-            .any(|layer| {
-                layer.options.character_piece.as_ref().is_some_and(|piece| {
-                    piece.face.control()
-                        && piece
-                            .eye_parent
-                            .is_some_and(|track| tracks.contains(&track))
+        let has_control = |hands| {
+            symbol
+                .layers
+                .iter()
+                .filter(|layer| layer.visible)
+                .any(|layer| {
+                    layer.options.character_piece.as_ref().is_some_and(|piece| {
+                        piece.face.control()
+                            && (piece.face == FacePart::Hand) == hands
+                            && piece
+                                .eye_parent
+                                .is_some_and(|track| tracks.contains(&track))
+                    })
                 })
-            });
+        };
+        let has_hands = has_control(true);
+        let has_other = has_control(false);
         let is_face = symbol.layers.iter().any(|layer| {
             layer.options.character_piece.as_ref().is_some_and(|piece| {
                 matches!(piece.face, FacePart::Eye | FacePart::Brow | FacePart::Pupil)
-                    && (!has_control
+                    && (!(has_hands || has_other)
                         || piece
                             .eye_parent
                             .is_some_and(|track| tracks.contains(&track)))
             })
         });
-        if !has_control && !is_face {
+        if !has_hands && !has_other && !is_face {
             return;
         }
-        egui::Window::new(tr(if is_face { "Face Rig" } else { "Rig Controls" }))
+        egui::Window::new(tr("Character Rig Controllers"))
             .id(egui::Id::unique("scene-face-rig"))
             .default_pos(area.left_top() + egui::vec2(12., 12.))
             .default_size(egui::vec2(
@@ -2525,17 +2559,23 @@ impl Editor {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if has_control {
-                            self.scene_custom_controls(ui, id, &tracks);
-                        }
                         if is_face {
+                            crate::design::category(ui, "FACE CONTROLS");
                             self.scene_eye_controls(ui, id);
+                        }
+                        if has_hands {
+                            crate::design::category(ui, "HAND CONTROLS");
+                            self.scene_custom_controls(ui, id, &tracks, true);
+                        }
+                        if has_other {
+                            crate::design::category(ui, "OTHER CONTROLS");
+                            self.scene_custom_controls(ui, id, &tracks, false);
                         }
                     });
             });
     }
 
-    fn scene_custom_controls(&mut self, ui: &mut egui::Ui, id: u64, tracks: &[u64]) {
+    fn scene_custom_controls(&mut self, ui: &mut egui::Ui, id: u64, tracks: &[u64], hands: bool) {
         let symbol_index = self
             .doc
             .extras
@@ -2554,6 +2594,7 @@ impl Editor {
             let Some(piece) = layer.options.character_piece.as_ref().filter(|piece| {
                 layer.visible
                     && piece.face.control()
+                    && (piece.face == FacePart::Hand) == hands
                     && !piece.lip_poses.is_empty()
                     && piece
                         .eye_parent
@@ -2626,7 +2667,7 @@ impl Editor {
                 ui.separator();
             });
         }
-        let gesture = ui.scope_id().with("custom-rig-gesture");
+        let gesture = ui.scope_id().with(("custom-rig-gesture", hands));
         let dragging = ui.input(|input| input.pointer.primary_down());
         let active = ui
             .data(|data| data.get_temp::<bool>(gesture))
@@ -4042,6 +4083,54 @@ impl Editor {
             .is_some_and(|(parent, _, _, id)| parent.extras.rig.character_symbol == Some(*id))
     }
 
+    pub(crate) fn can_create_character(&self, selected: &[(usize, usize)]) -> bool {
+        !self.playing
+            && !self.in_character_symbol()
+            && self.doc.extras.rig.character_symbol.is_none()
+            && (!self.doc.extras.rig.bindings.is_empty()
+                || !selected.is_empty()
+                    && selected.iter().all(|(layer, _)| {
+                        self.doc.layers.get(*layer).is_some_and(|layer| {
+                            layer.visible
+                                && !layer.options.locked
+                                && !layer.options.raster
+                                && !layer.options.animation_track
+                        })
+                    }))
+    }
+
+    pub(crate) fn create_character_from_selection(&mut self) {
+        if !self.can_create_character(&self.canvas.selected) {
+            return;
+        }
+        if self.doc.extras.rig.bindings.is_empty() {
+            let selected = self.canvas.selected.clone();
+            let needs_symbol = !self.canvas.partial.is_empty()
+                || selected.iter().any(|&(layer, mark)| {
+                    crate::animation::marks(&self.doc.layers[layer], self.frame)
+                        .get(mark)
+                        .is_some_and(|mark| mark.style.instance.is_none())
+                });
+            let required = 1 + usize::from(needs_symbol);
+            if self.doc.extras.symbols.len() + required > 500 || selected.len() > 100 {
+                self.status = tr("Character Symbol exceeds the project limits.").into();
+                return;
+            }
+            if needs_symbol {
+                self.convert_symbol_kind(false);
+            }
+            let selected = self.canvas.selected.clone();
+            self.checkpoint();
+            for (layer, mark) in selected {
+                self.rig_bind(layer, mark);
+            }
+        }
+        self.open_character_symbol();
+        if self.in_character_symbol() {
+            self.activate_tool(crate::canvas::Tool::Select);
+        }
+    }
+
     pub(crate) fn open_character_symbol(&mut self) {
         if let Some(id) = self.doc.extras.rig.character_symbol
             && self.doc.extras.symbols.iter().any(|symbol| symbol.id == id)
@@ -4167,6 +4256,9 @@ impl Editor {
     }
 
     pub(crate) fn character_rig_checks(&mut self, ctx: &egui::Context, canvas: egui::Rect) {
+        if !self.in_character_symbol() || canvas.width() < 140. || canvas.height() < 70. {
+            return;
+        }
         let row = self.layer;
         let layer = &self.doc.layers[row];
         let Some(piece) = layer.options.character_piece.as_ref() else {
@@ -4204,101 +4296,161 @@ impl Editor {
                 .any(|b| b.target == anchor)
         });
         let mut check_tweens = layer.options.rig_check_tweens;
-        let result = egui::Area::new(egui::Id::unique("character-rig-checks"))
-            .order(egui::Order::Middle)
+        let mut changed = false;
+        egui::Window::new(tr("Rig Checklist"))
+            .id(egui::Id::unique("floating-character-rig-checks"))
             .pivot(egui::Align2::RIGHT_TOP)
-            .fixed_pos(canvas.right_top() + egui::vec2(-12., 12.))
+            .default_pos(canvas.right_top() + egui::vec2(-12., 12.))
             .constrain_to(canvas)
+            .default_width(216.)
+            .max_height((canvas.height() - 52.).max(22.))
+            .vscroll(true)
+            .movable(true)
+            .resizable(false)
             .show(ctx, |ui| {
-                egui::Frame::window(ui.style()).show(ui, |ui| {
-                    ui.set_width(216.);
-                    ui.horizontal(|ui| {
-                        character_row_icon(ui, Icon::Bones, tr("Rig checklist"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small(tr(VIEWS[view]));
-                        });
+                ui.set_width(216f32.min(canvas.width() - 24.));
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(tr(VIEWS[view]));
                     });
-                    ui.add(egui::Label::new(egui::RichText::new(&layer.name).strong()).truncate()).on_hover_text(&layer.name);
-                    ui.separator();
-                    rig_check_row(ui, attached.is_some(), &attached.map_or_else(
+                });
+                ui.add(egui::Label::new(egui::RichText::new(&layer.name).strong()).truncate())
+                    .on_hover_text(&layer.name);
+                ui.separator();
+                rig_check_row(
+                    ui,
+                    attached.is_some(),
+                    &attached.map_or_else(
                         || tr("Attach to a rig layer").to_owned(),
-                        |layer| format!("{} {}", tr("Attached to"), layer.name)));
-                    match piece.face {
-                        FacePart::Pupil => {
-                            rig_check_row(ui, piece.pupil_range(view).is_some(), tr("Pupil area"));
-                            rig_check_row(ui, eye.is_some(), &eye.map_or_else(
+                        |layer| format!("{} {}", tr("Attached to"), layer.name),
+                    ),
+                );
+                match piece.face {
+                    FacePart::Pupil => {
+                        rig_check_row(ui, piece.pupil_range(view).is_some(), tr("Pupil area"));
+                        rig_check_row(
+                            ui,
+                            eye.is_some(),
+                            &eye.map_or_else(
                                 || tr("Eye clipping").to_owned(),
-                                |eye| format!("{} {}", tr("Clipped to"), eye.name)));
-                        }
-                        kind if !piece.lip_poses.is_empty() => {
-                            let count = (1..=piece.lip_poses.len()).filter(|state| !layer.frames[state * 8 + view].is_empty()).count();
-                            let required = if kind == FacePart::Toggle && layer.frames[8 + view].is_empty() {
+                                |eye| format!("{} {}", tr("Clipped to"), eye.name),
+                            ),
+                        );
+                    }
+                    kind if !piece.lip_poses.is_empty() => {
+                        let count = (1..=piece.lip_poses.len())
+                            .filter(|state| !layer.frames[state * 8 + view].is_empty())
+                            .count();
+                        let required =
+                            if kind == FacePart::Toggle && layer.frames[8 + view].is_empty() {
                                 false
-                            } else { count == piece.lip_poses.len() || kind == FacePart::Toggle };
-                            rig_check_row(ui, required,
-                                &format!("{count}/{} {}", piece.lip_poses.len(), tr("poses drawn")));
-                            if kind == FacePart::Hand {
-                                rig_check_row(ui, piece.wrist_points.get(self.frame).is_some_and(Option::is_some), tr("Wrist point"));
-                            }
-                        }
-                        FacePart::Brow => {
-                            for (name, point) in BROW_POINTS.into_iter().zip(piece.brow_points[view]) {
-                                rig_check_row(ui, point.is_some(), tr(name));
-                            }
-                        }
-                        _ => {}
-                    }
-                    let offset = if piece.face == FacePart::Eye || !piece.lip_poses.is_empty() { (self.frame / 8).max(1) * 8 } else { 0 };
-                    let drawn = |slot: usize| !piece.hidden[slot] && layer.frames.get(offset + slot).is_some_and(|marks| !marks.is_empty());
-                    if piece.hidden[view] {
-                        ui.small(tr("Hidden in this view"));
-                    } else if !drawn(view) && let Some(other) = (0usize..8).filter(|&slot| drawn(slot)).min_by_key(|&slot| {
-                        let distance = slot.abs_diff(view);
-                        distance.min(8 - distance)
-                    }) {
-                        if piece.face != FacePart::Toggle {
-                            ui.small(format!("{} {}", tr("Nearest drawing"), tr(VIEWS[other])));
+                            } else {
+                                count == piece.lip_poses.len() || kind == FacePart::Toggle
+                            };
+                        rig_check_row(
+                            ui,
+                            required,
+                            &format!("{count}/{} {}", piece.lip_poses.len(), tr("poses drawn")),
+                        );
+                        if kind == FacePart::Hand {
+                            rig_check_row(
+                                ui,
+                                piece
+                                    .wrist_points
+                                    .get(self.frame)
+                                    .is_some_and(Option::is_some),
+                                tr("Wrist point"),
+                            );
                         }
                     }
-                    ui.separator();
-                    let changed = ui.checkbox(&mut check_tweens, tr("Check Shape Tweens"))
-                        .on_hover_text(tr("Check this layer’s drawn views for missing or incompatible transitions")).changed();
-                    if check_tweens && !piece.lip_poses.is_empty() {
-                        let mut drawn = 0;
-                        let mut ready = 0;
-                        for (pose, &flags) in piece.lip_tweens.iter().enumerate() {
-                            let offset = (pose + 1) * 8;
-                            let from = &layer.frames[offset + view];
-                            if from.is_empty() { continue; }
-                            drawn += 1;
-                            if flags & (1 << view) != 0
-                                && let Some(next) = (1..8).map(|step| (view + step) % 8).find(|&slot| {
-                                    !piece.hidden[slot] && !layer.frames[offset + slot].is_empty()
-                                })
-                                && compatible_eye_tween(from, &layer.frames[offset + next]) {
-                                ready += 1;
-                            }
-                        }
-                        rig_check_row(ui, drawn > 0 && ready == drawn,
-                            &format!("{ready}/{drawn} {}", tr("pose tweens ready")));
-                    } else if check_tweens {
-                        let checks = rig_tween_checks(layer, piece, view);
-                        rig_check_row(ui, checks.horizontal == TweenCheck::Ready, checks.horizontal.label(false));
-                        if let Some(vertical) = checks.vertical {
-                            rig_check_row(ui, vertical == TweenCheck::Ready, vertical.label(true));
-                        }
-                        let pending: Vec<_> = (0..8).filter(|&other| other != view && rig_view_drawn(layer, piece, other)
-                            && !rig_tween_checks(layer, piece, other).ready())
-                            .map(|other| tr(VIEWS[other])).collect();
-                        if !pending.is_empty() {
-                            ui.small(format!("{} {}", pending.len(), tr("other views to check")))
-                                .on_hover_text(pending.join(", "));
+                    FacePart::Brow => {
+                        for (name, point) in BROW_POINTS.into_iter().zip(piece.brow_points[view]) {
+                            rig_check_row(ui, point.is_some(), tr(name));
                         }
                     }
-                    changed
-                }).inner
+                    _ => {}
+                }
+                let offset = if piece.face == FacePart::Eye || !piece.lip_poses.is_empty() {
+                    (self.frame / 8).max(1) * 8
+                } else {
+                    0
+                };
+                let drawn = |slot: usize| {
+                    !piece.hidden[slot]
+                        && layer
+                            .frames
+                            .get(offset + slot)
+                            .is_some_and(|marks| !marks.is_empty())
+                };
+                if piece.hidden[view] {
+                    ui.small(tr("Hidden in this view"));
+                } else if !drawn(view)
+                    && let Some(other) =
+                        (0usize..8).filter(|&slot| drawn(slot)).min_by_key(|&slot| {
+                            let distance = slot.abs_diff(view);
+                            distance.min(8 - distance)
+                        })
+                {
+                    if piece.face != FacePart::Toggle {
+                        ui.small(format!("{} {}", tr("Nearest drawing"), tr(VIEWS[other])));
+                    }
+                }
+                ui.separator();
+                changed = ui
+                    .checkbox(&mut check_tweens, tr("Check Shape Tweens"))
+                    .on_hover_text(tr(
+                        "Check this layer’s drawn views for missing or incompatible transitions",
+                    ))
+                    .changed();
+                if check_tweens && !piece.lip_poses.is_empty() {
+                    let mut drawn = 0;
+                    let mut ready = 0;
+                    for (pose, &flags) in piece.lip_tweens.iter().enumerate() {
+                        let offset = (pose + 1) * 8;
+                        let from = &layer.frames[offset + view];
+                        if from.is_empty() {
+                            continue;
+                        }
+                        drawn += 1;
+                        if flags & (1 << view) != 0
+                            && let Some(next) = (1..8).map(|step| (view + step) % 8).find(|&slot| {
+                                !piece.hidden[slot] && !layer.frames[offset + slot].is_empty()
+                            })
+                            && compatible_eye_tween(from, &layer.frames[offset + next])
+                        {
+                            ready += 1;
+                        }
+                    }
+                    rig_check_row(
+                        ui,
+                        drawn > 0 && ready == drawn,
+                        &format!("{ready}/{drawn} {}", tr("pose tweens ready")),
+                    );
+                } else if check_tweens {
+                    let checks = rig_tween_checks(layer, piece, view);
+                    rig_check_row(
+                        ui,
+                        checks.horizontal == TweenCheck::Ready,
+                        checks.horizontal.label(false),
+                    );
+                    if let Some(vertical) = checks.vertical {
+                        rig_check_row(ui, vertical == TweenCheck::Ready, vertical.label(true));
+                    }
+                    let pending: Vec<_> = (0..8)
+                        .filter(|&other| {
+                            other != view
+                                && rig_view_drawn(layer, piece, other)
+                                && !rig_tween_checks(layer, piece, other).ready()
+                        })
+                        .map(|other| tr(VIEWS[other]))
+                        .collect();
+                    if !pending.is_empty() {
+                        ui.small(format!("{} {}", pending.len(), tr("other views to check")))
+                            .on_hover_text(pending.join(", "));
+                    }
+                }
             });
-        if result.inner {
+        if changed {
             self.checkpoint();
             self.doc.layers[row].options.rig_check_tweens = check_tweens;
             self.recover();
@@ -4317,21 +4469,18 @@ impl Editor {
         } else {
             self.selected_character_path()
         };
+        let can_create = self.can_create_character(&self.canvas.selected);
         let setup = !editing
             && path.is_none()
-            && self.tool == crate::canvas::Tool::Select
+            && !self.playing
             && self.doc.extras.rig.character_symbol.is_none()
-            && self
-                .selected_rig_tracks(&self.canvas.selected)
-                .iter()
-                .any(|track| {
-                    self.doc
-                        .extras
-                        .rig
-                        .bindings
-                        .iter()
-                        .any(|binding| binding.target == *track)
-                });
+            && ((matches!(
+                self.tool,
+                crate::canvas::Tool::Select | crate::canvas::Tool::Object
+            ) && !self.canvas.selected.is_empty()
+                && can_create)
+                || (self.tool == crate::canvas::Tool::Bones
+                    && (can_create || !self.doc.extras.rig.bones.is_empty())));
         if !editing && path.is_none() && !setup {
             return;
         }
@@ -4348,14 +4497,18 @@ impl Editor {
                         && button(
                             ui,
                             Icon::Head,
-                            "Set Up Rig",
-                            "Create the Character Symbol",
+                            "Create Character",
+                            if can_create {
+                                "Create the Character Symbol"
+                            } else {
+                                "Select artwork or bind a symbol to the bones first"
+                            },
                             false,
-                            true,
+                            can_create,
                         )
                         .clicked()
                     {
-                        self.open_character_symbol();
+                        self.create_character_from_selection();
                     } else if let Some(path) = path
                         && button(
                             ui,
@@ -4677,7 +4830,62 @@ mod tests {
         let bent = deform_brow_mark(&line, |p| (1. - (p.x - 50.).abs() / 50.) * -20.);
         assert_eq!(bent.nodes.first().unwrap().position, [0., 0.]);
         assert_eq!(bent.nodes.last().unwrap().position, [100., 0.]);
-        assert_eq!(bent.nodes[2].position, [50., -20.]);
+        assert!(
+            crate::vector::pos(bent.nodes[2].position).distance(egui::pos2(50., -20.)) < 0.0001
+        );
+    }
+
+    #[test]
+    fn lifting_one_brow_end_preserves_smooth_tangents_between_segments() {
+        let line = Mark {
+            points: vec![[0., 0.], [100., 0.]].into(),
+            ..Default::default()
+        };
+        let bent = deform_brow_mark(&line, |p| {
+            brow_profile_offset(p.x, [0., 60., 100.], 100., [-1., 0., 0.])
+        });
+        for node in &bent.nodes[1..bent.nodes.len() - 1] {
+            let position = crate::vector::pos(node.position);
+            let incoming = position - crate::vector::pos(node.in_handle);
+            let outgoing = crate::vector::pos(node.out_handle) - position;
+            assert!(incoming.length() > 1. && outgoing.length() > 1.);
+            assert!(incoming.normalized().dot(outgoing.normalized()) > 0.9999);
+        }
+        assert_eq!(bent.nodes.first().unwrap().position, [0., -35.]);
+        assert_eq!(bent.nodes.last().unwrap().position, [100., 0.]);
+    }
+
+    #[test]
+    fn character_can_be_built_and_animated_from_boneless_vector_art() {
+        let ctx = egui::Context::default();
+        let mut editor = crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        editor.doc = crate::fresh_document();
+        editor.recovery = std::env::temp_dir().join(format!(
+            "libretoon-boneless-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        editor.doc.layers[0].frames[0].push(Mark {
+            points: vec![[20., 30.], [120., 140.]].into(),
+            rectangle: true,
+            fill: Some([100, 120, 140, 255]),
+            ..Default::default()
+        });
+        editor.canvas.selected = vec![(0, 0)];
+        editor.create_character_from_selection();
+        assert!(editor.in_character_symbol());
+        let track = editor.rigged_layer_targets()[0].0;
+        editor.add_rigged_piece(FacePart::Eye, track, None);
+        assert_eq!(editor.doc.layers.len(), 2);
+        editor.exit_symbol();
+        assert!(editor.doc.extras.rig.bones.is_empty());
+        editor.doc.extras.rig.character_turns.body.set(0, 2.);
+        let saved = crate::native_project::encode(&editor.doc).unwrap();
+        let restored = crate::native_project::decode_if_native(&saved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.extras.rig.character_turn(track, 0), Some(2.));
+        assert!(restored.extras.rig.artwork_turn_target(track));
     }
 
     #[test]

@@ -87,7 +87,10 @@ pub(crate) struct CharacterTurns {
 
 impl CharacterTurns {
     fn is_empty(&self) -> bool {
-        self.head.root.is_none() && self.body.root.is_none()
+        self.head.root.is_none()
+            && self.body.root.is_none()
+            && self.head.keys.is_empty()
+            && self.body.keys.is_empty()
     }
     pub(crate) fn identity(&self) -> [usize; 14] {
         let mut ids = [0; 14];
@@ -122,6 +125,12 @@ pub(crate) struct TurnKey {
 }
 
 impl Rig {
+    pub(crate) fn artwork_turn_target(&self, track: u64) -> bool {
+        self.character_symbol.is_some()
+            && self.bindings.iter().any(|binding| binding.target == track)
+            && !self.bones.iter().any(|bone| bone.targets.contains(&track))
+    }
+
     pub(crate) fn character_angle(&self, track: u64, frame: usize) -> Option<usize> {
         self.character_turn(track, frame)
             .map(|turn| (turn.round() as i32).rem_euclid(8) as usize)
@@ -137,11 +146,15 @@ impl Rig {
                     .any(|bone| bone.id == id && bone.targets.contains(&track))
             })
         };
-        let body = turns
-            .body
-            .root
-            .filter(|&root| affects(root))
-            .map_or(0., |_| turns.body.value(frame));
+        let body = if self.artwork_turn_target(track) {
+            turns.body.value(frame)
+        } else {
+            turns
+                .body
+                .root
+                .filter(|&root| affects(root))
+                .map_or(0., |_| turns.body.value(frame))
+        };
         let head = turns
             .head
             .root
