@@ -78,6 +78,31 @@ struct FaceKey {
 struct FaceMotion {
     frame: usize,
     axes: [f32; 3],
+    #[serde(default, skip_serializing_if = "RigEase::is_linear")]
+    ease: RigEase,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) enum RigEase {
+    #[default]
+    Linear,
+    In,
+    Out,
+    InOut,
+}
+
+impl RigEase {
+    fn is_linear(&self) -> bool {
+        *self == Self::Linear
+    }
+    fn value(self, t: f32) -> f32 {
+        match self {
+            Self::Linear => t,
+            Self::In => t * t,
+            Self::Out => t * (2. - t),
+            Self::InOut => t * t * (3. - 2. * t),
+        }
+    }
 }
 
 pub(crate) const VIEWS: [&str; 8] = [
@@ -374,7 +399,9 @@ impl Piece {
             return [0.; 3];
         };
         self.face_motion.get(index).map_or(a.axes, |b| {
-            let t = (frame - a.frame) as f32 / (b.frame - a.frame) as f32;
+            let t = a
+                .ease
+                .value((frame - a.frame) as f32 / (b.frame - a.frame) as f32);
             std::array::from_fn(|axis| a.axes[axis] + (b.axes[axis] - a.axes[axis]) * t)
         })
     }
@@ -384,15 +411,22 @@ impl Piece {
             self.face_motion.push(FaceMotion {
                 frame: 0,
                 axes: [0.; 3],
+                ease: Default::default(),
             });
         }
-        let key = FaceMotion { frame, axes };
         match self
             .face_motion
             .binary_search_by_key(&frame, |key| key.frame)
         {
-            Ok(index) => self.face_motion[index] = key,
-            Err(index) => self.face_motion.insert(index, key),
+            Ok(index) => self.face_motion[index].axes = axes,
+            Err(index) => self.face_motion.insert(
+                index,
+                FaceMotion {
+                    frame,
+                    axes,
+                    ease: Default::default(),
+                },
+            ),
         }
     }
     fn variant(&self, frame: usize) -> usize {
@@ -797,6 +831,9 @@ pub(crate) fn mouth_layers(symbol: &Symbol, track: u64) -> impl Iterator<Item = 
 }
 
 fn lip_drawing(layer: &Layer, piece: &Piece, pose: usize, turn: f32) -> SharedVec<Mark> {
+    if piece.hidden[turn.round().rem_euclid(8.) as usize] {
+        return Default::default();
+    }
     let marks = |view: usize| layer.frames.get((pose + 1) * 8 + view);
     let aligned = |view| {
         let frame = (pose + 1) * 8 + view;
@@ -922,7 +959,7 @@ pub(crate) fn rigged_eye_artwork(
         else {
             continue;
         };
-        if !layer.visible {
+        if !layer.visible || (piece.face != FacePart::Hand && piece.hidden[view]) {
             continue;
         }
         let eye_mask = piece
@@ -1429,6 +1466,286 @@ fn rig_check_row(ui: &mut egui::Ui, ready: bool, text: &str) {
 }
 
 impl Editor {
+    pub(crate) fn capture_rig_controls(
+        &self,
+        frame: usize,
+        group: usize,
+    ) -> Vec<(u64, usize, [f32; 3])> {
+        let Some(symbol) = self
+            .doc
+            .extras
+            .symbols
+            .iter()
+            .find(|symbol| Some(symbol.id) == self.doc.extras.rig.character_symbol)
+        else {
+            return Vec::new();
+        };
+        symbol
+            .layers
+            .iter()
+            .filter_map(|layer| {
+                let piece = layer.options.character_piece.as_ref()?;
+                let face = matches!(
+                    piece.face,
+                    FacePart::Eye
+                        | FacePart::Pupil
+                        | FacePart::Brow
+                        | FacePart::Slider
+                        | FacePart::Toggle
+                        | FacePart::Switch
+                );
+                ((group == 1 && face)
+                    || (group == 2 && piece.face == FacePart::Hand)
+                    || (group == 3 && (face || piece.face == FacePart::Hand)))
+                    .then(|| (piece.track, piece.variant(frame), piece.motion(frame)))
+            })
+            .collect()
+    }
+
+    pub(crate) fn apply_rig_controls(&mut self, frame: usize, values: &[(u64, usize, [f32; 3])]) {
+        let Some(symbol) = self
+            .doc
+            .extras
+            .symbols
+            .iter_mut()
+            .find(|symbol| Some(symbol.id) == self.doc.extras.rig.character_symbol)
+        else {
+            return;
+        };
+        for piece in symbol
+            .layers
+            .iter_mut()
+            .filter_map(|layer| layer.options.character_piece.as_mut())
+        {
+            if let Some(&(_, variant, axes)) =
+                values.iter().find(|(track, _, _)| *track == piece.track)
+            {
+                piece.set_motion(frame, axes);
+                if matches!(
+                    piece.face,
+                    FacePart::Hand | FacePart::Toggle | FacePart::Switch
+                ) && variant < piece.lip_poses.len()
+                {
+                    piece.set_variant(frame, variant);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn rig_control_channels(&self) -> Vec<(u64, bool, String)> {
+        let Some(symbol) = self
+            .doc
+            .extras
+            .symbols
+            .iter()
+            .find(|symbol| Some(symbol.id) == self.doc.extras.rig.character_symbol)
+        else {
+            return Vec::new();
+        };
+        let mut channels = Vec::new();
+        for layer in &symbol.layers {
+            let Some(piece) = layer.options.character_piece.as_ref() else {
+                continue;
+            };
+            if matches!(
+                piece.face,
+                FacePart::Hand | FacePart::Toggle | FacePart::Switch
+            ) || !piece.face_keys.is_empty()
+            {
+                channels.push((
+                    piece.track,
+                    false,
+                    format!("{} · {}", layer.name, tr("Pose")),
+                ));
+            }
+            if matches!(
+                piece.face,
+                FacePart::Hand
+                    | FacePart::Slider
+                    | FacePart::Pupil
+                    | FacePart::Brow
+                    | FacePart::Eye
+            ) {
+                channels.push((
+                    piece.track,
+                    true,
+                    format!(
+                        "{} · {}",
+                        layer.name,
+                        tr(match piece.face {
+                            FacePart::Hand => "Turnaround",
+                            FacePart::Eye => "Eye closure",
+                            FacePart::Pupil => "Gaze",
+                            FacePart::Brow => "Brow points",
+                            _ => "Slider",
+                        })
+                    ),
+                ));
+            }
+        }
+        channels
+    }
+
+    pub(crate) fn rig_control_frames(&self, track: u64, motion: bool) -> Vec<usize> {
+        let piece = self
+            .doc
+            .extras
+            .symbols
+            .iter()
+            .find(|symbol| Some(symbol.id) == self.doc.extras.rig.character_symbol)
+            .and_then(|symbol| {
+                symbol
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.options.character_piece.as_ref())
+                    .find(|piece| piece.track == track)
+            });
+        piece.map_or_else(Vec::new, |piece| {
+            if motion {
+                piece.face_motion.iter().map(|key| key.frame).collect()
+            } else {
+                piece.face_keys.iter().map(|key| key.frame).collect()
+            }
+        })
+    }
+
+    fn rig_control_piece_mut(&mut self, track: u64) -> Option<&mut Piece> {
+        let character = self.doc.extras.rig.character_symbol?;
+        self.doc
+            .extras
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.id == character)?
+            .layers
+            .iter_mut()
+            .filter_map(|layer| layer.options.character_piece.as_mut())
+            .find(|piece| piece.track == track)
+    }
+
+    pub(crate) fn insert_rig_control_key(&mut self, track: u64, motion: bool, frame: usize) {
+        if self
+            .rig_control_frames(track, motion)
+            .binary_search(&frame)
+            .is_ok()
+        {
+            return;
+        }
+        self.checkpoint();
+        if let Some(piece) = self.rig_control_piece_mut(track) {
+            if motion {
+                piece.set_motion(frame, piece.motion(frame));
+            } else {
+                piece.set_variant(frame, piece.variant(frame));
+            }
+            self.recover();
+        }
+    }
+
+    pub(crate) fn edit_rig_control_range(
+        &mut self,
+        track: u64,
+        motion: bool,
+        range: std::ops::RangeInclusive<usize>,
+        offset: Option<isize>,
+        duplicate: bool,
+        ease: Option<RigEase>,
+    ) {
+        let frames = self.rig_control_frames(track, motion);
+        let selected: Vec<_> = frames
+            .iter()
+            .copied()
+            .filter(|frame| range.contains(frame))
+            .collect();
+        if selected.is_empty() {
+            return;
+        }
+        if let Some(delta) = offset
+            && selected.iter().any(|&frame| {
+                frame.checked_add_signed(delta).is_none_or(|to| {
+                    to >= self.doc.layers[0].frames.len()
+                        || (frames.binary_search(&to).is_ok()
+                            && (duplicate || !range.contains(&to)))
+                })
+            })
+        {
+            return;
+        }
+        self.checkpoint();
+        let Some(piece) = self.rig_control_piece_mut(track) else {
+            return;
+        };
+        if let Some(ease) = ease {
+            for key in piece
+                .face_motion
+                .iter_mut()
+                .filter(|key| range.contains(&key.frame))
+            {
+                key.ease = ease;
+            }
+        } else if motion {
+            let mut moved: Vec<_> = offset
+                .into_iter()
+                .flat_map(|delta| {
+                    piece
+                        .face_motion
+                        .iter()
+                        .filter(|key| range.contains(&key.frame))
+                        .cloned()
+                        .map(move |mut key| {
+                            key.frame = key.frame.checked_add_signed(delta).unwrap();
+                            key
+                        })
+                })
+                .collect();
+            if !duplicate {
+                piece.face_motion.retain(|key| !range.contains(&key.frame));
+            }
+            piece.face_motion.append(&mut moved);
+            piece.face_motion.sort_by_key(|key| key.frame);
+        } else {
+            let mut moved: Vec<_> = offset
+                .into_iter()
+                .flat_map(|delta| {
+                    piece
+                        .face_keys
+                        .iter()
+                        .filter(|key| range.contains(&key.frame))
+                        .cloned()
+                        .map(move |mut key| {
+                            key.frame = key.frame.checked_add_signed(delta).unwrap();
+                            key
+                        })
+                })
+                .collect();
+            if !duplicate {
+                piece.face_keys.retain(|key| !range.contains(&key.frame));
+            }
+            piece.face_keys.append(&mut moved);
+            piece.face_keys.sort_by_key(|key| key.frame);
+        }
+        self.recover();
+    }
+
+    pub(crate) fn trim_rig_control_keys(&mut self, count: usize) {
+        let character = self.doc.extras.rig.character_symbol;
+        if let Some(symbol) = self
+            .doc
+            .extras
+            .symbols
+            .iter_mut()
+            .find(|symbol| Some(symbol.id) == character)
+        {
+            for piece in symbol
+                .layers
+                .iter_mut()
+                .filter_map(|layer| layer.options.character_piece.as_mut())
+            {
+                piece.face_motion.retain(|key| key.frame < count);
+                piece.face_keys.retain(|key| key.frame < count);
+            }
+        }
+    }
+
     fn wrist_tool(&self) -> Option<egui::Id> {
         if !self.in_character_symbol() || self.frame < 8 {
             return None;
@@ -1739,6 +2056,58 @@ impl Editor {
                     crate::features::apply_color(&mut mark, [1., 1., 1., 0.28, 0., 0., 0., 0.]);
                 }
                 result.push((row, index, mark));
+            }
+        }
+        if let Some([angle, value]) = self.rigging.test_character_pose {
+            let layer = &self.doc.layers[self.layer];
+            if let Some(piece) = &layer.options.character_piece {
+                let mut test = piece.clone();
+                test.face_motion = Default::default();
+                test.face_keys = Default::default();
+                let last = test.lip_poses.len().saturating_sub(1) as f32;
+                test.set_motion(
+                    0,
+                    [
+                        if test.face == FacePart::Slider {
+                            value * last / 127.
+                        } else {
+                            value
+                        },
+                        angle,
+                        0.,
+                    ],
+                );
+                if matches!(
+                    test.face,
+                    FacePart::Hand | FacePart::Toggle | FacePart::Switch
+                ) {
+                    test.set_variant(0, (value * last).round() as usize);
+                }
+                let turn = angle * 8.;
+                let pose = (self.frame / 8)
+                    .saturating_sub(1)
+                    .min(test.lip_poses.len().saturating_sub(1));
+                let marks = if test.face.control() {
+                    control_drawing(layer, &test, 0, turn)
+                } else if test.is_lip() {
+                    lip_drawing(layer, &test, pose, turn)
+                } else if test.face == FacePart::Eye {
+                    eye_artwork(layer, &test, turn, 0)
+                } else {
+                    let drawn = |view: usize| !test.hidden[view] && !layer.frames[view].is_empty();
+                    let slot = turn.round().rem_euclid(8.) as usize;
+                    drawn_transition(turn, test.shape_transitions, drawn)
+                        .and_then(|(a, b, t)| eye_tween(&layer.frames[a], &layer.frames[b], t))
+                        .unwrap_or_else(|| layer.frames[slot].clone())
+                };
+                result.retain(|(row, _, _)| *row != self.layer);
+                result.extend(
+                    marks
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, mark)| (self.layer, index, mark)),
+                );
             }
         }
         result.sort_by_key(|(row, _, _)| *row);
@@ -2626,6 +2995,7 @@ impl Editor {
         let mut delete = None;
         let mut pupil_mask = None;
         let mut mirror = None;
+        let mut duplicate_side = None;
         let mut renamed = None;
         let rename_id = ui.scope_id().with("character-row-rename");
         let mut draft = ui.data(|data| data.get_temp::<(usize, String)>(rename_id));
@@ -2689,6 +3059,13 @@ impl Editor {
                                         selection = Some((index, offset + view));
                                     }
                                     response.context_menu(|ui| {
+                                        if layer.options.character_piece.as_ref().is_some_and(|piece| {
+                                            piece.eye_parent.is_some() && matches!(piece.face, FacePart::Eye | FacePart::Pupil | FacePart::Brow)
+                                        }) && (layer.name.ends_with("_R") || layer.name.ends_with("_L"))
+                                            && button(ui, Icon::Mirror, "Duplicate Side", "Mirror the matching eye, pupil, and brow", false, true).clicked() {
+                                            duplicate_side = Some(index);
+                                            ui.close();
+                                        }
                                         if let Some(piece) = mouth {
                                             let view = self.frame % 8;
                                             let labels = if piece.face == FacePart::Hand { HAND_VIEWS } else { VIEWS };
@@ -2962,6 +3339,9 @@ impl Editor {
                         }
                     });
             });
+        if let Some(row) = duplicate_side {
+            self.duplicate_face_side(row);
+        }
         if let Some((row, opposite, target)) = mirror {
             self.mirror_face_layer(row, opposite, target);
         }
@@ -3047,6 +3427,14 @@ impl Editor {
             self.recover();
         }
         if let Some((row, track, matrix)) = attachment {
+            let mask_tracks: Vec<_> = self
+                .doc
+                .layers
+                .iter()
+                .filter_map(|layer| layer.options.character_piece.as_ref())
+                .filter(|piece| piece.face == FacePart::Eye && piece.eye_parent == Some(track))
+                .map(|piece| piece.track)
+                .collect();
             self.finish_pending_pen();
             self.checkpoint();
             let piece = self.doc.layers[row]
@@ -3055,7 +3443,12 @@ impl Editor {
                 .as_mut()
                 .unwrap();
             piece.eye_parent = Some(track);
-            piece.eye_mask = None;
+            if piece
+                .eye_mask
+                .is_some_and(|mask| !mask_tracks.contains(&mask))
+            {
+                piece.eye_mask = None;
+            }
             piece.matrix = matrix;
             self.recover();
         }
@@ -3221,16 +3614,75 @@ impl Editor {
         }
     }
 
-    fn mirror_face_layer(&mut self, row: usize, opposite: bool, target: Option<u64>) {
-        let mapped = |view| if opposite { opposite_view(view) } else { view };
-        if self.doc.layers.len() >= 100 {
+    fn duplicate_face_side(&mut self, row: usize) {
+        let source = &self.doc.layers[row];
+        let Some(side) = source.name.rsplit_once('_').map(|(_, side)| side) else {
+            return;
+        };
+        let parent = source
+            .options
+            .character_piece
+            .as_ref()
+            .and_then(|piece| piece.eye_parent);
+        let candidates: Vec<_> = self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                let piece = layer.options.character_piece.as_ref()?;
+                (layer
+                    .name
+                    .rsplit_once('_')
+                    .is_some_and(|(_, candidate)| candidate == side)
+                    && piece.eye_parent == parent
+                    && matches!(piece.face, FacePart::Eye | FacePart::Pupil | FacePart::Brow))
+                .then_some((index, piece.track, piece.eye_mask))
+            })
+            .collect();
+        if candidates.is_empty() || self.doc.layers.len() + candidates.len() > 100 {
             return;
         }
         self.finish_pending_pen();
+        self.checkpoint();
+        let mut tracks = std::collections::HashMap::new();
+        let first = self.doc.layers.len();
+        for (index, old, _) in &candidates {
+            if let Some(track) = self.mirror_face_layer_inner(*index, false, None) {
+                tracks.insert(*old, track);
+            }
+        }
+        for (new, (_, _, mask)) in self.doc.layers[first..].iter_mut().zip(candidates) {
+            if let Some(piece) = new.options.character_piece.as_mut() {
+                piece.eye_mask = mask.and_then(|mask| tracks.get(&mask).copied());
+            }
+        }
+        self.recover();
+    }
+
+    fn mirror_face_layer(&mut self, row: usize, opposite: bool, target: Option<u64>) {
+        self.finish_pending_pen();
+        self.checkpoint();
+        if self
+            .mirror_face_layer_inner(row, opposite, target)
+            .is_some()
+        {
+            self.recover();
+        }
+    }
+
+    fn mirror_face_layer_inner(
+        &mut self,
+        row: usize,
+        opposite: bool,
+        target: Option<u64>,
+    ) -> Option<u64> {
+        let mapped = |view| if opposite { opposite_view(view) } else { view };
+        if self.doc.layers.len() >= 100 {
+            return None;
+        }
         let mut copy = self.doc.layers[row].clone();
-        let Some(piece) = copy.options.character_piece.as_mut() else {
-            return;
-        };
+        let piece = copy.options.character_piece.as_mut()?;
         let anchor = self.doc.layers.iter().find(|layer| {
             layer
                 .options
@@ -3360,8 +3812,21 @@ impl Editor {
                     .map(|p| crate::vector::xy(reflect(crate::vector::pos(p), from)))
             })
         });
+        if piece.face == FacePart::Pupil {
+            piece.pupil_area = std::array::from_fn(|view| {
+                let source = mapped(view);
+                piece.pupil_area[source].map(|points| {
+                    points.map(|p| crate::vector::xy(reflect(crate::vector::pos(p), source)))
+                })
+            });
+            let old = piece.circular_pupil_areas;
+            piece.circular_pupil_areas =
+                (0..8).fold(0, |mask, view| mask | (((old >> mapped(view)) & 1) << view));
+        }
         for key in &mut piece.face_motion {
-            if piece.face == FacePart::Brow {
+            if piece.face == FacePart::Pupil {
+                key.axes[0] = -key.axes[0];
+            } else if piece.face == FacePart::Brow {
                 key.axes.swap(0, 2);
             } else if piece.face == FacePart::Hand && opposite {
                 key.axes[1] = 1. - key.axes[1];
@@ -3377,7 +3842,7 @@ impl Editor {
         let eye = piece.face == FacePart::Eye;
         let control = piece.face.control();
         let count = piece.lip_poses.len();
-        self.checkpoint();
+        let track = piece.track;
         self.doc.layers.push(copy);
         self.layer = self.doc.layers.len() - 1;
         let offset = if eye {
@@ -3389,7 +3854,7 @@ impl Editor {
         };
         self.frame = offset + mapped(self.frame % 8);
         self.canvas.clear_selection();
-        self.recover();
+        Some(track)
     }
 
     fn rigged_layer_targets(&self) -> Vec<(u64, String)> {
@@ -3783,6 +4248,18 @@ impl Editor {
                         }
                         _ => {}
                     }
+                    let offset = if piece.face == FacePart::Eye || !piece.lip_poses.is_empty() { (self.frame / 8).max(1) * 8 } else { 0 };
+                    let drawn = |slot: usize| !piece.hidden[slot] && layer.frames.get(offset + slot).is_some_and(|marks| !marks.is_empty());
+                    if piece.hidden[view] {
+                        ui.small(tr("Hidden in this view"));
+                    } else if !drawn(view) && let Some(other) = (0usize..8).filter(|&slot| drawn(slot)).min_by_key(|&slot| {
+                        let distance = slot.abs_diff(view);
+                        distance.min(8 - distance)
+                    }) {
+                        if piece.face != FacePart::Toggle {
+                            ui.small(format!("{} {}", tr("Nearest drawing"), tr(VIEWS[other])));
+                        }
+                    }
                     ui.separator();
                     let changed = ui.checkbox(&mut check_tweens, tr("Check Shape Tweens"))
                         .on_hover_text(tr("Check this layer’s drawn views for missing or incompatible transitions")).changed();
@@ -3840,7 +4317,22 @@ impl Editor {
         } else {
             self.selected_character_path()
         };
-        if !editing && path.is_none() {
+        let setup = !editing
+            && path.is_none()
+            && self.tool == crate::canvas::Tool::Select
+            && self.doc.extras.rig.character_symbol.is_none()
+            && self
+                .selected_rig_tracks(&self.canvas.selected)
+                .iter()
+                .any(|track| {
+                    self.doc
+                        .extras
+                        .rig
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.target == *track)
+                });
+        if !editing && path.is_none() && !setup {
             return;
         }
         egui::Area::new(egui::Id::unique(("floating-character-tools", editing)))
@@ -3852,9 +4344,28 @@ impl Editor {
                 egui::Frame::window(ui.style()).show(ui, |ui| {
                     if editing {
                         self.character_toolbar(ui);
+                    } else if setup
+                        && button(
+                            ui,
+                            Icon::Head,
+                            "Set Up Rig",
+                            "Create the Character Symbol",
+                            false,
+                            true,
+                        )
+                        .clicked()
+                    {
+                        self.open_character_symbol();
                     } else if let Some(path) = path
-                        && button(ui, Icon::Head, "Edit Character Symbol", "", false, true)
-                            .clicked()
+                        && button(
+                            ui,
+                            Icon::Head,
+                            "Edit Rig",
+                            "Edit Character Symbol",
+                            false,
+                            true,
+                        )
+                        .clicked()
                     {
                         for id in path {
                             self.enter_symbol(id);
@@ -3884,35 +4395,118 @@ impl Editor {
                 .clicked()
                 {
                     self.rigging.edit_character_bones = false;
+                    self.rigging.test_character_pose = None;
                     self.activate_tool(crate::canvas::Tool::Brush);
                 }
                 if button(
                     ui,
                     Icon::Bones,
-                    "Edit Bones",
+                    "Skeleton",
                     "",
                     self.rigging.edit_character_bones,
                     true,
                 )
                 .clicked()
                 {
-                    self.rigging.edit_character_bones = false;
                     self.rigging.edit_character_bones = true;
+                    self.rigging.test_character_pose = None;
                 }
                 ui.separator();
-                let copy = button(ui, Icon::Copy, "Copy from View", "", false, true);
+                if button(
+                    ui,
+                    Icon::Play,
+                    "Test Pose",
+                    "Preview the selected layer without creating keys",
+                    self.rigging.test_character_pose.is_some(),
+                    true,
+                )
+                .clicked()
+                {
+                    self.rigging.edit_character_bones = false;
+                    self.rigging.test_character_pose = if self.rigging.test_character_pose.is_some()
+                    {
+                        None
+                    } else {
+                        Some([frame as f32 / 8., 0.])
+                    };
+                    self.canvas.clear_selection();
+                }
+                let setup_copy = button(
+                    ui,
+                    Icon::Copy,
+                    "Copy View Setup",
+                    "Copy selected parts from another view",
+                    false,
+                    self.rigging.test_character_pose.is_none(),
+                );
+                egui::Popup::menu(&setup_copy).show(|ui| {
+                    let id = ui.scope_id().with("copy-view-options");
+                    let (mut artwork, mut bones, mut guides, mut empty) = ui
+                        .data(|data| data.get_temp::<(bool, bool, bool, bool)>(id))
+                        .unwrap_or((true, false, false, true));
+                    ui.label(format!("{} {}", tr("Destination"), tr(VIEWS[frame])));
+                    ui.checkbox(&mut artwork, tr("Artwork"));
+                    ui.checkbox(&mut bones, tr("Bones"));
+                    ui.checkbox(&mut guides, tr("Rig guides"));
+                    ui.checkbox(&mut empty, tr("Only empty cells"));
+                    ui.separator();
+                    for (from, name) in VIEWS
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(view, _)| *view != frame)
+                    {
+                        if button(ui, Icon::Copy, name, "", false, artwork || bones || guides)
+                            .clicked()
+                        {
+                            self.copy_character_view(from, frame, artwork, bones, guides, empty);
+                            ui.close();
+                        }
+                    }
+                    ui.data_mut(|data| data.insert_temp(id, (artwork, bones, guides, empty)));
+                });
+                let bones = self.rigging.edit_character_bones;
+                let copy = button(
+                    ui,
+                    Icon::Copy,
+                    if bones {
+                        "Copy Bones from View"
+                    } else {
+                        "Copy Artwork from View"
+                    },
+                    "",
+                    false,
+                    true,
+                );
                 egui::Popup::menu(&copy).show(|ui| {
                     for (source, name) in VIEWS.into_iter().enumerate().filter(|(i, _)| *i != frame)
                     {
-                        if ui.button(tr(name)).clicked() {
+                        let source_frame = art_frame / 8 * 8 + source;
+                        let available = if bones {
+                            self.doc.layers[0]
+                                .options
+                                .character_piece
+                                .as_ref()
+                                .is_some_and(|piece| !piece.joints[source].is_empty())
+                        } else {
+                            !self.doc.layers[layer].frames[source_frame].is_empty()
+                        };
+                        if button(ui, Icon::Copy, name, "", false, available).clicked() {
                             self.finish_pending_pen();
                             self.checkpoint();
-                            let frames = &mut self.doc.layers[layer].frames;
-                            frames[art_frame] = frames[art_frame / 8 * 8 + source].clone();
-                            if let Some(settings) =
-                                self.doc.layers[0].options.character_piece.as_mut()
-                            {
-                                settings.joints[frame] = settings.joints[source].clone();
+                            if bones {
+                                if let Some(settings) =
+                                    self.doc.layers[0].options.character_piece.as_mut()
+                                {
+                                    settings.joints[frame] = settings.joints[source].clone();
+                                }
+                            } else {
+                                let frames = &mut self.doc.layers[layer].frames;
+                                frames[art_frame] = frames[source_frame].clone();
+                                copy_wrist_point(
+                                    &mut self.doc.layers[layer],
+                                    art_frame,
+                                    source_frame,
+                                );
                             }
                             self.recover();
                             ui.close();
@@ -3920,7 +4514,69 @@ impl Editor {
                     }
                 });
             });
+            if let Some([mut angle, mut value]) = self.rigging.test_character_pose {
+                ui.add(egui::Slider::new(&mut angle, 0. ..=1.).text(tr("Turnaround")));
+                ui.add(egui::Slider::new(&mut value, 0. ..=1.).text(tr("Pose")));
+                self.rigging.test_character_pose = Some([angle, value]);
+            }
         });
+    }
+
+    fn copy_character_view(
+        &mut self,
+        source: usize,
+        destination: usize,
+        artwork: bool,
+        bones: bool,
+        guides: bool,
+        empty: bool,
+    ) {
+        self.finish_pending_pen();
+        self.checkpoint();
+        if bones
+            && let Some(piece) = self.doc.layers[0].options.character_piece.as_mut()
+            && (!empty || piece.joints[destination].is_empty())
+            && !piece.joints[source].is_empty()
+        {
+            piece.joints[destination] = piece.joints[source].clone();
+        }
+        for layer in &mut self.doc.layers {
+            for base in (0..layer.frames.len()).step_by(8) {
+                let from = base + source;
+                let to = base + destination;
+                if artwork
+                    && !layer.frames[from].is_empty()
+                    && (!empty || layer.frames[to].is_empty())
+                {
+                    layer.frames[to] = layer.frames[from].clone();
+                }
+                if guides
+                    && layer.options.character_piece.as_ref().is_some_and(|piece| {
+                        piece.wrist_points.get(from).is_some_and(Option::is_some)
+                            && (!empty || piece.wrist_points.get(to).is_none_or(Option::is_none))
+                    })
+                {
+                    copy_wrist_point(layer, to, from);
+                }
+            }
+            if guides && let Some(piece) = layer.options.character_piece.as_mut() {
+                if let Some(area) = piece.pupil_area[source]
+                    && (!empty || piece.pupil_area[destination].is_none())
+                {
+                    piece.pupil_area[destination] = Some(area);
+                    piece.circular_pupil_areas = (piece.circular_pupil_areas & !(1 << destination))
+                        | (((piece.circular_pupil_areas >> source) & 1) << destination);
+                }
+                for index in 0..3 {
+                    if let Some(point) = piece.brow_points[source][index]
+                        && (!empty || piece.brow_points[destination][index].is_none())
+                    {
+                        piece.brow_points[destination][index] = Some(point);
+                    }
+                }
+            }
+        }
+        self.recover();
     }
 
     pub(crate) fn character_bone_input(
@@ -4233,6 +4889,16 @@ mod tests {
                 .vertical_tweens
         );
         assert_eq!(editor.frame, 10);
+
+        editor.doc = eye_doc.clone();
+        editor.insert_rig_control_key(11, true, 2);
+        editor.edit_rig_control_range(11, true, 2..=5, None, false, Some(RigEase::InOut));
+        editor.edit_rig_control_range(11, true, 2..=5, Some(1), false, None);
+        assert_eq!(editor.rig_control_frames(11, true), vec![0, 3, 6]);
+        editor.edit_rig_control_range(11, true, 3..=6, Some(-3), true, None);
+        assert_eq!(editor.rig_control_frames(11, true), vec![0, 3, 6]);
+        editor.history(false);
+        assert_eq!(editor.rig_control_frames(11, true), vec![0, 2, 5]);
         drop(editor);
 
         let mut brow_doc = eye_doc.clone();

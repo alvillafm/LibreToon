@@ -512,6 +512,58 @@ impl Editor {
                         }
                         if button(
                             ui,
+                            Icon::Copy,
+                            "Copy Character Rig",
+                            "",
+                            false,
+                            !self.hub.home && !self.doc.extras.rig.bindings.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.copy_character_rig();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::SaveAs,
+                            "Save Rig Preset",
+                            "",
+                            false,
+                            !self.hub.home && !self.doc.extras.rig.bindings.is_empty(),
+                        )
+                        .clicked()
+                        {
+                            self.save_character_rig_preset();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Open,
+                            "Import Rig Preset",
+                            "",
+                            false,
+                            !self.hub.home && !self.doc.layers[self.layer].options.locked,
+                        )
+                        .clicked()
+                        {
+                            self.import_character_rig_preset();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::Paste,
+                            "Paste Character Rig",
+                            "",
+                            false,
+                            !self.hub.home && self.can_paste_character_rig(),
+                        )
+                        .clicked()
+                        {
+                            self.paste_timeline_frames();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
                             Icon::Symbol,
                             "Convertir a símbolo · F8",
                             "Convertir a símbolo",

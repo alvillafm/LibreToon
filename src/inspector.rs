@@ -78,6 +78,7 @@ impl Editor {
             }
         }
         self.doc.extras.rig.trim_keys(count);
+        self.trim_rig_control_keys(count);
         self.fit_camera_duration();
         self.frame = self.frame.min(count - 1);
         self.playing = false;

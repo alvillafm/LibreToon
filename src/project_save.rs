@@ -112,6 +112,15 @@ fn publish_new(source: &Path, target: &Path) -> io::Result<()> {
     fs::hard_link(source, target)
 }
 
+pub(crate) fn write_rig_preset(doc: &Document, target: &Path) -> Result<(), String> {
+    write_snapshot(doc, target, stamp(target), false)
+        .map(|_| ())
+        .map_err(|error| match error {
+            SaveError::Conflict => tr("The preset file changed while saving.").into(),
+            SaveError::Failed(message) => message,
+        })
+}
+
 fn write_snapshot(
     doc: &Document,
     target: &Path,

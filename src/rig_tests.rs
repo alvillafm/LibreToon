@@ -23,6 +23,7 @@ fn character_turn_channels_compose_with_bone_keys_and_round_trip() {
     );
     let pose = |body, head| {
         std::sync::Arc::new(SavedPose {
+            controls: Vec::new(),
             name: "View".into(),
             bones: [(1, body), (2, head)]
                 .map(|(id, angle)| {

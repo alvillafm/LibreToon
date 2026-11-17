@@ -57,6 +57,25 @@ pub struct Rig {
     pub(crate) character_symbol: Option<u64>,
     #[serde(skip_serializing_if = "CharacterTurns::is_empty")]
     pub(crate) character_turns: CharacterTurns,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) ik_rules: std::collections::BTreeMap<u64, IkRule>,
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(crate) weight_locks: std::collections::BTreeSet<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct IkRule {
+    pub stop_chain: bool,
+    pub limits: Option<[f32; 2]>,
+}
+
+impl Default for IkRule {
+    fn default() -> Self {
+        Self {
+            stop_chain: false,
+            limits: None,
+        }
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -209,6 +228,8 @@ impl TurnChannel {
 pub(crate) struct SavedPose {
     pub(crate) name: String,
     pub(crate) bones: Vec<(u64, BoneKey)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) controls: Vec<(u64, usize, [f32; 3])>,
 }
 
 pub(crate) fn blend_pose_key(
@@ -704,8 +725,20 @@ impl Rig {
         let cells = (0..CELLS)
             .map(|n| {
                 let p = binding.grid_point(n);
+                let locked: Vec<_> = binding.cells[n]
+                    .influences
+                    .iter()
+                    .copied()
+                    .filter(|influence| {
+                        influence.weight > 0.
+                            && self.weight_locks.contains(&influence.bone)
+                            && bones.iter().any(|bone| bone.id == influence.bone)
+                    })
+                    .collect();
+                let locked_total = locked.iter().map(|influence| influence.weight).sum::<f32>();
                 let mut values: Vec<_> = bones
                     .iter()
+                    .filter(|bone| !self.weight_locks.contains(&bone.id))
                     .map(|b| {
                         let d = segment_distance(p, vector::pos(b.start), vector::pos(b.end));
                         Influence {
@@ -715,14 +748,23 @@ impl Rig {
                     })
                     .collect();
                 values.sort_by(|a, b| b.weight.total_cmp(&a.weight));
-                values.truncate(4);
+                values.truncate(4 - locked.len());
                 let sum = values.iter().map(|v| v.weight).sum::<f32>();
                 let mut cell = Cell::default();
-                for (slot, v) in cell.influences.iter_mut().zip(values) {
-                    *slot = Influence {
-                        bone: v.bone,
-                        weight: if sum > 0. { v.weight / sum } else { 0. },
-                    };
+                let unlocked = values.into_iter().map(|value| Influence {
+                    bone: value.bone,
+                    weight: if sum > 0. {
+                        value.weight / sum * (1. - locked_total).max(0.)
+                    } else {
+                        0.
+                    },
+                });
+                for (slot, value) in cell
+                    .influences
+                    .iter_mut()
+                    .zip(locked.into_iter().chain(unlocked))
+                {
+                    *slot = value;
                 }
                 cell
             })
@@ -737,6 +779,9 @@ impl Rig {
                 break;
             }
             chain.push(id);
+            if self.ik_rules.get(&id).is_some_and(|rule| rule.stop_chain) {
+                break;
+            }
             current = self
                 .bones
                 .iter()
@@ -766,11 +811,16 @@ impl Rig {
                 let mut key = bone_value(bone, frame);
                 key.frame = frame;
                 key.angle += crate::animation::shortest(b.angle() - a.angle());
+                if let Some([min, max]) = self.ik_rules.get(joint).and_then(|rule| rule.limits) {
+                    key.angle = key.angle.clamp(min.to_radians(), max.to_radians());
+                }
                 self.set_bone_key(*joint, key);
             }
         }
     }
     pub fn remove_bone(&mut self, id: u64) {
+        self.ik_rules.remove(&id);
+        self.weight_locks.remove(&id);
         for channel in [
             &mut self.character_turns.head,
             &mut self.character_turns.body,
@@ -856,6 +906,17 @@ impl Rig {
             {
                 return Err("Invalid bone hierarchy or animation".into());
             }
+        }
+        if self.ik_rules.iter().any(|(bone, rule)| {
+            !ids.contains(bone)
+                || rule.limits.is_some_and(|[min, max]| {
+                    !(-360. ..=360.).contains(&min) || !(-360. ..=360.).contains(&max) || min > max
+                })
+        }) {
+            return Err("Invalid IK constraint".into());
+        }
+        if self.weight_locks.iter().any(|id| !ids.contains(id)) {
+            return Err("Invalid weight lock".into());
         }
         let mut targets = HashSet::new();
         for b in &self.bindings {

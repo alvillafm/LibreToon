@@ -134,6 +134,54 @@ pub fn valid_routes(routes: &[Route]) -> bool {
         })
 }
 
+pub(crate) fn prune_rig_mouth_routes(
+    doc: &mut crate::Document,
+    character: u64,
+    tracks: &std::collections::HashSet<u64>,
+) {
+    if tracks.is_empty() {
+        return;
+    }
+    let mut updated = std::collections::HashMap::<usize, SharedVec<crate::Mark>>::new();
+    let stale = |route: &Route| {
+        route
+            .path
+            .last()
+            .is_some_and(|slot| slot.symbol == character && tracks.contains(&slot.track))
+    };
+    let mut prune = |layers: &mut SharedVec<crate::document::Layer>| {
+        for layer in layers.iter_mut().filter(|layer| {
+            layer
+                .frames
+                .iter()
+                .flatten()
+                .any(|mark| mark.style.mouth_routes.iter().any(stale))
+        }) {
+            for frame in &mut layer.frames {
+                let identity = frame.identity();
+                if let Some(new) = updated.get(&identity) {
+                    *frame = new.clone();
+                } else if frame
+                    .iter()
+                    .any(|mark| mark.style.mouth_routes.iter().any(stale))
+                {
+                    for mark in frame
+                        .iter_mut()
+                        .filter(|mark| mark.style.mouth_routes.iter().any(stale))
+                    {
+                        mark.style.mouth_routes.retain(|route| !stale(route));
+                    }
+                    updated.insert(identity, frame.clone());
+                }
+            }
+        }
+    };
+    prune(&mut doc.layers);
+    for symbol in &mut doc.extras.symbols {
+        prune(&mut symbol.layers);
+    }
+}
+
 pub(crate) fn has_mouth_key(mark: &crate::Mark, frame: usize) -> bool {
     let contains = |keys: &[Key]| keys.binary_search_by_key(&frame, |key| key.frame).is_ok();
     contains(&mark.style.mouth_keys)

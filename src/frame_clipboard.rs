@@ -15,6 +15,7 @@ pub(crate) struct State {
 }
 #[derive(Clone)]
 struct Package {
+    character: bool,
     source: Document,
     frames: SharedVec<SharedVec<Mark>>,
     keys: Vec<bool>,
@@ -34,6 +35,7 @@ impl State {
 struct Remap {
     symbols: HashMap<u64, u64>,
     media: HashMap<u64, u64>,
+    palette: HashMap<u64, u64>,
     clips: HashMap<u64, u64>,
     tracks: HashMap<u64, u64>,
     bones: HashMap<u64, u64>,
@@ -52,11 +54,14 @@ fn references(
     mark: &Mark,
     symbols: &mut VecDeque<u64>,
     media: &mut HashSet<u64>,
+    palette: &mut HashSet<u64>,
     clips: &mut VecDeque<u64>,
 ) {
     if let Some(instance) = &mark.style.instance {
         symbols.push_back(instance.symbol);
     }
+    palette.extend(mark.style.palette_fill);
+    palette.extend(mark.style.palette_stroke);
     if let Some(image) = mark.style.media_image {
         media.insert(image);
     }
@@ -70,9 +75,10 @@ impl Remap {
         let mut symbols = VecDeque::new();
         let mut clips = VecDeque::new();
         let mut media = HashSet::new();
+        let mut palette = HashSet::new();
         for frame in &package.frames {
             for mark in frame {
-                references(mark, &mut symbols, &mut media, &mut clips);
+                references(mark, &mut symbols, &mut media, &mut palette, &mut clips);
             }
         }
         while !symbols.is_empty() || !clips.is_empty() {
@@ -92,11 +98,12 @@ impl Remap {
                 for layer in &symbol.layers {
                     for frame in layer.frames.iter().filter(|f| seen.insert(f.identity())) {
                         for mark in frame {
-                            references(mark, &mut symbols, &mut media, &mut clips);
+                            references(mark, &mut symbols, &mut media, &mut palette, &mut clips);
                         }
                     }
                 }
                 symbols.extend(symbol.rig.bindings.iter().map(|b| b.symbol));
+                symbols.extend(symbol.rig.character_symbol);
             }
             while let Some(old) = clips.pop_front() {
                 if result.clips.contains_key(&old) {
@@ -126,11 +133,20 @@ impl Remap {
             }
             result.media.insert(image, id());
         }
+        result.palette = palette.into_iter().map(|swatch| (swatch, id())).collect();
         Ok(result)
     }
     fn mark(&mut self, mark: &Mark) -> Mark {
         let mut out = mark.clone();
         out.style.track = mapped(&mut self.tracks, out.style.track);
+        out.style.palette_fill = out
+            .style
+            .palette_fill
+            .and_then(|swatch| self.palette.get(&swatch).copied());
+        out.style.palette_stroke = out
+            .style
+            .palette_stroke
+            .and_then(|swatch| self.palette.get(&swatch).copied());
         if let Some(i) = &mut out.style.instance {
             i.symbol = self.symbols[&i.symbol];
         }
@@ -186,6 +202,16 @@ impl Remap {
                 pin.id = mapped(&mut self.pins, pin.id);
             }
         }
+        out.ik_rules = out
+            .ik_rules
+            .into_iter()
+            .map(|(id, rule)| (mapped(&mut self.bones, id), rule))
+            .collect();
+        out.weight_locks = out
+            .weight_locks
+            .into_iter()
+            .map(|id| mapped(&mut self.bones, id))
+            .collect();
         for channel in [&mut out.character_turns.head, &mut out.character_turns.body] {
             channel.root = channel.root.map(|id| mapped(&mut self.bones, id));
             for pose in channel.views.iter_mut().flatten() {
@@ -218,6 +244,25 @@ impl Remap {
         out
     }
     fn install(&mut self, package: &Package, target: &mut Document) {
+        for swatch in &package.source.extras.palette {
+            let Some(mapped) = self.palette.get_mut(&swatch.id) else {
+                continue;
+            };
+            if target
+                .extras
+                .palette
+                .iter()
+                .any(|existing| existing.id == swatch.id)
+            {
+                *mapped = swatch.id;
+            } else if target.extras.palette.len() < 256 {
+                let mut copy = swatch.clone();
+                copy.id = *mapped;
+                target.extras.palette.push(copy);
+            }
+        }
+        self.palette
+            .retain(|_, id| target.extras.palette.iter().any(|swatch| swatch.id == *id));
         for source in package
             .source
             .extras
@@ -397,6 +442,7 @@ impl Editor {
         };
         source.layers = vec![selected.clone()].into();
         let mut package = Package {
+            character: false,
             source,
             frames,
             keys,
@@ -460,6 +506,195 @@ impl Editor {
                     && l.options.mannequin.is_none()
             })
     }
+    pub(crate) fn copy_character_rig(&mut self) -> bool {
+        self.finish_pending_pen();
+        let rig = &self.doc.extras.rig;
+        if rig.bindings.is_empty() {
+            return false;
+        }
+        let targets: HashSet<_> = rig.bindings.iter().map(|binding| binding.target).collect();
+        let mut layers: SharedVec<Layer> = self
+            .doc
+            .layers
+            .iter()
+            .filter(|layer| {
+                layer
+                    .frames
+                    .iter()
+                    .flatten()
+                    .any(|mark| targets.contains(&mark.style.track))
+            })
+            .cloned()
+            .collect();
+        if layers.is_empty() {
+            return false;
+        }
+        for layer in &mut layers {
+            // A character package contains its bound artwork. Preserve the
+            // composition folders and rig time base in the enclosing symbol.
+            for cel in &mut layer.frames {
+                if cel.iter().any(|mark| !targets.contains(&mark.style.track)) {
+                    cel.retain(|mark| targets.contains(&mark.style.track));
+                }
+            }
+        }
+        let count = self.doc.layers[0].frames.len();
+        let symbol = id();
+        let mut source = self.doc.clone();
+        source.extras.scenes = Default::default();
+        source.extras.cameras = Default::default();
+        source.extras.symbols.push(Symbol {
+            id: symbol,
+            name: tr("Character Rig").into(),
+            layers,
+            rig: rig.clone(),
+            library_folder: None,
+            mouth_poses: Default::default(),
+            folders: source.extras.folders.clone(),
+            perspective: source.extras.perspective.clone(),
+        });
+        let mut mark = Mark {
+            points: vec![[0., 0.], [source.width as f32, source.height as f32]].into(),
+            rectangle: true,
+            stroke: false,
+            ..Default::default()
+        };
+        mark.style.instance = Some(Instance {
+            symbol,
+            matrix: crate::rig::IDENTITY,
+            mode: Playback::Once,
+            clock: SymbolClock::Scene,
+            first: 0,
+            born: 0,
+        });
+        let frame: SharedVec<_> = vec![mark].into();
+        let mut keys = vec![false; count];
+        keys[0] = true;
+        let mut package = Package {
+            character: true,
+            source,
+            frames: vec![frame; count].into(),
+            keys,
+            first: 0,
+            source_matrix: crate::rig::IDENTITY,
+        };
+        let needs = match Remap::dependencies(&package) {
+            Ok(needs) => needs,
+            Err(error) => {
+                self.status = error;
+                return false;
+            }
+        };
+        package
+            .source
+            .extras
+            .symbols
+            .retain(|s| needs.symbols.contains_key(&s.id));
+        package
+            .source
+            .extras
+            .media
+            .assets
+            .retain(|a| needs.media.contains_key(&a.id));
+        package
+            .source
+            .extras
+            .animation_clips
+            .retain(|a| needs.clips.contains_key(&a.id));
+        self.frame_clipboard.copied = Some(package);
+        self.status = tr("Character rig copied").into();
+        true
+    }
+
+    pub(crate) fn save_character_rig_preset(&mut self) {
+        let previous = self.frame_clipboard.copied.take();
+        let copied = self.copy_character_rig();
+        let package = self.frame_clipboard.copied.take();
+        self.frame_clipboard.copied = previous;
+        let Some(package) = package.filter(|_| copied) else {
+            return;
+        };
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("LibreToon", &["ltoon"])
+            .set_file_name("Character Rig.ltoon")
+            .save_file()
+        else {
+            return;
+        };
+        if !crate::native_project::is_native_path(&path) {
+            path.set_extension("ltoon");
+        }
+        let mut document = crate::fresh_document();
+        document.width = package.source.width;
+        document.height = package.source.height;
+        document.fps = package.source.fps;
+        document.extras.symbols = package.source.extras.symbols;
+        document.extras.media.assets = package.source.extras.media.assets;
+        document.extras.animation_clips = package.source.extras.animation_clips;
+        document.extras.palette = package.source.extras.palette;
+        document.layers[0].frames = package.frames;
+        document.layers[0].options.keys = package.keys.into();
+        self.status = match crate::project_save::write_rig_preset(&document, &path) {
+            Ok(()) => tr("Rig preset saved").into(),
+            Err(error) => error,
+        };
+    }
+
+    pub(crate) fn import_character_rig_preset(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("LibreToon", &["ltoon"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = (|| -> Result<Package, String> {
+            let file = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+            if file.len() > crate::native_project::LIMIT as u64 {
+                return Err(tr("Rig preset exceeds the project size limit.").into());
+            }
+            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+            let source = crate::native_project::decode_if_native(&bytes)?
+                .ok_or_else(|| tr("Choose a LibreToon rig preset.").to_owned())?;
+            let layer = &source.layers[0];
+            if !layer.frames[0].iter().any(|mark| {
+                mark.style.instance.as_ref().is_some_and(|instance| {
+                    source.extras.symbols.iter().any(|symbol| {
+                        symbol.id == instance.symbol && !symbol.rig.bindings.is_empty()
+                    })
+                })
+            }) {
+                return Err(tr("This document contains no packaged character rig.").into());
+            }
+            Ok(Package {
+                character: true,
+                frames: layer.frames.clone(),
+                keys: (0..layer.frames.len())
+                    .map(|frame| layer.key(frame))
+                    .collect(),
+                source,
+                first: 0,
+                source_matrix: crate::rig::IDENTITY,
+            })
+        })();
+        match result {
+            Ok(package) => {
+                let previous = self.frame_clipboard.copied.replace(package);
+                self.paste_timeline_frames();
+                self.frame_clipboard.copied = previous;
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    pub(crate) fn can_paste_character_rig(&self) -> bool {
+        self.can_paste_timeline_frames()
+            && self
+                .frame_clipboard
+                .copied
+                .as_ref()
+                .is_some_and(|package| package.character)
+    }
+
     pub(crate) fn paste_timeline_frames(&mut self) -> bool {
         match self.paste_frame_package() {
             Ok(()) => true,
@@ -810,6 +1045,15 @@ mod tests {
     fn project_rigs_remain_self_contained_editable_and_visually_identical() {
         let mut e = editor();
         e.doc.extras.symbols.push(symbol(7, [30, 60, 200, 255]));
+        e.doc.extras.symbols.push(symbol(18, [10, 20, 30, 255]));
+        e.doc.extras.rig.character_symbol = Some(18);
+        e.doc.extras.rig.ik_rules.insert(
+            11,
+            crate::rig::IkRule {
+                stop_chain: true,
+                limits: Some([-45., 45.]),
+            },
+        );
         for frame in &mut e.doc.layers[0].frames {
             *frame = vec![instance(7, 55)].into();
         }
@@ -870,6 +1114,16 @@ mod tests {
             .rig;
         assert_eq!(rig.bones.len(), 1);
         assert_ne!(rig.bones[0].id, 11);
+        let character = rig.character_symbol.expect("copied character views");
+        assert_ne!(character, 18);
+        assert!(
+            e.doc
+                .extras
+                .symbols
+                .iter()
+                .any(|symbol| symbol.id == character)
+        );
+        assert!(rig.ik_rules[&rig.bones[0].id].stop_chain);
         assert_eq!(rig.bindings[0].cells[0].influences[0].bone, rig.bones[0].id);
         let after = crate::features::resolve_export(&e.doc, 11, false);
         assert_eq!(before.len(), after.len());

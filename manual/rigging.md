@@ -28,3 +28,17 @@ Choose **Add Rigged Layer → Pupil**, draw the pupil for each angle, and use **
 ## Lip sync
 
 Create a Lip Sync symbol and draw its mouth poses. Add a dialogue clip, then open its right-click lip sync command and choose the intended symbol instance. Review and edit the generated mouth keys on the timeline.
+
+## Character rig workflow
+
+- In **Character Tools**, use **Artwork**, **Skeleton** or **Test Pose**. Test Pose previews the selected layer at another angle or pose without writing a key.
+- **Copy Artwork from View** copies the current drawing. **Copy Bones from View** copies joint settings in Skeleton mode. Both menus indicate which source views have content.
+- Select a pupil row and use **Clip to eye** for eyelid clipping. If a pupil must be visible over the white fill, place its layer above the eye. **Move together** in Face Rig creates a gaze key for all pupils in that rig. For related layers named with the suffix _R or _L, **Duplicate Side** mirrors the participating eyes, pupils and brows, including their linked mask where both layers were copied.
+- **Hand** has pose rows, its own turnaround, and **Wrist point** for matching the joint across drawings. **Slider Rig** blends compatible states, **Switch Rig** selects a named state, and **On/Off Rig** can use an empty Off state.
+- In the scene, expand **Rigging** to expose the individual controller tracks. Drag a key to move it, hold Alt while dragging to duplicate it, or use a cell's context menu to insert or delete a key.
+- **Edit → Copy Character Rig** copies bound artwork with its rig. Use **Paste Character Rig** in an unlocked drawing layer to create an independent symbol, then double-click that symbol to edit the copied rig. **Save Rig Preset** writes a reusable LibreToon project and **Import Rig Preset** inserts it in a scene.
+- **Remove Character Rig** removes the whole rig after confirmation. In the Bones properties, **Remove Selected Binding** only removes the selected piece's weights and pins. **Bind Rigid to Bone** uses a single bone. Set a chain root and angle limits under **IK constraints**.
+
+### Lip sync in Character Symbol
+
+In **Add Rigged Layer → Lip Sync**, pick a library symbol and a bound face piece. The source poses are copied into the front view. Open the group and use **Copy pose from** or **Copy all poses from** to populate other views. Set pose keys under **Lip Sync** in Properties or choose the mouth in **Dialogue Lip Sync**. The same phoneme key is used across all views.

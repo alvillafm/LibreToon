@@ -816,6 +816,19 @@ impl Editor {
         let mut remove = None;
         let mut save = None;
         egui::CollapsingHeader::new(tr("Rig poses")).show(ui, |ui| {
+            let scope = ui.scope_id().with("pose-group");
+            let mut group = ui.data(|data| data.get_temp::<usize>(scope)).unwrap_or(0);
+            let groups = ["Body pose", "Expression", "Hand pose", "Full pose"];
+            egui::ComboBox::from_id_salt("rig-pose-group")
+                .selected_text(tr(groups[group]))
+                .show_ui(ui, |ui| {
+                    for (index, label) in groups.into_iter().enumerate() {
+                        ui.selectable_value(&mut group, index, tr(label));
+                    }
+                });
+            ui.data_mut(|data| data.insert_temp(scope, group));
+            let controls = self.capture_rig_controls(frame, group);
+            let include_bones = group == 0 || group == 3;
             ui.horizontal(|ui| {
                 let draft_id = ui.scope_id().with("rig-pose-name");
                 let mut name = ui
@@ -833,18 +846,22 @@ impl Editor {
                     "Save current rig pose",
                     false,
                     !name.trim().is_empty()
-                        && !rig.bones.is_empty()
+                        && ((include_bones && !rig.bones.is_empty()) || !controls.is_empty())
                         && self.doc.extras.rig_poses.len() < 100,
                 )
                 .clicked()
                 {
                     save = Some(crate::rig::SavedPose {
                         name: name.trim().to_owned(),
-                        bones: rig
-                            .bones
-                            .iter()
-                            .map(|bone| (bone.id, crate::rig::bone_value(bone, frame)))
-                            .collect(),
+                        controls,
+                        bones: if include_bones {
+                            rig.bones
+                                .iter()
+                                .map(|bone| (bone.id, crate::rig::bone_value(bone, frame)))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
                     });
                     name.clear();
                 }
@@ -855,7 +872,7 @@ impl Editor {
                 .show(ui, |ui| {
                     for (index, pose) in self.doc.extras.rig_poses.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            let compatible = !pose.bones.is_empty()
+                            let compatible = (!pose.bones.is_empty() || !pose.controls.is_empty())
                                 && pose
                                     .bones
                                     .iter()
@@ -893,6 +910,7 @@ impl Editor {
                 key.frame = frame;
                 self.doc.extras.rig.set_bone_key(*id, key.clone());
             }
+            self.apply_rig_controls(frame, &pose.controls);
             self.recover();
         }
         if let Some(index) = remove {

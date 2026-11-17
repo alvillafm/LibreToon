@@ -761,6 +761,7 @@ impl Editor {
                 ))
             || character_bones
             || facial_setup
+            || self.rigging.test_character_pose.is_some()
             || light_input
             || trim_input
             || folder_input

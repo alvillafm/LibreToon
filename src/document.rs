@@ -171,7 +171,13 @@ impl Document {
                 let mut ids = std::collections::HashSet::new();
                 pose.name.is_empty()
                     || pose.name.len() > 256
-                    || pose.bones.is_empty()
+                    || (pose.bones.is_empty() && pose.controls.is_empty())
+                    || pose.controls.len() > 100
+                    || pose.controls.iter().any(|(track, variant, axes)| {
+                        *track == 0
+                            || *variant >= 128
+                            || axes.iter().any(|value| !(-1. ..=1.).contains(value))
+                    })
                     || pose.bones.len() > 128
                     || pose.bones.iter().any(|(id, key)| {
                         *id == 0

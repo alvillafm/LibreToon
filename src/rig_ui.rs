@@ -54,11 +54,13 @@ pub struct RigEditor {
     reanchor: bool,
     pub paint: bool,
     show_weights: bool,
+    show_unweighted: bool,
     pub radius: f32,
     pub strength: f32,
     pub timing: Option<usize>,
     character_setup: bool,
     pub(crate) edit_character_bones: bool,
+    pub(crate) test_character_pose: Option<[f32; 2]>,
     turn_drag: Option<(bool, f32, f32)>,
     selection_rotation: Option<(u64, usize, f32, Pos2, bool)>,
     turn_slider: Option<(bool, usize, Rect)>,
@@ -81,11 +83,13 @@ impl Default for RigEditor {
             reanchor: false,
             paint: false,
             show_weights: false,
+            show_unweighted: false,
             radius: 40.,
             strength: 0.35,
             timing: None,
             character_setup: false,
             edit_character_bones: false,
+            test_character_pose: None,
             turn_drag: None,
             selection_rotation: None,
             turn_slider: None,
@@ -346,6 +350,9 @@ impl Editor {
         else {
             return;
         };
+        if self.doc.extras.rig.weight_locks.contains(&bone.id) {
+            return;
+        }
         let poses = self.doc.extras.rig.poses(rig_frame);
         let available: std::collections::HashSet<_> =
             self.rig_targets().iter().map(|t| t.track).collect();
@@ -482,6 +489,7 @@ impl Editor {
                                         .clicked()
                                         {
                                             *target = Some(std::sync::Arc::new(rig::SavedPose {
+                                                controls: Vec::new(),
                                                 name: tr(label).into(),
                                                 bones: rig
                                                     .bones
@@ -1569,7 +1577,16 @@ impl Editor {
                     crate::paint::weight_overlay(p, &mark, view, |q| {
                         (
                             rig::point(delta, deformer.point(q)),
-                            binding.weight(q, bone.id),
+                            if self.rigging.show_unweighted {
+                                (1. - binding
+                                    .sample(q)
+                                    .iter()
+                                    .map(|influence| influence.weight)
+                                    .sum::<f32>())
+                                .clamp(0., 1.)
+                            } else {
+                                binding.weight(q, bone.id)
+                            },
                         )
                     });
                 }
@@ -1770,6 +1787,38 @@ impl Editor {
             self.doc.extras.rig.bones[index] = bone.clone();
             self.recover();
         }
+        let mut rule = self
+            .doc
+            .extras
+            .rig
+            .ik_rules
+            .get(&bone.id)
+            .copied()
+            .unwrap_or_default();
+        let before = rule;
+        ui.collapsing(tr("IK constraints"), |ui| {
+            ui.checkbox(&mut rule.stop_chain, tr("Stop IK chain at this bone"));
+            let mut limited = rule.limits.is_some();
+            if ui.checkbox(&mut limited, tr("Limit joint angle")).changed() {
+                rule.limits = limited.then_some([-90., 90.]);
+            }
+            if let Some([min, max]) = &mut rule.limits {
+                ui.horizontal(|ui| {
+                    ui.label(tr("Min / Max"));
+                    ui.add(egui::DragValue::new(min).range(-360. ..=*max).suffix("°"));
+                    ui.add(egui::DragValue::new(max).range(*min..=360.).suffix("°"));
+                });
+            }
+        });
+        if rule != before {
+            self.checkpoint();
+            if rule == Default::default() {
+                self.doc.extras.rig.ik_rules.remove(&bone.id);
+            } else {
+                self.doc.extras.rig.ik_rules.insert(bone.id, rule);
+            }
+            self.recover();
+        }
         design::category(ui, "SÍMBOLOS AFECTADOS");
         let unbound: Vec<_> = targets
             .iter()
@@ -1802,6 +1851,87 @@ impl Editor {
             self.recover();
             return;
         }
+        if design::button(
+            ui,
+            Icon::Bones,
+            "Bind Rigid to Bone",
+            "Use only this bone for the selected pieces",
+            false,
+            self.canvas.selected.iter().any(|&(layer, mark)| {
+                targets
+                    .iter()
+                    .any(|target| target.layer == layer && target.mark == mark)
+            }),
+        )
+        .clicked()
+        {
+            let selected = self.canvas.selected.clone();
+            self.checkpoint();
+            for &(layer, mark) in &selected {
+                if let Some(track) = self.rig_bind(layer, mark) {
+                    for other in &mut self.doc.extras.rig.bones {
+                        other.targets.retain(|target| *target != track);
+                    }
+                    self.doc.extras.rig.bones[index].targets.push(track);
+                    if let Some(binding) = self
+                        .doc
+                        .extras
+                        .rig
+                        .bindings
+                        .iter_mut()
+                        .find(|binding| binding.target == track)
+                    {
+                        let mut cell = crate::rig::Cell::default();
+                        cell.set(bone.id, 1.);
+                        binding.cells.fill(cell);
+                    }
+                }
+            }
+            self.canvas.selected = selected;
+            self.recover();
+            return;
+        }
+        if design::button(
+            ui,
+            Icon::LayerRemove,
+            "Remove Selected Binding",
+            "Remove only the selected pieces’ weights and pins",
+            false,
+            self.canvas.selected.iter().any(|&(layer, mark)| {
+                targets.iter().any(|target| {
+                    target.layer == layer
+                        && target.mark == mark
+                        && self
+                            .doc
+                            .extras
+                            .rig
+                            .bindings
+                            .iter()
+                            .any(|binding| binding.target == target.track)
+                })
+            }),
+        )
+        .clicked()
+        {
+            let selected = self.canvas.selected.clone();
+            let detached: std::collections::HashSet<_> = targets
+                .iter()
+                .filter(|target| selected.contains(&(target.layer, target.mark)))
+                .map(|target| target.track)
+                .collect();
+            self.checkpoint();
+            let rig = &mut self.doc.extras.rig;
+            rig.bindings
+                .retain(|binding| !detached.contains(&binding.target));
+            for bone in &mut rig.bones {
+                bone.targets.retain(|target| !detached.contains(target));
+            }
+            self.rigging.target = None;
+            self.rigging.pin = None;
+            self.canvas.selected = selected;
+            self.recover();
+            return;
+        }
         let mut attachment = None;
         for t in targets
             .into_iter()
@@ -1830,6 +1960,25 @@ impl Editor {
             self.recover();
         }
         design::category(ui, "INFLUENCIAS");
+        let mut locked = self.doc.extras.rig.weight_locks.contains(&bone.id);
+        if ui
+            .checkbox(&mut locked, tr("Lock weights for this bone"))
+            .changed()
+        {
+            self.checkpoint();
+            if locked {
+                self.doc.extras.rig.weight_locks.insert(bone.id);
+            } else {
+                self.doc.extras.rig.weight_locks.remove(&bone.id);
+            }
+            self.recover();
+        }
+        if self.rigging.show_weights {
+            ui.checkbox(
+                &mut self.rigging.show_unweighted,
+                tr("Show unweighted areas"),
+            );
+        }
         if design::button(
             ui,
             Icon::Eye,

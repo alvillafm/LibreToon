@@ -336,6 +336,9 @@ impl Editor {
     pub fn exit_symbol(&mut self) {
         self.finish_pending_pen();
         if let Some((mut parent, frame, layer, id)) = self.feature.symbol_stack.pop() {
+            let previous_character = (parent.extras.rig.character_symbol == Some(id)
+                && !self.undo.is_empty())
+            .then(|| parent.clone());
             parent.extras.symbols = self.doc.extras.symbols.clone();
             parent.extras.animation_clips = self.doc.extras.animation_clips.clone();
             parent.extras.animation_library = self.doc.extras.animation_library.clone();
@@ -353,6 +356,31 @@ impl Editor {
             crate::animation_clips::normalize_asset_ranges(&mut parent, id);
             if parent.extras.rig.character_symbol == Some(id) {
                 crate::character::apply_bone_names(&mut parent.extras.rig, &self.doc.layers);
+                if let Some(previous) = previous_character.as_ref()
+                    && let Some(old) = previous
+                        .extras
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.id == id)
+                {
+                    let removed = old
+                        .layers
+                        .iter()
+                        .filter_map(|layer| layer.options.character_piece.as_ref())
+                        .filter(|piece| {
+                            piece.is_lip()
+                                && !self.doc.layers.iter().any(|layer| {
+                                    layer
+                                        .options
+                                        .character_piece
+                                        .as_ref()
+                                        .is_some_and(|live| live.track == piece.track)
+                                })
+                        })
+                        .map(|piece| piece.track)
+                        .collect();
+                    crate::lip::prune_rig_mouth_routes(&mut parent, id, &removed);
+                }
             }
             self.doc = parent;
             self.rigging = Default::default();
@@ -364,6 +392,7 @@ impl Editor {
             self.playing = false;
             self.canvas.clear_selection();
             self.undo.clear();
+            self.undo.extend(previous_character);
             self.redo.clear();
             self.recover();
         }

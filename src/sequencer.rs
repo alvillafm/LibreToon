@@ -49,6 +49,7 @@ enum Row {
     Cameras,
     Rigging,
     Turn(bool),
+    RigControl(u64, bool, usize),
 }
 #[derive(Default)]
 pub(crate) struct LayerSelection {
@@ -939,6 +940,32 @@ impl Editor {
         let previous_frame = self.frame;
         self.exposure_sheet(ui.ctx());
         self.frame_workflow_ui(ui.ctx());
+        let remove_rig = ui.scope_id().with("confirm-remove-character-rig");
+        if ui
+            .data(|data| data.get_temp::<bool>(remove_rig))
+            .unwrap_or(false)
+        {
+            let response = egui::Modal::new(remove_rig).show(ui.ctx(), |ui| {
+                ui.heading(tr("Remove Character Rig"));
+                ui.label(tr(
+                    "Removes all scene bones, weights, pins and rig keys. Artwork is kept.",
+                ));
+                ui.horizontal(|ui| {
+                    let confirm =
+                        button(ui, Icon::Trash, "Remove Character Rig", "", false, true).clicked();
+                    let cancel = ui.button(tr("Cancelar")).clicked();
+                    (confirm, cancel)
+                })
+                .inner
+            });
+            let (confirm, cancel) = response.inner;
+            if confirm || cancel || response.should_close() {
+                ui.data_mut(|data| data.remove::<bool>(remove_rig));
+                if confirm {
+                    self.delete_rigging_track();
+                }
+            }
+        }
         if self.in_character_symbol() {
             let timeline = egui::Panel::bottom("character-view-timeline")
                 .default_size(240.)
@@ -1346,6 +1373,11 @@ impl Editor {
                     };
                 }
                 let mut all = vec![];
+                let rig_filter = ui.scope_id().with("rig-channel-filter");
+                let mut rig_query = ui.data(|data| data.get_temp::<String>(rig_filter)).unwrap_or_default();
+                let query = rig_query.trim().to_lowercase();
+                let control_channels: Vec<_> = self.rig_control_channels().into_iter()
+                    .filter(|(_, _, label)| label.to_lowercase().contains(&query)).collect();
                 if !self.doc.extras.cameras.is_empty() {
                     all.push(Row::Cameras);
                 }
@@ -1355,6 +1387,7 @@ impl Editor {
                         let turns = &self.doc.extras.rig.character_turns;
                         if turns.head.root.is_some() { all.push(Row::Turn(true)); }
                         if turns.body.root.is_some() { all.push(Row::Turn(false)); }
+                        all.extend(control_channels.iter().enumerate().map(|(index, (track, continuous, _))| Row::RigControl(*track, *continuous, index)));
                     }
                 }
                 rows(self, &mut all);
@@ -1365,6 +1398,9 @@ impl Editor {
                 }
                 let mut layer_menu_action = None;
                 let mut delete_rigging=false;
+                let mut copy_rig = false;
+                let mut paste_rig = false;
+                let mut clear_pose_keys = false;
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.feature.frame_drag = None;
                     self.cancel_adjustment_drag();
@@ -2157,8 +2193,19 @@ impl Editor {
                                     let header=ui.interact(Rect::from_min_max(label.min,Pos2::new(trash.left()-3.,label.bottom())),ui.scope_id().with("rigging-track-header"),Sense::click());
                                     if header.clicked() { self.animation.rig_channels_open ^= true; }
                                     header.context_menu(|ui|{
+                                        ui.add(egui::TextEdit::singleline(&mut rig_query).hint_text(tr("Filter control channels")));
+                                        ui.separator();
                                         ui.label(tr("Deleting this track removes its bones, weights and keys. Artwork is kept; Undo restores the rig."));
-                                        if button(ui,Icon::Trash,"Delete rigging track","Delete rigging track",false,true).clicked(){delete_rigging=true;ui.close();}
+                                        if button(ui, Icon::Copy, "Copy Character Rig", "", false, !self.doc.extras.rig.bindings.is_empty()).clicked() {
+                                            copy_rig = true; ui.close();
+                                        }
+                                        if button(ui, Icon::Paste, "Paste Character Rig", "", false, self.can_paste_character_rig()).clicked() {
+                                            paste_rig = true; ui.close();
+                                        }
+                                        if button(ui, Icon::KeyRemove, "Clear Pose Keys at Playhead", "", false, self.frame > 0).clicked() {
+                                            clear_pose_keys = true; ui.close();
+                                        }
+                                        if button(ui,Icon::Trash,"Remove Character Rig","",false,true).clicked(){delete_rigging=true;ui.close();}
                                     });
                                     let delete=ui.interact(trash,ui.scope_id().with("delete-rigging-track"),Sense::click()).on_hover_text(tr("Delete rigging track"));
                                     if delete.clicked(){delete_rigging=true;}
@@ -2342,6 +2389,89 @@ impl Editor {
                                                 channel.keys.retain(|key| key.frame != f);
                                                 self.recover();
                                                 ui.close();
+                                            }
+                                        });
+                                    }
+                                }
+                                Row::RigControl(track, continuous, index) => {
+                                    let color = self.studio.prefs.layer_color(crate::studio::LayerColor::Rigging);
+                                    painter.rect_filled(label, 0., color.gamma_multiply(0.18));
+                                    let hit = ui.interact(label, ui.scope_id().with(("rig-channel-label", track, continuous)), Sense::hover());
+                                    hit.on_hover_text(&control_channels[index].2);
+                                    painter.with_clip_rect(label.shrink2(Vec2::new(6., 0.))).text(label.min + Vec2::new(33., row_h / 2.), egui::Align2::LEFT_CENTER, &control_channels[index].2, egui::FontId::proportional(11.), color);
+                                    ui.set_clip_rect(grid_clip);
+                                    let painter = ui.painter().with_clip_rect(grid_clip);
+                                    let select_id = ui.scope_id().with("rig-control-key-selection");
+                                    let mut selection = ui.data(|data| data.get_temp::<(u64, bool, usize, usize)>(select_id));
+                                    let keys = self.rig_control_frames(track, continuous);
+                                    for f in frames.clone() {
+                                        let x = r.left() + label_w + f as f32 * cell;
+                                        let rect = Rect::from_min_size(Pos2::new(x,y),Vec2::new(cell,row_h));
+                                        let keyed = keys.binary_search(&f).is_ok();
+                                        let selected = selection.filter(|&(owner, kind, a, b)| {
+                                            owner == track && kind == continuous && (a.min(b)..=a.max(b)).contains(&f)
+                                        });
+                                        if selected.is_some() {
+                                            painter.rect_filled(rect.shrink(1.), 2., color.gamma_multiply(0.28));
+                                        }
+                                        let response = ui.interact(rect, ui.scope_id().with(("rig-channel-key",track,continuous,f)), if keyed { Sense::click_and_drag() } else { Sense::click() });
+                                        if keyed {
+                                            let q = rect.center();
+                                            painter.add(egui::Shape::convex_polygon(vec![q - Vec2::Y * 5., q + Vec2::X * 4., q + Vec2::Y * 5., q - Vec2::X * 4.],color,Stroke::NONE));
+                                        }
+                                        if response.clicked() || response.secondary_clicked() {
+                                            self.frame = f;
+                                            self.playing = false;
+                                            if response.clicked() {
+                                                let anchor = selection.filter(|&(owner, kind, _, _)| {
+                                                    owner == track && kind == continuous && ui.input(|input| input.modifiers.shift)
+                                                }).map_or(f, |(_, _, anchor, _)| anchor);
+                                                selection = Some((track, continuous, anchor, f));
+                                                ui.data_mut(|data| data.insert_temp(select_id, selection.unwrap()));
+                                            }
+                                        }
+                                        let range = selected.map_or(f..=f, |(_, _, a, b)| a.min(b)..=a.max(b));
+                                        if keyed && let Some(to) = response.interact_pointer_pos().filter(|p| p.y >= y && p.y < y + row_h && p.x >= r.left() + label_w)
+                                            .map(|p| ((p.x - r.left() - label_w) / cell) as usize).filter(|&to| to < count && to != f)
+                                        {
+                                            let delta = to as isize - f as isize;
+                                            let duplicate = ui.input(|i| i.modifiers.alt);
+                                            let valid = keys.iter().filter(|key| range.contains(key)).all(|&key| {
+                                                key.checked_add_signed(delta).is_some_and(|slot| slot < count
+                                                    && (keys.binary_search(&slot).is_err() || !duplicate && range.contains(&slot)))
+                                            });
+                                            if response.dragged() {
+                                                timeline_drop_marker(&painter, rect.translate(Vec2::X * (to as f32 - f as f32) * cell), valid);
+                                            }
+                                            if response.drag_stopped() && valid {
+                                                self.edit_rig_control_range(track, continuous, range.clone(), Some(delta), duplicate, None);
+                                                ui.data_mut(|data| data.remove::<(u64, bool, usize, usize)>(select_id));
+                                                self.frame = to;
+                                                self.playing = false;
+                                            }
+                                        }
+                                        response.context_menu(|ui| {
+                                            ui.small(tr(if continuous { "Interpolated channel" } else { "Stepped channel" }));
+                                            if button(ui, Icon::KeyAdd, "Insert keyframe", "", false, !keyed).clicked() {
+                                                self.insert_rig_control_key(track, continuous, f);
+                                                ui.close();
+                                            }
+                                            if button(ui, Icon::KeyRemove, "Delete selected keys", "", false, keys.iter().any(|key| range.contains(key))).clicked() {
+                                                self.edit_rig_control_range(track, continuous, range.clone(), None, false, None);
+                                                ui.close();
+                                            }
+                                            if continuous {
+                                                ui.menu_button(tr("Key easing"), |ui| {
+                                                    use crate::character::RigEase;
+                                                    for (label, ease) in [("Linear", RigEase::Linear), ("Ease in", RigEase::In),
+                                                        ("Ease out", RigEase::Out), ("Ease in and out", RigEase::InOut)]
+                                                    {
+                                                        if ui.button(tr(label)).clicked() {
+                                                            self.edit_rig_control_range(track, continuous, range.clone(), None, false, Some(ease));
+                                                            ui.close();
+                                                        }
+                                                    }
+                                                });
                                             }
                                         });
                                     }
@@ -2642,7 +2772,11 @@ impl Editor {
                 viewport.area = output.inner_rect;
                 viewport.offset = output.state.clamped_offset().x;
                 ui.data_mut(|data| data.insert_temp(viewport_id, viewport));
-                if delete_rigging {self.delete_rigging_track();}
+                ui.data_mut(|data| data.insert_temp(rig_filter, rig_query));
+                if delete_rigging { ui.data_mut(|data| data.insert_temp(remove_rig, true)); }
+                if clear_pose_keys { self.delete_rig_keys(self.frame); }
+                if copy_rig { self.copy_character_rig(); }
+                if paste_rig { self.paste_timeline_frames(); }
                 self.finish_exposure_resize(ui.ctx());
                 self.finish_folder_ui(ui.ctx());
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
