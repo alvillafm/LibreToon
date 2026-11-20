@@ -32,7 +32,7 @@
 
 ## Features
 
-Read the [LibreToon User Manual](https://alvillafm.github.io/LibreToon/) or browse its [source chapters](manual/index.md).
+Read the [LibreToon Wiki](https://alvillafm.github.io/LibreToon/), follow the [five progressive tutorials](manual/learn/index.md), or browse the [manual chapters](manual/index.md).
 
 ### Drawing & Color
 

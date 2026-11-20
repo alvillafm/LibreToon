@@ -1,20 +1,61 @@
-site_name: LibreToon Manual
+site_name: LibreToon Wiki
+site_description: Learn 2D drawing, animation, character rigging and compositing in LibreToon.
 site_url: https://alvillafm.github.io/LibreToon/
 docs_dir: manual
 repo_url: https://github.com/alvillafm/LibreToon
+repo_name: LibreToon
+edit_uri: edit/main/manual/
 theme:
   name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
   features:
     - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
     - search.suggest
+    - search.highlight
+    - content.action.edit
 plugins:
   - search
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences
+  - toc:
+      permalink: true
 nav:
-  - Getting Started: index.md
+  - Start Here:
+      - Welcome: index.md
+      - Workspace and First Steps: getting-started.md
+  - Learn by Making:
+      - Learning Path: learn/index.md
+      - 1 · Draw a Little Owl: learn/01-owl.md
+      - 2 · Make the Owl Blink: learn/02-blink.md
+      - 3 · Build a Forest Shot: learn/03-forest.md
+      - 4 · Light the Night: learn/04-lighting.md
+      - 5 · Rig a Waving Wing: learn/05-rig.md
+      - More Exercises and Examples: tutorials.md
   - User Manual:
       - Drawing and Color: drawing.md
       - Timeline and Exposure Sheet: timeline.md
       - Symbols, Clips and Rigging: rigging.md
       - Cameras, Lights and FX: compositing.md
-  - Tutorials: tutorials.md
-  - Reference: reference.md
+      - Saving and Recovery: saving.md
+      - Import and Export: files.md
+      - Performance and Preview: performance.md
+  - Help:
+      - Troubleshooting: troubleshooting.md
+      - Reference and Glossary: reference.md
+      - Contribute to This Wiki: contributing.md

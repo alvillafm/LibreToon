@@ -3,3 +3,6 @@
 *.trazo.tmp
 
 /dist/
+
+# Generated documentation site
+/site/
