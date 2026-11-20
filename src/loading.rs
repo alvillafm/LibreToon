@@ -112,7 +112,17 @@ impl Loader {
                                     .map(|doc| (doc, recovery.stamp))
                             };
                             if recovery.dirty {
-                                recovered().or_else(|_| saved())
+                                recovered().map_err(|error| {
+                                    if let Some(saved) = &recovery.saved {
+                                        format!(
+                                            "{error}\n{}\n{}",
+                                            crate::i18n::tr("Open the saved project separately to keep the recovery file."),
+                                            saved.display()
+                                        )
+                                    } else {
+                                        error
+                                    }
+                                })
                             } else {
                                 saved().or_else(|_| recovered())
                             }
@@ -236,6 +246,23 @@ mod tests {
         assert_eq!(result.0, valid);
         assert_eq!(result.1.unwrap().fps, 59);
         assert!(!loader.busy());
+        let missing_recovery = dir.join("missing-recovery.ltoon");
+        loader.restore(missing_recovery.clone(), Some(valid.clone()), None, true);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (path, document, _) = loop {
+            if let Some(result) = loader.take() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(path, missing_recovery);
+        assert!(
+            document
+                .err()
+                .unwrap()
+                .contains(&valid.display().to_string())
+        );
         drop(loader);
         std::fs::remove_dir_all(dir).unwrap();
     }

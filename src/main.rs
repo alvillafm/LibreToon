@@ -19,6 +19,7 @@ mod document;
 mod documents;
 mod drawing;
 mod editing;
+mod examples;
 mod exporter;
 mod exposure_resize;
 mod features;
@@ -28,7 +29,18 @@ mod fla_zip;
 mod folder_groups;
 mod frame_clipboard;
 mod frame_workflow;
+mod gpu_composition;
+mod gpu_gaussian;
+mod gpu_image;
 mod gpu_lens;
+mod gpu_light;
+mod gpu_plane;
+mod gpu_post;
+mod gpu_raster;
+mod gpu_resize;
+mod gpu_scene;
+mod gpu_surface;
+mod helper_process;
 mod i18n;
 mod inspector;
 #[cfg(test)]
@@ -44,10 +56,12 @@ mod ordering;
 mod paint;
 mod palette;
 mod post;
+mod preset_file;
 mod project_save;
 mod raster;
 mod recovery;
 mod reftool;
+mod render_profile;
 mod rig;
 #[cfg(test)]
 mod rig_tests;
@@ -470,6 +484,7 @@ impl eframe::App for Editor {
         self.annotation_dialog(&ctx);
         self.lip_session_ui(&ctx);
         self.project_save_ui(&ctx);
+        self.recovery_error_ui(&ctx);
         if self.studio.credits_open {
             egui::Window::new(crate::i18n::tr("Credits"))
                 .id(egui::Id::unique("libretoon-credits"))
@@ -512,6 +527,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LibreToon",
         eframe::NativeOptions {
+            renderer: eframe::Renderer::Wgpu,
             #[cfg(windows)]
             event_loop_builder: Some(Box::new(tablet::windows_event_loop)),
             #[cfg(target_os = "linux")]

@@ -103,6 +103,19 @@ fn row(ui: &mut egui::Ui, icon: Icon, label: &str, on: bool) -> bool {
 }
 impl Editor {
     pub(crate) fn view_menu(&mut self, ui: &mut egui::Ui) {
+        if button(
+            ui,
+            Icon::Tween,
+            "Animation curves",
+            "Animation curves",
+            self.animation.graph_open,
+            !self.hub.home,
+        )
+        .clicked()
+        {
+            self.animation.graph_open = !self.animation.graph_open;
+            ui.close();
+        }
         if row(ui, Icon::Ruler, "Mostrar reglas", self.studio.rulers) {
             self.studio.rulers = !self.studio.rulers;
             if self.studio.rulers {

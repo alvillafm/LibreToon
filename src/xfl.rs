@@ -848,11 +848,13 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
                     item.a("href").map(str::to_owned),
                     item.a("soundDataHRef").map(|href| format!("bin/{href}")),
                 ];
+                let limit = (256 * 1024 * 1024usize - used).min(crate::media::ASSET_LIMIT);
                 let sound = candidates.into_iter().flatten().find_map(|path| {
-                    let bytes = imp.archive.entry(path.as_bytes()).ok().flatten()?;
-                    if used.saturating_add(bytes.len()) > 256 * 1024 * 1024 {
-                        return None;
-                    }
+                    let bytes = imp
+                        .archive
+                        .entry_limited(path.as_bytes(), limit)
+                        .ok()
+                        .flatten()?;
                     crate::media::imported_audio(bytes, name.into())
                 });
                 if let Some(asset) = sound {
@@ -914,12 +916,13 @@ pub fn import(bytes: &[u8], xml: &str) -> Result<Document, String> {
         if !loaded.insert(path.clone()) {
             continue;
         }
-        match imp.archive.entry(path.as_bytes()) {
+        let remaining = 128 * 1024 * 1024usize - budget;
+        match imp
+            .archive
+            .entry_limited(path.as_bytes(), remaining.min(crate::fla_zip::LIMIT))
+        {
             Ok(Some(data)) => {
                 budget += data.len();
-                if budget > 128 * 1024 * 1024 {
-                    return Err("Biblioteca XFL demasiado grande".into());
-                }
                 match crate::fla_zip::xml_text(data).and_then(|s| parse(&s)) {
                     Ok(n) if n.name == "DOMSymbolItem" => {
                         let name = n.a("name").unwrap_or(href).to_owned();

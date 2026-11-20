@@ -579,7 +579,7 @@ impl Editor {
             _ => self.timeline_layer_edit(action),
         }
     }
-    fn add_layer_advanced(&mut self, raster: bool) {
+    pub(crate) fn add_layer_advanced(&mut self, raster: bool) {
         self.finish_raster_stroke();
         self.finish_pending_pen();
         if self.doc.layers.len() >= 100 {
@@ -670,6 +670,7 @@ impl Editor {
         let mut cadence = None;
         let mut transform = false;
         let mut label_edit = None;
+        let table_focus = egui::Id::unique("exposure-sheet-keyboard");
         let selected = self.feature.frame_selection;
         let layers = &self.doc.layers;
         let frames = layers
@@ -705,6 +706,63 @@ impl Editor {
                     )
                     .clicked();
                 });
+                let keyboard = ui.interact(
+                    egui::Rect::ZERO,
+                    table_focus,
+                    egui::Sense::focusable_noninteractive(),
+                );
+                let mut scroll_to = None;
+                if keyboard.has_focus() {
+                    ui.memory_mut(|memory| {
+                        memory.set_focus_lock_filter(
+                            table_focus,
+                            egui::EventFilter {
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                ..Default::default()
+                            },
+                        )
+                    });
+                    let movement = ui.input_mut(|input| {
+                        let modifiers = if input.modifiers.shift {
+                            egui::Modifiers::SHIFT
+                        } else {
+                            egui::Modifiers::NONE
+                        };
+                        [
+                            (egui::Key::ArrowLeft, (-1, 0)),
+                            (egui::Key::ArrowRight, (1, 0)),
+                            (egui::Key::ArrowUp, (0, -1)),
+                            (egui::Key::ArrowDown, (0, 1)),
+                        ]
+                        .into_iter()
+                        .find_map(|(key, delta)| input.consume_key(modifiers, key).then_some(delta))
+                    });
+                    if let Some((dx, dy)) = movement {
+                        let layer = self.layer.saturating_add_signed(dx).min(layers.len() - 1);
+                        let frame = self
+                            .frame
+                            .saturating_add_signed(dy)
+                            .min(layers[layer].frames.len() - 1);
+                        next = Some((layer, frame));
+                        scroll_to = Some((layer, frame));
+                    }
+                    if crate::frame_workflow::editable(&layers[self.layer]) {
+                        edit = ui.input_mut(|input| {
+                            [
+                                (egui::Key::Insert, egui::Modifiers::SHIFT, 1),
+                                (egui::Key::Insert, egui::Modifiers::NONE, 0),
+                                (egui::Key::Delete, egui::Modifiers::NONE, 4),
+                            ]
+                            .into_iter()
+                            .find_map(|(key, modifiers, action)| {
+                                input
+                                    .consume_key(modifiers, key)
+                                    .then_some((self.layer, self.frame, action))
+                            })
+                        });
+                    }
+                }
                 ui.spacing_mut().item_spacing.y = 0.;
                 let table_height = (ui.available_height() - 36.).max(100.);
                 egui::ScrollArea::both().max_height(table_height).show_rows(
@@ -712,11 +770,25 @@ impl Editor {
                     25.,
                     frames + 1,
                     |ui, rows| {
+                        let rows_start = rows.start;
                         for row in rows {
                             let (rect, _) = ui.allocate_exact_size(
                                 egui::vec2(frame_width + column_width * layers.len() as f32, 25.),
                                 egui::Sense::hover(),
                             );
+                            if row == rows_start
+                                && let Some((layer, frame)) = scroll_to
+                            {
+                                let min = rect.min
+                                    + egui::vec2(
+                                        frame_width + column_width * layer as f32,
+                                        ((frame + 1) as f32 - row as f32) * 25.,
+                                    );
+                                ui.scroll_to_rect(
+                                    Rect::from_min_size(min, egui::vec2(column_width, 25.)),
+                                    None,
+                                );
+                            }
                             let header = row == 0;
                             let frame = row.saturating_sub(1);
                             let clip = ui.clip_rect();
@@ -743,6 +815,7 @@ impl Editor {
                                     row,
                                 );
                                 if !header && response.clicked() {
+                                    keyboard.request_focus();
                                     next = Some((self.layer, frame));
                                 }
                             }
@@ -809,6 +882,7 @@ impl Editor {
                                     frame + 1
                                 ));
                                 if response.clicked() {
+                                    keyboard.request_focus();
                                     next = Some((index, frame));
                                 }
                                 if crate::frame_workflow::editable(layer) {
@@ -3427,6 +3501,42 @@ mod layer_selection_tests {
             .unwrap()
             .unwrap();
         assert_eq!(reopened.extras.folders[2].timeline_slot, Some(0));
+    }
+
+    #[test]
+    fn exposure_sheet_keyboard_moves_and_extends_the_timeline_selection() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        editor.animation.exposure_sheet = true;
+        editor.frame = 0;
+        editor.layer = 0;
+        let tick = |editor: &mut Editor, input| {
+            let mut output = ctx.run_ui(input, |_| editor.exposure_sheet(&ctx));
+            output.textures_delta.clear();
+        };
+        tick(&mut editor, egui::RawInput::default());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique("exposure-sheet-keyboard")));
+        tick(&mut editor, egui::RawInput::default());
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            tick(
+                &mut editor,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::Key {
+                            key: egui::Key::ArrowDown,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(editor.frame, 2);
+        assert_eq!(editor.feature.frame_selection, Some((0, 1, 2)));
     }
 
     #[test]

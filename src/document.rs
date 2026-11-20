@@ -167,33 +167,7 @@ impl Document {
             return Err("Invalid linked palette".into());
         }
         if self.extras.rig_poses.len() > 100
-            || self.extras.rig_poses.iter().any(|pose| {
-                let mut ids = std::collections::HashSet::new();
-                pose.name.is_empty()
-                    || pose.name.len() > 256
-                    || (pose.bones.is_empty() && pose.controls.is_empty())
-                    || pose.controls.len() > 100
-                    || pose.controls.iter().any(|(track, variant, axes)| {
-                        *track == 0
-                            || *variant >= 128
-                            || axes.iter().any(|value| !(-1. ..=1.).contains(value))
-                    })
-                    || pose.bones.len() > 128
-                    || pose.bones.iter().any(|(id, key)| {
-                        *id == 0
-                            || !ids.insert(*id)
-                            || key.frame >= 10000
-                            || !key.angle.is_finite()
-                            || key.angle.abs() > 1e7
-                            || key
-                                .translation
-                                .iter()
-                                .any(|v| !v.is_finite() || v.abs() > 1e7)
-                            || !(0.01..=100.).contains(&key.scale)
-                            || !(0.1..=10.).contains(&key.stretch)
-                            || !key.curve.valid()
-                    })
-            })
+            || self.extras.rig_poses.iter().any(|pose| !pose.valid())
         {
             return Err("Invalid saved rig pose".into());
         }

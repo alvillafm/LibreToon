@@ -784,7 +784,9 @@ impl Editor {
                     let cancel = self.studio.export_cancel.clone();
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.studio.export_job = Some(rx);
+                    let gpu = self.depth.gpu_context();
                     std::thread::spawn(move || {
+                        crate::gpu_lens::use_on_worker(gpu);
                         let result = (|| {
                             let mut last = PathBuf::new();
                             for (number, (job, path)) in jobs.into_iter().enumerate() {
@@ -1189,9 +1191,12 @@ struct LitPlaneKey {
 
 impl LitPlaneKey {
     fn same_source(&self, other: &Self) -> bool {
+        self.region == other.region && self.same_drawing(other)
+    }
+
+    fn same_drawing(&self, other: &Self) -> bool {
         self.layer == other.layer
             && self.dimensions == other.dimensions
-            && self.region == other.region
             && self.guide == other.guide
             && self.mask_roots == other.mask_roots
             && self.scene_mask == other.scene_mask
@@ -1251,20 +1256,30 @@ impl LitPlanes {
         }
         self.inputs.push_back(input);
     }
-    fn get(&mut self, key: &LitPlaneKey, assets: Option<usize>) -> Option<Arc<Vec<u8>>> {
+    fn get(
+        &mut self,
+        key: &LitPlaneKey,
+        assets: Option<usize>,
+    ) -> Option<(Arc<Vec<u8>>, Option<LitRegion>)> {
         let index = self.planes.iter().position(|plane| {
-            plane.key.layer == key.layer
-                && plane.assets.as_ref().map(|assets| assets.identity()) == assets
-                && plane.key.as_ref() == key
+            plane.assets.as_ref().map(|assets| assets.identity()) == assets
+                && plane.key.same_drawing(key)
+                && plane.key.lights == key.lights
+                && match (plane.key.region, key.region) {
+                    (Some(cached), Some(requested)) => cached.covers(requested),
+                    (None, None) => true,
+                    _ => false,
+                }
         })?;
         let plane = self.planes.remove(index).unwrap();
         let pixels = plane.pixels.clone();
+        let region = plane.key.region;
         self.planes.push_back(plane);
         #[cfg(test)]
         {
             self.hits += 1;
         }
-        Some(pixels)
+        Some((pixels, region))
     }
 
     fn insert(&mut self, plane: LitPlane) {
@@ -1273,8 +1288,7 @@ impl LitPlanes {
         if size > BUDGET {
             return;
         }
-        self.planes
-            .retain(|cached| cached.key.layer != plane.key.layer);
+        self.planes.retain(|cached| cached.key != plane.key);
         let mut bytes = size
             + self
                 .planes
@@ -1304,7 +1318,50 @@ fn raster_composited(
     full_quality: bool,
     work: Option<&crate::depth::PreviewWork>,
 ) -> Vec<u8> {
+    let mut render = || {
+        raster_composited_inner(
+            doc,
+            frame,
+            w,
+            h,
+            ctx,
+            cache,
+            video,
+            clock,
+            transparent,
+            post,
+            camera_blur,
+            camera,
+            full_quality,
+            work,
+        )
+    };
+    if let Some(gpu) = crate::gpu_lens::on_worker() {
+        let _frame = gpu.frame_lock.lock().unwrap_or_else(|e| e.into_inner());
+        render()
+    } else {
+        render()
+    }
+}
+
+fn raster_composited_inner(
+    doc: &Document,
+    frame: usize,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+    clock: Option<usize>,
+    transparent: bool,
+    post: bool,
+    camera_blur: bool,
+    camera: bool,
+    full_quality: bool,
+    work: Option<&crate::depth::PreviewWork>,
+) -> Vec<u8> {
     let canceled = || work.is_some_and(crate::depth::PreviewWork::canceled);
+    let _profile = crate::render_profile::frame();
     let report = |percent| {
         if let Some(work) = work {
             work.report(percent);
@@ -1329,8 +1386,10 @@ fn raster_composited(
         .as_ref()
         .filter(|o| camera_blur && o.strength > 0.);
     let camera_track = active_camera.filter(|_| camera);
-    let mut resolved =
-        crate::features::resolve_preview(&scene, local, false, clock.unwrap_or(local));
+    let mut resolved = {
+        let _span = crate::render_profile::span("resolve artwork");
+        crate::features::resolve_preview(&scene, local, false, clock.unwrap_or(local))
+    };
     if let Some(optics) = camera_optics.as_ref().filter(|_| camera_track.is_some()) {
         resolved.retain(|(layer, _, _)| {
             crate::depth::visible(&scene.layers[*layer].options.depth, optics)
@@ -1358,13 +1417,41 @@ fn raster_composited(
         })
         .collect();
     let world = if let (Some(track), Some(optics)) = (camera_track, camera_optics.as_ref()) {
-        let world = (!lights.is_empty()).then(|| resolved.clone());
+        let world = (!lights.is_empty() || crate::gpu_lens::available_on_worker())
+            .then(|| resolved.clone());
         crate::features::project_camera_marks(&scene, local, track, optics, &mut resolved);
         world
     } else {
         None
     };
     report(20);
+    if crate::gpu_lens::available_on_worker() {
+        let mut native = std::mem::take(&mut cache.native_scene);
+        let result = crate::gpu_scene::render(
+            &scene,
+            local,
+            w,
+            h,
+            ctx,
+            cache,
+            &mut native,
+            world.as_deref().unwrap_or(&resolved),
+            video,
+            camera_track,
+            post,
+            camera_blur,
+            full_quality,
+            transparent,
+            work,
+        );
+        cache.native_scene = native;
+        if let Some(pixels) = result {
+            return pixels;
+        }
+        if canceled() {
+            return Vec::new();
+        }
+    }
     let phase = |value| {
         if let Some(work) = work {
             work.phase(value);
@@ -1443,10 +1530,10 @@ fn raster_composited(
     if optics.is_some() || !lights.is_empty() || !scoped_fx.is_empty() || !auto_outlines.is_empty()
     {
         let channels = if transparent || adjust { 4 } else { 3 };
-        let mut result = vec![if channels == 4 { 0 } else { 255 }; (w * h) as usize * channels];
+        let mut result = crate::gpu_composition::Composition::new(w, h, channels);
         let mut clips = video.iter().enumerate().peekable();
         let render = |cache: &mut crate::paint::RenderCache,
-                      result: &mut Vec<u8>,
+                      result: &mut crate::gpu_composition::Composition,
                       subset: (bool, usize),
                       plane: &crate::depth::LayerDepth,
                       group: Option<(u64, usize)>| {
@@ -1489,15 +1576,37 @@ fn raster_composited(
                 pad
             };
             let region = if full_quality && use_world {
-                camera_track.and_then(|track| {
-                    let output = lit_output_view(&scene, local, Some(track), plane, w, h, pad);
-                    LitRegion::new(output, scale, [pw, ph], |source_scale, step| {
+                let output = lit_output_view(&scene, local, camera_track, plane, w, h, pad);
+                let bounds =
+                    artwork
+                        .iter()
+                        .filter(|(index, _, _)| *index == subset.1)
+                        .try_fold(Rect::NOTHING, |bounds, (_, _, mark)| {
+                            if mark.style.text.is_some() {
+                                return None;
+                            }
+                            Some(bounds.union(
+                                crate::vector::control_bounds(mark).expand(mark.width * 0.5),
+                            ))
+                        });
+                let step = if output.scale <= scale {
+                    (w + source_pad * 2).max(h + source_pad * 2).div_ceil(1024) as usize
+                } else {
+                    pw.max(ph).div_ceil(1024) as usize
+                };
+                LitRegion::new(
+                    output,
+                    scale,
+                    [pw, ph],
+                    bounds,
+                    step,
+                    |source_scale, step| {
                         target_lights
                             .clone()
                             .map(|(_, light, _)| light.region_padding(local, source_scale, step))
                             .fold(0., f32::max)
-                    })
-                })
+                    },
+                )
             } else {
                 None
             };
@@ -1575,7 +1684,7 @@ fn raster_composited(
                         .lit_planes
                         .get(key, assets.map(|assets| assets.identity()))
                 });
-                if let Some(pixels) = cached {
+                if let Some((pixels, cached_region)) = cached {
                     project_lit_plane(
                         &scene,
                         local,
@@ -1585,7 +1694,7 @@ fn raster_composited(
                         h,
                         source_pad,
                         pad,
-                        region,
+                        cached_region,
                         &pixels,
                     )
                 } else {
@@ -1646,34 +1755,44 @@ fn raster_composited(
                     let shade = |surfaces: &mut crate::light::SurfaceCache,
                                  image: &mut Vec<u8>,
                                  mask: Option<&[u8]>| {
-                        for (_, light, opacity) in target_lights.clone() {
-                            if let Some(region) = region {
-                                light.shade_region(
+                        let batchable = target_lights
+                            .clone()
+                            .all(|(_, light, _)| light.batchable_at(local));
+                        let mut draw = |image: &mut [u8]| {
+                            for (_, light, opacity) in target_lights.clone() {
+                                if let Some(region) = region {
+                                    light.shade_region(
+                                        image,
+                                        region.size,
+                                        region.view(),
+                                        region.surface_step,
+                                        local,
+                                        *opacity,
+                                        height.as_deref(),
+                                        mask,
+                                        surfaces,
+                                    );
+                                    continue;
+                                }
+                                light.apply_padded(
                                     image,
-                                    region.size,
-                                    region.view(),
-                                    region.surface_step,
+                                    w,
+                                    h,
+                                    source_pad,
+                                    &scene,
                                     local,
+                                    camera && !use_world,
                                     *opacity,
                                     height.as_deref(),
                                     mask,
-                                    surfaces,
+                                    Some(surfaces),
                                 );
-                                continue;
                             }
-                            light.apply_padded(
-                                image,
-                                w,
-                                h,
-                                source_pad,
-                                &scene,
-                                local,
-                                camera && !use_world,
-                                *opacity,
-                                height.as_deref(),
-                                mask,
-                                Some(surfaces),
-                            );
+                        };
+                        if batchable {
+                            crate::gpu_lens::light_batch(image, draw);
+                        } else {
+                            draw(image);
                         }
                     };
                     let mut raw;
@@ -1786,7 +1905,9 @@ fn raster_composited(
                             }
                         }
                         if let Some(mask) = mask {
-                            shadow.apply(&mut raw, mask, pw, ph, scale, *opacity);
+                            light.apply_shadow(
+                                &mut raw, mask, pw, ph, pad, &scene, local, camera, *opacity,
+                            );
                         }
                     }
                 }
@@ -1844,18 +1965,7 @@ fn raster_composited(
             } else {
                 raw
             };
-            if pad == 0 {
-                composite(result, &blurred, channels);
-            } else {
-                for y in 0..h as usize {
-                    let start = ((y + pad as usize) * pw as usize + pad as usize) * 4;
-                    composite(
-                        &mut result[y * w as usize * channels..(y + 1) * w as usize * channels],
-                        &blurred[start..start + w as usize * 4],
-                        channels,
-                    );
-                }
-            }
+            result.composite(blurred, pw, pad);
         };
         let mut group_pixels = None;
         for layer in 0..=scene.layers.len() {
@@ -1874,7 +1984,7 @@ fn raster_composited(
                     && crate::folder_groups::layer_active(&scene, l, local)
                 {
                     phase(2);
-                    apply_adjustment(
+                    apply_composited_adjustment(
                         &mut cache.post_fx,
                         &mut result,
                         w,
@@ -1898,8 +2008,9 @@ fn raster_composited(
                         .iter()
                         .find(|(start, end, _)| (*start..=*end).contains(&layer))
                     {
-                        let group =
-                            group_pixels.get_or_insert_with(|| vec![0; (w * h * 4) as usize]);
+                        let group = group_pixels.get_or_insert_with(|| {
+                            crate::gpu_composition::Composition::new(w, h, 4)
+                        });
                         render(
                             cache,
                             group,
@@ -1919,7 +2030,7 @@ fn raster_composited(
                     if *index > end
                         && adjustment.options.fx_target == Some(crate::light::Receiver::Folder(id))
                     {
-                        apply_adjustment(
+                        apply_composited_adjustment(
                             &mut cache.post_fx,
                             &mut group,
                             w,
@@ -1934,13 +2045,14 @@ fn raster_composited(
                         );
                     }
                 }
-                composite(&mut result, &group, channels);
+                result.composite(group.finish(), w, 0);
             }
         }
         if canceled() {
             return Vec::new();
         }
         report(95);
+        let result = result.finish();
         return if adjust {
             finish_adjusted(result, transparent)
         } else {
@@ -1948,7 +2060,7 @@ fn raster_composited(
         };
     }
     if adjust {
-        let mut result = vec![0; (w * h * 4) as usize];
+        let mut result = crate::gpu_composition::Composition::new(w, h, 4);
         let mut start = 0;
         for (index, layer) in scene.layers.iter().enumerate() {
             report(20 + (67 * index / scene.layers.len().max(1)) as u8);
@@ -1974,10 +2086,10 @@ fn raster_composited(
                     0,
                     true,
                 );
-                composite(&mut result, &group, 4);
+                result.composite(group, w, 0);
             }
             phase(2);
-            apply_adjustment(
+            apply_composited_adjustment(
                 &mut cache.post_fx,
                 &mut result,
                 w,
@@ -2004,9 +2116,9 @@ fn raster_composited(
             0,
             true,
         );
-        composite(&mut result, &group, 4);
+        result.composite(group, w, 0);
         report(95);
-        return finish_adjusted(result, transparent);
+        return finish_adjusted(result.finish(), transparent);
     }
     raster_flat(
         doc,
@@ -2021,12 +2133,22 @@ fn raster_composited(
         transparent,
     )
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 struct LitRegion {
     origin: Vec2,
     size: [u32; 2],
     scale: f32,
     surface_step: usize,
+    required: Rect,
+}
+
+impl PartialEq for LitRegion {
+    fn eq(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.size == other.size
+            && self.scale == other.scale
+            && self.surface_step == other.surface_step
+    }
 }
 
 impl LitRegion {
@@ -2034,34 +2156,63 @@ impl LitRegion {
         output: View,
         stage_scale: f32,
         size: [u32; 2],
+        artwork: Option<Rect>,
+        surface_step: usize,
         padding: impl FnOnce(f32, usize) -> f32,
     ) -> Option<Self> {
         let zoom = output.scale / stage_scale;
-        if zoom <= 1. {
-            return None;
-        }
         // Use a world-aligned grid with at least one source sample per output pixel.
         // Quantizing the density lets adjacent camera poses share the same grid.
         let scale = (stage_scale * zoom.ceil()).max(output.scale);
-        let surface_step = size[0].max(size[1]).div_ceil(1024) as usize;
-        let tile = (surface_step * 16) as f32;
+        let surface_step = surface_step.max(1);
+        // Reserve a world-aligned neighbourhood so small camera movements
+        // project the existing lit plane instead of rebuilding its relief.
+        let tile = (surface_step * 128) as f32;
         let corners = [
             Pos2::ZERO,
             Pos2::new(size[0] as f32, 0.),
             Pos2::new(0., size[1] as f32),
             Pos2::new(size[0] as f32, size[1] as f32),
         ];
-        let bounds = Rect::from_points(&corners.map(|p| output.world(p) * scale))
-            .expand(padding(scale, surface_step).min(512.) + 2.);
-        let min = (bounds.min.to_vec2() / tile).floor() * tile;
-        let max = (bounds.max.to_vec2() / tile).ceil() * tile;
+        let padding = padding(scale, surface_step).min(512.) + 2.;
+        let mut bounds =
+            Rect::from_points(&corners.map(|p| output.world(p) * scale)).expand(padding);
+        if let Some(artwork) = artwork.filter(|bounds| bounds.is_positive() && bounds.is_finite()) {
+            let drawing = Rect::from_min_max(
+                (artwork.min.to_vec2() * scale).to_pos2(),
+                (artwork.max.to_vec2() * scale).to_pos2(),
+            )
+            .expand(padding);
+            let visible = bounds.intersect(drawing);
+            bounds = if visible.is_positive() {
+                visible
+            } else {
+                Rect::from_min_size(drawing.min, Vec2::splat(1.))
+            };
+        }
+        if !bounds.is_finite() || !bounds.is_positive() {
+            return None;
+        }
+        let guard = (surface_step * 64).min(128) as f32;
+        let min = (bounds.min.to_vec2() / tile).floor() * tile - Vec2::splat(guard);
+        let max = (bounds.max.to_vec2() / tile).ceil() * tile + Vec2::splat(guard);
         let extent = max - min;
         Some(Self {
             origin: min,
             size: [extent.x as u32, extent.y as u32],
             scale,
             surface_step,
+            required: bounds,
         })
+    }
+
+    fn covers(self, requested: Self) -> bool {
+        self.scale == requested.scale
+            && self.surface_step == requested.surface_step
+            && self.origin.x <= requested.required.left()
+            && self.origin.y <= requested.required.top()
+            && self.origin.x + self.size[0] as f32 >= requested.required.right()
+            && self.origin.y + self.size[1] as f32 >= requested.required.bottom()
     }
 
     fn view(self) -> View {
@@ -2074,7 +2225,7 @@ impl LitRegion {
     }
 }
 
-fn lit_output_view(
+pub(crate) fn lit_output_view(
     doc: &Document,
     frame: usize,
     camera: Option<&crate::features::Camera>,
@@ -2108,8 +2259,9 @@ fn project_lit_plane(
     source_pad: u32,
     output_pad: u32,
     region: Option<LitRegion>,
-    source: &[u8],
+    source: &Arc<Vec<u8>>,
 ) -> Vec<u8> {
+    let _span = crate::render_profile::span("camera planes");
     let output_w = w + output_pad * 2;
     let output_h = h + output_pad * 2;
     let ([source_w, source_h], source_view) = if let Some(region) = region {
@@ -2134,6 +2286,16 @@ fn project_lit_plane(
     let start = source_view.screen(output.world(Pos2::new(0.5, 0.5))) - Vec2::splat(0.5);
     let dx = crate::canvas::rotate(Vec2::X * (source_view.scale / output.scale), -output.angle);
     let dy = crate::canvas::rotate(Vec2::Y * (source_view.scale / output.scale), -output.angle);
+    if let Some(pixels) = crate::gpu_lens::project_on_worker(
+        source,
+        [source_w, source_h],
+        [output_w, output_h],
+        start,
+        dx,
+        dy,
+    ) {
+        return pixels;
+    }
     let mut pixels = vec![0; output_w as usize * output_h as usize * 4];
     let sample = |x: i32, y: i32| -> [u8; 4] {
         if x < 0 || y < 0 || x >= source_w as i32 || y >= source_h as i32 {
@@ -2166,15 +2328,63 @@ fn finish_adjusted(rgba: Vec<u8>, transparent: bool) -> Vec<u8> {
     if transparent {
         return rgba;
     }
-    let mut rgb = vec![255; rgba.len() / 4 * 3];
-    composite(&mut rgb, &rgba, 3);
-    rgb
+    // Premultiplied RGBA over white is exactly rgb + (255 - alpha).
+    rgba.chunks_exact(4)
+        .flat_map(|p| p[..3].iter().map(|v| v.saturating_add(255 - p[3])))
+        .collect()
 }
 #[derive(Clone, Copy)]
 enum FxPass {
     All,
     Outline,
     WithoutOutline,
+}
+
+fn apply_composited_adjustment(
+    fx_cache: &mut crate::post::EffectCache,
+    result: &mut crate::gpu_composition::Composition,
+    w: u32,
+    h: u32,
+    layer: &crate::document::Layer,
+    scale: f32,
+    doc: &Document,
+    frame: usize,
+    camera: bool,
+    composite_light: bool,
+    pass: FxPass,
+) {
+    let opacity = layer.options.opacity.clamp(0., 1.);
+    if opacity == 0. {
+        return;
+    }
+    if opacity == 1. && (!composite_light || layer.options.light.is_none()) {
+        if let Some(mut effects) = crate::post::effects_at(layer, frame) {
+            match pass {
+                FxPass::All => {}
+                FxPass::Outline => effects.to_mut().retain(crate::post::Effect::is_outline),
+                FxPass::WithoutOutline => effects.to_mut().retain(|e| !e.is_outline()),
+            }
+            crate::post::animate_grain(effects.to_mut(), frame);
+            if result.effects(&effects, scale) {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    apply_adjustment(
+        fx_cache,
+        result.pixels(),
+        w,
+        h,
+        layer,
+        scale,
+        doc,
+        frame,
+        camera,
+        composite_light,
+        pass,
+    );
 }
 
 fn apply_adjustment(
@@ -2204,8 +2414,11 @@ fn apply_adjustment(
         crate::post::animate_grain(effects.to_mut(), frame);
         fx_cache.apply(result, w, h, &effects, scale);
         if let Some(original) = original {
-            for (p, old) in result.iter_mut().zip(original) {
-                *p = (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
+            if !crate::post::gpu_filter(result, w, h, 11, Some(&original), &[opacity], [0; 3]) {
+                for (p, old) in result.iter_mut().zip(original) {
+                    *p =
+                        (f32::from(old) + (f32::from(*p) - f32::from(old)) * opacity).round() as u8;
+                }
             }
         }
     }
@@ -2217,7 +2430,7 @@ fn apply_adjustment(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderSubset {
+pub(crate) enum RenderSubset {
     Single(bool, usize),
     Height(usize),
     LightMask(usize, usize),
@@ -2244,6 +2457,7 @@ impl RenderSubset {
     }
 }
 fn composite(rgb: &mut [u8], rgba: &[u8], channels: usize) {
+    let _span = crate::render_profile::span("CPU composition");
     for (out, c) in rgb.chunks_exact_mut(channels).zip(rgba.chunks_exact(4)) {
         let alpha = c[3] as f32 / 255.;
         for k in 0..channels {
@@ -2291,7 +2505,7 @@ fn stage_raster_view(doc: &Document, w: u32, h: u32, padding: u32) -> ([u32; 2],
     };
     (size, view)
 }
-fn raster_flat_in_view(
+pub(crate) fn art_meshes(
     doc: &Document,
     w: u32,
     h: u32,
@@ -2301,9 +2515,9 @@ fn raster_flat_in_view(
     subset: Option<RenderSubset>,
     resolved: &[(usize, usize, crate::Mark)],
     padding: u32,
-    transparent: bool,
+    _transparent: bool,
     source: Option<([u32; 2], View)>,
-) -> Vec<u8> {
+) -> ([u32; 2], Vec<egui::ClippedPrimitive>) {
     let height_only = subset.is_some_and(RenderSubset::height_only);
     let mask_root = match subset {
         Some(RenderSubset::LightMask(_, root)) => Some(root),
@@ -2315,6 +2529,7 @@ fn raster_flat_in_view(
     };
     let ([w, h], view) = source.unwrap_or_else(|| stage_raster_view(doc, w, h, padding));
     let size = Vec2::new(w as f32, h as f32);
+    let preparation = crate::render_profile::span("prepare meshes");
     let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
@@ -2404,6 +2619,54 @@ fn raster_flat_in_view(
     );
     output.textures_delta.clear();
     let meshes = ctx.tessellate(output.shapes, output.pixels_per_point);
+    drop(preparation);
+    ([w, h], meshes)
+}
+
+fn raster_flat_in_view(
+    doc: &Document,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    cache: &mut crate::paint::RenderCache,
+    video: &[crate::media::ExportVideoFrame],
+    subset: Option<RenderSubset>,
+    resolved: &[(usize, usize, crate::Mark)],
+    padding: u32,
+    transparent: bool,
+    source: Option<([u32; 2], View)>,
+) -> Vec<u8> {
+    let ([w, h], meshes) = art_meshes(
+        doc,
+        w,
+        h,
+        ctx,
+        cache,
+        video,
+        subset,
+        resolved,
+        padding,
+        transparent,
+        source,
+    );
+    let size = Vec2::new(w as f32, h as f32);
+    let texture_pixels = |id| match id {
+        egui::TextureId::User(id) => video
+            .get((u64::MAX - id) as usize)
+            .map(|clip| {
+                (
+                    [clip.pixels.width() as usize, clip.pixels.height() as usize],
+                    clip.pixels.as_raw().as_slice(),
+                )
+            })
+            .or_else(|| doc.extras.media.pixels(id)),
+        _ => None,
+    };
+    if let Some(pixels) =
+        crate::gpu_lens::raster_on_worker(w, h, transparent, &meshes, texture_pixels)
+    {
+        return pixels;
+    }
     let mut pixels = if transparent {
         vec![0u8; (w * h * 4) as usize]
     } else {
@@ -2558,6 +2821,88 @@ fn triangle(
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires a GPU; compare rasterized vector and textured planes"]
+    fn gpu_raster_matches_software_planes() {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter =
+            crate::gpu_lens::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            crate::gpu_lens::block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu =
+            crate::gpu_raster::GpuRaster::new(device, queue).expect("raster shader must compile");
+        let (w, h) = (96, 64);
+        let clip = Rect::from_min_max(egui::pos2(3., 2.), egui::pos2(91., 61.));
+        let image = [
+            255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 0, 255, 255, 255, 220,
+        ];
+        for transparent in [false, true] {
+            for textured in [false, true] {
+                let mut mesh = egui::Mesh::default();
+                mesh.texture_id = if textured {
+                    egui::TextureId::User(1)
+                } else {
+                    egui::TextureId::default()
+                };
+                for (pos, uv, color) in [
+                    ([10.3, 8.7], [0., 0.], [100, 40, 20, 170]),
+                    ([85.7, 13.3], [1., 0.], [40, 120, 80, 200]),
+                    ([77.1, 56.2], [1., 1.], [80, 40, 100, 220]),
+                    ([7.8, 51.4], [0., 1.], [10, 50, 20, 70]),
+                ] {
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: egui::pos2(pos[0], pos[1]),
+                        uv: egui::pos2(uv[0], uv[1]),
+                        color: egui::Color32::from_rgba_premultiplied(
+                            color[0], color[1], color[2], color[3],
+                        ),
+                    });
+                }
+                mesh.indices = vec![0, 1, 2, 0, 2, 3];
+                let mut expected = vec![
+                    if transparent { 0 } else { 255 };
+                    w as usize * h as usize * if transparent { 4 } else { 3 }
+                ];
+                let texture = textured.then_some(([2, 2], image.as_slice()));
+                for t in mesh.indices.chunks_exact(3) {
+                    triangle(
+                        &mut expected,
+                        w,
+                        h,
+                        [
+                            mesh.vertices[t[0] as usize],
+                            mesh.vertices[t[1] as usize],
+                            mesh.vertices[t[2] as usize],
+                        ],
+                        clip,
+                        texture,
+                    );
+                }
+                let primitives = [egui::ClippedPrimitive {
+                    clip_rect: clip,
+                    primitive: egui::epaint::Primitive::Mesh(mesh),
+                }];
+                let actual = gpu
+                    .render(w, h, transparent, &primitives, |_| texture)
+                    .expect("GPU raster completed");
+                let max = expected
+                    .iter()
+                    .zip(&actual)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                let rms = (expected
+                    .iter()
+                    .zip(&actual)
+                    .map(|(a, b)| f64::from(a.abs_diff(*b)).powi(2))
+                    .sum::<f64>()
+                    / expected.len() as f64)
+                    .sqrt();
+                eprintln!("transparent {transparent}, textured {textured}: max {max}, RMS {rms}");
+                assert!(max <= 1 && rms < 0.5);
+            }
+        }
+    }
+    #[test]
     fn camera_pan_moves_the_lit_artwork_without_relighting_its_silhouette() {
         let mut doc = Document::default();
         doc.width = 96;
@@ -2607,6 +2952,21 @@ mod tests {
         assert_eq!(
             second,
             raster(&doc, 1, 96, 64, &ctx, &mut Default::default())
+        );
+        let mut zoomed = doc.clone();
+        for key in &mut zoomed.extras.cameras[0].animation.keys {
+            key.zoom = 1.5;
+        }
+        let mut zoom_cache = crate::paint::RenderCache::default();
+        raster(&zoomed, 0, 96, 64, &ctx, &mut zoom_cache);
+        let moved = raster(&zoomed, 1, 96, 64, &ctx, &mut zoom_cache);
+        assert_eq!(
+            zoom_cache.lit_planes.hits, 1,
+            "camera pan must reuse a high-resolution lit plane"
+        );
+        assert_eq!(
+            moved,
+            raster(&zoomed, 1, 96, 64, &ctx, &mut Default::default())
         );
         doc.layers[0].frames[1][0].fill = Some([20, 110, 140, 255]);
         let edited = raster(&doc, 1, 96, 64, &ctx, &mut cache);
@@ -2901,6 +3261,108 @@ mod tests {
         clip.slot = 1;
         let above = raster_with_video(&doc, 0, 8, 8, &ctx, &mut cache, &[clip]);
         assert_eq!(&above[center..center + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    #[ignore = "requires GPU; video ordering, transparent output and folder effects"]
+    fn gpu_video_transparency_and_folder_effects_match_reference() {
+        use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
+        let mut doc = crate::fresh_document();
+        doc.width = 96;
+        doc.height = 64;
+        doc.layers[0].frames[0].push(crate::Mark {
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            fill: Some([40, 80, 160, 180]),
+            points: vec![[12., 8.], [68., 52.]].into(),
+            ..Default::default()
+        });
+        let ctx = egui::Context::default();
+        let mut clip = crate::media::ExportVideoFrame {
+            depth: Default::default(),
+            slot: 0,
+            mark: crate::media::video_mark(&doc, Vec2::new(48., 32.)),
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(
+                48,
+                32,
+                image::Rgba([200, 40, 70, 160]),
+            )),
+        };
+        doc.extras.folders.push(crate::features::Folder {
+            id: 10,
+            name: "Composite".into(),
+            parent: None,
+            collapsed: false,
+            timeline_slot: None,
+            transform: Default::default(),
+            range: None,
+            source_shift: 0,
+        });
+        doc.layers[0].options.folder = Some(10);
+        let mut second = doc.layers[0].clone();
+        second.frames[0] = vec![crate::vector::transform(&second.frames[0][0], |p| {
+            p + Vec2::new(18., 5.)
+        })]
+        .into();
+        doc.layers.push(second);
+        let mut fx = doc.layers[0].clone();
+        fx.options.folder = None;
+        fx.options.fx_target = Some(crate::light::Receiver::Folder(10));
+        fx.options.adjustment = Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        doc.layers.push(fx);
+        for hidden in [false, true] {
+            doc.layers[1].visible = !hidden;
+            for slot in [0, 1, 3] {
+                clip.slot = slot;
+                for transparent in [false, true] {
+                    let render = |cache: &mut crate::paint::RenderCache| {
+                        raster_composited(
+                            &doc,
+                            0,
+                            96,
+                            64,
+                            &ctx,
+                            cache,
+                            std::slice::from_ref(&clip),
+                            None,
+                            transparent,
+                            true,
+                            true,
+                            true,
+                            true,
+                            None,
+                        )
+                    };
+                    use_on_worker(None);
+                    let expected = render(&mut Default::default());
+                    use_on_worker(Some(gpu.clone()));
+                    let mut cache = crate::paint::RenderCache::default();
+                    let actual = render(&mut cache);
+                    use_on_worker(None);
+                    assert_eq!(
+                        cache.native_scene.frames, 1,
+                        "{}",
+                        cache.native_scene.reason
+                    );
+                    assert_eq!(expected.len(), actual.len());
+                    let max = expected
+                        .iter()
+                        .zip(&actual)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap();
+                    assert!(
+                        max <= 2,
+                        "slot {slot}, transparent {transparent}, hidden {hidden}: {max}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

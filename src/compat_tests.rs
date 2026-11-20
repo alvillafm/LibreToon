@@ -3,6 +3,36 @@ use crate::{
     document::{Layer, Mark},
     features::{self, Instance, Playback, Symbol, SymbolClock},
 };
+#[test]
+fn bundled_fla_examples_survive_a_native_save_and_reopen() {
+    let fixtures: &[&[u8]] = &[
+        include_bytes!("../docs/examples/animacion_prueba.fla"),
+        include_bytes!("../docs/examples/ejemplo-interoperabilidad.fla"),
+    ];
+    for bytes in fixtures {
+        let imported = crate::fla::decode(bytes).expect("open shipped FLA example");
+        imported.validate().expect("validate imported example");
+        let native = crate::native_project::encode(&imported).expect("save example as LTOON");
+        let reopened = crate::native_project::decode_if_native(&native)
+            .expect("reopen native file")
+            .expect("recognize native container");
+        assert_eq!(
+            (imported.width, imported.height, imported.fps),
+            (reopened.width, reopened.height, reopened.fps)
+        );
+        let frames = crate::animation::movie_count(&imported);
+        assert_eq!(frames, crate::animation::movie_count(&reopened));
+        for frame in [0, frames / 2, frames.saturating_sub(1)] {
+            assert_eq!(
+                crate::animation::movie_svg(&imported, frame),
+                crate::animation::movie_svg(&reopened, frame),
+                "drawing is preserved at frame {}",
+                frame + 1,
+            );
+        }
+    }
+}
+
 fn shape(color: &str) -> String {
     format!(
         r##"<DOMShape><fills><FillStyle index="1"><SolidColor color="{color}"/></FillStyle></fills><edges><Edge fillStyle1="1" edges="!0 0|200 0|200 200|0 200|0 0"/></edges></DOMShape>"##

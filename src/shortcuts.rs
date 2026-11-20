@@ -200,7 +200,121 @@ fn redo_alias(prefs: &crate::studio::Preferences) -> Option<Binding> {
         Some(alias)
     }
 }
+#[derive(Clone, Copy)]
+enum Command {
+    Tool(crate::canvas::Tool),
+    Action(Action),
+}
+
 impl Editor {
+    pub(crate) fn command_search_ui(&mut self, ctx: &egui::Context) {
+        use crate::{canvas::Tool, design::button, i18n::tr, studio::TOOLS};
+
+        if self.hub.home
+            || self.studio.preferences_open
+            || self.studio.export.is_some()
+            || self.document_settings.is_some()
+        {
+            self.studio.command_search = None;
+            return;
+        }
+        let id = egui::Id::unique("command-search-input");
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
+        {
+            self.studio.command_search = Some(String::new());
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        let Some(mut query) = self.studio.command_search.take() else {
+            return;
+        };
+        let mut selected = None;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::unique("command-search")).show(ctx, |ui| {
+            ui.set_width(380.);
+            ui.heading(tr("Find a command…"));
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut query)
+                    .id(id)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(tr("Buscar herramienta o acción…")),
+            );
+            if query.is_empty() && !input.has_focus() && !input.lost_focus() {
+                input.request_focus();
+            }
+            let query = query.to_lowercase();
+            let mut rows = TOOLS
+                .iter()
+                .copied()
+                .zip(&self.studio.prefs.bindings)
+                .filter(|(tool, _)| *tool != Tool::Airbrush)
+                .map(|(tool, binding)| {
+                    (
+                        tool.name(),
+                        tool.icon(),
+                        binding.label(),
+                        Command::Tool(tool),
+                    )
+                })
+                .chain(ACTIONS.iter().copied().map(|action| {
+                    (
+                        action.name(),
+                        action.icon(),
+                        self.action_hint(action),
+                        Command::Action(action),
+                    )
+                }))
+                .filter(|(name, _, _, command)| {
+                    let aliases = match command {
+                        Command::Tool(Tool::Bucket) => {
+                            "fill gap gaps close rellenar cerrar huecos bote"
+                        }
+                        Command::Action(Action::PreparePreview) => {
+                            "prepare scene cache preparar escena caché"
+                        }
+                        _ => "",
+                    };
+                    let searchable = format!("{} {} {aliases}", tr(name), name).to_lowercase();
+                    query
+                        .split_whitespace()
+                        .all(|word| searchable.contains(word))
+                })
+                .peekable();
+            if let Some((_, _, _, first)) = rows.peek() {
+                if enter {
+                    selected = Some(*first);
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(300.)
+                    .show(ui, |ui| {
+                        egui::Grid::new("command-search-results")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                for (name, icon, shortcut, command) in rows {
+                                    if button(ui, icon, name, "", false, true).clicked() {
+                                        selected = Some(command);
+                                    }
+                                    ui.weak(shortcut);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            } else {
+                ui.label(tr("No matching commands."));
+            }
+        });
+        if !cancel && !response.should_close() && selected.is_none() {
+            self.studio.command_search = Some(query);
+        }
+        match selected {
+            Some(Command::Tool(tool)) => self.activate_tool(tool),
+            Some(Command::Action(action)) => self.perform_action(action, ctx),
+            None => {}
+        }
+    }
+
     pub(crate) fn action_hint(&self, action: Action) -> String {
         let index = ACTIONS.iter().position(|&a| a == action).unwrap();
         let mut text = self
@@ -234,6 +348,7 @@ impl Editor {
     pub(crate) fn action_shortcuts(&mut self, ctx: &egui::Context) {
         if self.hub.home
             || self.studio.preferences_open
+            || self.studio.command_search.is_some()
             || self.studio.export.is_some()
             || self.document_settings.is_some()
             || self.view_options.draft.is_some()
@@ -362,6 +477,33 @@ mod tests {
         ));
         e
     }
+    #[test]
+    fn command_search_accepts_bucket_workflow_terms() {
+        let ctx = egui::Context::default();
+        let mut editor = editor(&ctx);
+        editor.studio.command_search = Some("cerrar huecos".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+            editor.command_search_ui(&ctx)
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |_| editor.command_search_ui(&ctx),
+        );
+        output.textures_delta.clear();
+        assert!(editor.tool == Tool::Bucket);
+        assert!(editor.studio.command_search.is_none());
+    }
+
     fn press(ctx: &egui::Context, e: &mut Editor, key: egui::Key, modifiers: egui::Modifiers) {
         let mut out = ctx.run_ui(
             egui::RawInput {

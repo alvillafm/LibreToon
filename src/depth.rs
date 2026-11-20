@@ -234,6 +234,7 @@ pub fn optics_ui(ui: &mut egui::Ui, optics: &mut Optics) -> bool {
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ViewportQuality {
+    Adaptive,
     #[default]
     Full,
     Half,
@@ -241,9 +242,16 @@ pub(crate) enum ViewportQuality {
     Eighth,
 }
 impl ViewportQuality {
-    pub const ALL: [Self; 4] = [Self::Eighth, Self::Quarter, Self::Half, Self::Full];
+    pub const ALL: [Self; 5] = [
+        Self::Adaptive,
+        Self::Eighth,
+        Self::Quarter,
+        Self::Half,
+        Self::Full,
+    ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Adaptive => "Auto · Progressive",
             Self::Full => "Full quality",
             Self::Half => "1/2",
             Self::Quarter => "1/4",
@@ -252,12 +260,53 @@ impl ViewportQuality {
     }
     fn factor(self) -> f32 {
         match self {
-            Self::Full => 1.,
+            Self::Full | Self::Adaptive => 1.,
             Self::Half => 0.5,
             Self::Quarter => 0.25,
             Self::Eighth => 0.125,
         }
     }
+}
+
+fn progressive_size(target: [usize; 2], shown: &[usize], key: &[usize]) -> [usize; 2] {
+    let divisor = if shown.get(..3) == key.get(..3) && shown.len() >= 5 {
+        if shown[3] >= target[0] && shown[4] >= target[1] {
+            1
+        } else if shown[3] >= target[0].div_ceil(2) && shown[4] >= target[1].div_ceil(2) {
+            1
+        } else {
+            2
+        }
+    } else {
+        4
+    };
+    [
+        target[0].div_ceil(divisor).max(1),
+        target[1].div_ceil(divisor).max(1),
+    ]
+}
+
+#[test]
+fn progressive_preview_refines_only_the_current_frame() {
+    let key = [7, 3, 3, 1920, 1080];
+    assert_eq!(progressive_size([1920, 1080], &[], &key), [480, 270]);
+    assert_eq!(
+        progressive_size([1920, 1080], &[7, 3, 3, 480, 270], &key),
+        [960, 540]
+    );
+    assert_eq!(
+        progressive_size([1920, 1080], &[7, 3, 3, 960, 540], &key),
+        [1920, 1080]
+    );
+    assert_eq!(
+        progressive_size([1920, 1080], &[7, 2, 2, 960, 540], &key),
+        [480, 270]
+    );
+    assert_eq!(
+        progressive_size([1920, 1080], &[6, 3, 3, 960, 540], &key),
+        [480, 270]
+    );
+    assert_eq!(progressive_size([1, 1], &[], &key), [1, 1]);
 }
 
 const PREVIEW_TEXTURE_BYTES: usize = 96 * 1024 * 1024;
@@ -494,6 +543,19 @@ impl DepthEditor {
             work.canceled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn gpu_lighting_passes(&self) -> Option<usize> {
+        self.gpu.as_ref().map(|gpu| gpu.light_pass_count())
+    }
+    pub(crate) fn gpu_context(&self) -> Option<std::sync::Arc<crate::gpu_lens::GpuLens>> {
+        self.gpu.clone()
+    }
+    pub(crate) fn gpu_composed_frames(&self) -> Option<usize> {
+        self.gpu.as_ref().map(|gpu| {
+            gpu.composed_frames
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
     }
 
     pub(crate) fn cache_usage(&self) -> (usize, usize) {
@@ -809,7 +871,9 @@ pub fn blur(pixels: Vec<u8>, w: u32, h: u32, radius: f32, optics: &Optics) -> Ve
         image
     };
     let result = if optics.method == BlurMethod::Gaussian {
-        image::imageops::blur(&small, (radius * factor * 0.5).max(0.1))
+        let sigma = (radius * factor * 0.5).max(0.1);
+        crate::gpu_lens::gaussian_on_worker(&small, sigma)
+            .unwrap_or_else(|| image::imageops::blur(&small, sigma))
     } else {
         let samples = match optics.quality {
             Quality::Low => 8,
@@ -1002,7 +1066,8 @@ impl Editor {
             .then_some(self.layer);
         let post = fx || lights;
         let quality = self.studio.prefs.viewport_quality;
-        let reduced = quality != ViewportQuality::Full;
+        let adaptive = quality == ViewportQuality::Adaptive;
+        let reduced = quality.factor() < 1.;
         if !post && !blur && !reduced {
             if self.depth.prepare.take().is_some() {
                 self.status = tr("No composited preview to prepare at the current frame.").into();
@@ -1051,10 +1116,11 @@ impl Editor {
             (max / longest).min(1.)
         };
         let scale = scale * quality.factor();
-        let size = [
+        let full_size = [
             (self.doc.width as f32 * scale).round().max(1.) as usize,
             (self.doc.height as f32 * scale).round().max(1.) as usize,
         ];
+        let size = full_size;
         self.depth.sync_document(&self.doc);
         if scope_changed {
             self.depth.prepare = prepare;
@@ -1094,7 +1160,8 @@ impl Editor {
         {
             if (self.depth.job_is_prefetch || !self.playing)
                 && (self.depth.requested.get(1) != Some(&self.frame)
-                    || self.depth.interactive_job && self.depth.requested.get(1..) != key.get(1..))
+                    || self.depth.interactive_job
+                        && self.depth.requested.get(1..3) != key.get(1..3))
             {
                 self.depth.interactive_job = false;
                 self.depth.cancel_job();
@@ -1112,7 +1179,8 @@ impl Editor {
                     if interactive
                         && !self.playing
                         && done != key
-                        && done.get(1..) == key.get(1..)
+                        && done.get(1..3) == key.get(1..3)
+                        && (adaptive || done.get(3..) == key.get(3..))
                         && !pixels.is_empty()
                     {
                         self.depth.preview = Some(preview_texture(painter.ctx(), size, &pixels));
@@ -1120,7 +1188,16 @@ impl Editor {
                         self.depth.held_preview = true;
                     }
                     if done.first() == Some(&self.depth.preview_epoch) && !pixels.is_empty() {
-                        let show = done == key;
+                        let show = done == key
+                            // Present completed playback frames even if the
+                            // clock has advanced during their calculation.
+                            || self.playing
+                                && (adaptive || done.get(3..5) == key.get(3..5))
+                            || adaptive
+                                && done.get(..3) == key.get(..3)
+                                && done.get(5..) == key.get(5..)
+                                && done[3] <= size[0]
+                                && done[4] <= size[1];
                         let texture = (show
                             || (!has_video
                                 && self.depth.texture_bytes() + size[0] * size[1] * 4
@@ -1156,19 +1233,59 @@ impl Editor {
             }
         }
         self.depth.show_cached(&key, painter.ctx());
+        if adaptive && self.depth.shown != key {
+            let candidate = self
+                .depth
+                .cached
+                .iter()
+                .filter(|cached| {
+                    cached.key.get(..3) == key.get(..3)
+                        && cached.key.get(5..) == key.get(5..)
+                        && cached.size[0] <= size[0]
+                        && cached.size[1] <= size[1]
+                        && (self.depth.shown.get(..3) != key.get(..3)
+                            || self
+                                .depth
+                                .shown
+                                .get(3)
+                                .is_none_or(|shown| cached.size[0] > *shown))
+                })
+                .max_by_key(|cached| cached.size[0] * cached.size[1])
+                .map(|cached| cached.key.clone());
+            if let Some(candidate) = candidate {
+                self.depth.show_cached(&candidate, painter.ctx());
+            }
+        }
         if self.depth.shown == key {
             self.depth.held_preview = false;
         }
+        let playback_ready = adaptive
+            && self.playing
+            && self.depth.shown.get(..3) == key.get(..3)
+            && self.depth.shown.get(5..) == key.get(5..);
         let mut next = None;
         if self.depth.job.is_none() {
-            if self.depth.shown != key {
-                next = Some((key.clone(), false));
+            if self.depth.shown != key && !playback_ready {
+                let mut candidate = key.clone();
+                if adaptive {
+                    let progressive = if self.playing {
+                        [size[0].div_ceil(4), size[1].div_ceil(4)]
+                    } else {
+                        progressive_size(size, &self.depth.shown, &key)
+                    };
+                    candidate[3] = progressive[0];
+                    candidate[4] = progressive[1];
+                }
+                next = Some((candidate, false));
             } else if let Some((first, last)) =
                 self.depth.prepare.filter(|_| !self.playing && !has_video)
             {
-                let capacity = cache_limit / (size[0] * size[1] * 3);
-                let last_fit = last.min(first + capacity.saturating_sub(1));
-                next = (first..=last_fit).find_map(|frame| {
+                // The displayed frame is protected from eviction, even when
+                // the playhead has moved outside the requested range.
+                let capacity = (cache_limit / (size[0] * size[1] * 3))
+                    .saturating_sub(usize::from(!(first..=last).contains(&self.frame)));
+                let count = (last - first + 1).min(capacity);
+                next = (first..first + count).find_map(|frame| {
                     let candidate = vec![self.depth.preview_epoch, frame, frame, size[0], size[1]];
                     (!self
                         .depth
@@ -1179,7 +1296,7 @@ impl Editor {
                 });
                 if next.is_none() {
                     self.depth.prepare = None;
-                    self.status = tr(if last_fit == last {
+                    self.status = tr(if count == last - first + 1 {
                         "Preview ready."
                     } else {
                         "Preview cache full. Increase its memory or prepare a shorter range."
@@ -1217,6 +1334,7 @@ impl Editor {
             }
         }
         if let Some((key, prefetch)) = next {
+            let size = [key[3], key[4]];
             let doc = self
                 .depth
                 .render_doc
@@ -1289,8 +1407,19 @@ impl Editor {
                 ctx.request_repaint();
             });
         }
-        let hold =
-            !self.playing && self.depth.held_preview && self.depth.shown.get(1..) == key.get(1..);
+        let hold = playback_ready
+            // Never flash unprocessed artwork between completed playback
+            // frames. A changed document/scope epoch cannot be held here.
+            || self.playing
+                && self.depth.shown.first() == key.first()
+                && (adaptive || self.depth.shown.get(3..5) == key.get(3..5))
+            || !self.playing
+                && (self.depth.held_preview
+                    && self.depth.shown.get(1..3) == key.get(1..3)
+                    && (adaptive || self.depth.shown.get(3..) == key.get(3..))
+                    || adaptive
+                        && self.depth.shown.get(..3) == key.get(..3)
+                        && self.depth.shown.get(5..) == key.get(5..));
         if (!use_camera && !post && !reduced) || (self.depth.shown != key && !hold) {
             return false;
         }
@@ -1640,6 +1769,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         e.doc = doc();
+        e.studio.prefs.viewport_quality = ViewportQuality::Full;
         e.studio.stage_only = true;
         let mut layer = e.doc.layers[0].clone();
         layer.options.adjustment =
@@ -1699,6 +1829,116 @@ mod tests {
     }
 
     #[test]
+    fn playback_keeps_processed_preview_and_presents_late_completed_frames() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = doc();
+        e.studio.stage_only = true;
+        e.studio.prefs.viewport_quality = ViewportQuality::Full;
+        let mut layer = e.doc.layers[0].clone();
+        layer.options.adjustment =
+            Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        e.doc.layers.push(layer);
+        let view = View {
+            center: Pos2::ZERO,
+            stage_center: Pos2::ZERO,
+            scale: 1.,
+            angle: 0.,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let complete = |e: &mut Editor| {
+                let key = e.depth.requested.clone();
+                let size = [key[3], key[4]];
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send((key, vec![80; size[0] * size[1] * 3], size))
+                    .unwrap();
+                e.depth.job = Some(rx);
+            };
+            e.camera_blur_preview(ui.painter(), view);
+            complete(&mut e);
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            let first = e.depth.preview.as_ref().unwrap().id();
+            e.playing = true;
+            e.frame = 1;
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.preview.as_ref().unwrap().id(), first);
+            complete(&mut e);
+            e.frame = 2;
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.shown[1], 1);
+            assert_ne!(e.depth.preview.as_ref().unwrap().id(), first);
+            e.playing = false;
+            e.frame = 3;
+            assert!(
+                !e.camera_blur_preview(ui.painter(), view),
+                "manual seeking must not hold another frame"
+            );
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn adaptive_preview_refines_without_losing_effects_or_prepared_playback() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = doc();
+        e.studio.stage_only = true;
+        e.studio.prefs.viewport_quality = ViewportQuality::Adaptive;
+        let mut layer = e.doc.layers[0].clone();
+        layer.options.adjustment =
+            Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        e.doc.layers.push(layer);
+        let view = View {
+            center: Pos2::ZERO,
+            stage_center: Pos2::ZERO,
+            scale: 1.,
+            angle: 0.,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let complete = |e: &mut Editor| {
+                let key = e.depth.requested.clone();
+                let size = [key[3], key[4]];
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send((key, vec![50; size[0] * size[1] * 3], size))
+                    .unwrap();
+                e.depth.job = Some(rx);
+            };
+            e.camera_blur_preview(ui.painter(), view);
+            let quarter = e.depth.requested[3];
+            complete(&mut e);
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.shown[3], quarter);
+            let half = e.depth.requested[3];
+            assert!(half > quarter);
+            complete(&mut e);
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.shown[3], half);
+            let full = e.depth.requested[3];
+            assert!(full > half);
+            complete(&mut e);
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.shown[3], full);
+            let texture = e.depth.preview.as_ref().unwrap().id();
+            e.playing = true;
+            e.animation.clock = e.frame;
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.preview.as_ref().unwrap().id(), texture);
+            assert!(e.depth.job.is_none());
+            e.frame = 1;
+            e.animation.clock = 1;
+            e.camera_blur_preview(ui.painter(), view);
+            assert_eq!(e.depth.requested[3], quarter);
+            complete(&mut e);
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert!(e.depth.job.is_none());
+            e.playing = false;
+            assert!(e.camera_blur_preview(ui.painter(), view));
+            assert_eq!(e.depth.requested[3], half);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
     fn independent_symbol_uses_its_playback_clock_in_the_preview_key() {
         let mut doc = doc();
         let mut depth = DepthEditor::default();
@@ -1723,6 +1963,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
         e.doc = doc();
+        e.studio.prefs.viewport_quality = ViewportQuality::Full;
         let mut layer = e.doc.layers[0].clone();
         layer.options.adjustment =
             Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());

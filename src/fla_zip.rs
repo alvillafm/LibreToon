@@ -1,6 +1,6 @@
 //! Minimal ZIP container for modern FLA (XFL). No entries are extracted to disk.
 use std::io::{Read, Write};
-const LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const LIMIT: usize = 64 * 1024 * 1024;
 fn u16_at(b: &[u8], p: usize) -> Result<u16, String> {
     Ok(u16::from_le_bytes(
         b.get(p..p + 2).ok_or("ZIP truncado")?.try_into().unwrap(),
@@ -333,13 +333,24 @@ impl<'a> Archive<'a> {
             .get(start..start + compressed)
             .ok_or("Contenido FLA truncado")?;
         let decoded = match method {
-            0 => data.to_vec(),
+            0 if compressed == uncompressed => data.to_vec(),
+            0 => return Err("Invalid stored ZIP entry size".into()),
             8 => {
-                let mut out = vec![];
-                flate2::read::DeflateDecoder::new(data)
-                    .take((limit + 1) as u64)
-                    .read_to_end(&mut out)
-                    .map_err(|e| e.to_string())?;
+                let mut decoder = flate2::read::DeflateDecoder::new(data);
+                let mut out = Vec::new();
+                if uncompressed != 0 {
+                    let initial =
+                        uncompressed.min(compressed.saturating_mul(32).saturating_add(128 * 1024));
+                    out.try_reserve_exact(initial).map_err(|e| e.to_string())?;
+                    decoder
+                        .by_ref()
+                        .take(uncompressed as u64)
+                        .read_to_end(&mut out)
+                        .map_err(|e| e.to_string())?;
+                }
+                if decoder.read(&mut [0]).map_err(|e| e.to_string())? != 0 {
+                    return Err("ZIP entry exceeds its declared size".into());
+                }
                 out
             }
             _ => return Err("Compresión FLA no admitida".into()),
@@ -357,6 +368,28 @@ pub fn entry(bytes: &[u8], wanted: &[u8]) -> Result<Option<Vec<u8>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inflated_entry_cannot_exceed_its_declared_length() {
+        let mut bytes = Vec::new();
+        write_compressed(
+            &mut bytes,
+            &[("sample", &[7; 4096])],
+            |_| flate2::Compression::default(),
+            None,
+        )
+        .unwrap();
+        let central = bytes
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .unwrap();
+        bytes[central + 24..central + 28].copy_from_slice(&16u32.to_le_bytes());
+        let archive = Archive::new(&bytes).unwrap();
+        assert_eq!(
+            archive.entry(b"sample").unwrap_err(),
+            "ZIP entry exceeds its declared size"
+        );
+    }
+
     #[test]
     fn archive_round_trip_and_corruption() {
         let b = pack(&[("DOMDocument.xml", b"<DOMDocument/>".to_vec())]);

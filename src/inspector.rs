@@ -420,8 +420,11 @@ impl Editor {
                 } else {
                     &mut self.width
                 };
-                let response =
-                    ui.add(egui::Slider::new(size, 1.0..=80.).suffix(crate::i18n::tr(" px")));
+                let response = ui
+                    .add(egui::Slider::new(size, 1.0..=80.).suffix(crate::i18n::tr(" px")))
+                    .on_hover_text(crate::i18n::tr(
+                        "Brush width is measured in document pixels.",
+                    ));
                 if response.changed() && self.tool == Tool::Width {
                     let ids = self.canvas.selected.clone();
                     self.checkpoint();
@@ -452,6 +455,9 @@ impl Editor {
             }
             if self.tool == Tool::Pen {
                 design::category(ui, "Pen mode");
+                ui.small(crate::i18n::tr(
+                    "Alt + drag a handle to break its tangent. Enter finishes; Escape cancels.",
+                ));
                 if design::button(
                     ui,
                     Icon::Node,

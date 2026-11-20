@@ -509,10 +509,10 @@ impl Editor {
     pub(crate) fn copy_character_rig(&mut self) -> bool {
         self.finish_pending_pen();
         let rig = &self.doc.extras.rig;
-        if rig.bindings.is_empty() {
+        let targets: HashSet<_> = rig.bindings.iter().map(|binding| binding.target).collect();
+        if targets.is_empty() {
             return false;
         }
-        let targets: HashSet<_> = rig.bindings.iter().map(|binding| binding.target).collect();
         let mut layers: SharedVec<Layer> = self
             .doc
             .layers
@@ -648,18 +648,17 @@ impl Editor {
             return;
         };
         let result = (|| -> Result<Package, String> {
-            let file = std::fs::metadata(&path).map_err(|error| error.to_string())?;
-            if file.len() > crate::native_project::LIMIT as u64 {
-                return Err(tr("Rig preset exceeds the project size limit.").into());
+            if !crate::native_project::is_native_path(&path) {
+                return Err(tr("Choose a LibreToon rig preset.").to_owned());
             }
-            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-            let source = crate::native_project::decode_if_native(&bytes)?
-                .ok_or_else(|| tr("Choose a LibreToon rig preset.").to_owned())?;
+            let source = crate::documents::read_project(&path)?;
             let layer = &source.layers[0];
             if !layer.frames[0].iter().any(|mark| {
                 mark.style.instance.as_ref().is_some_and(|instance| {
                     source.extras.symbols.iter().any(|symbol| {
-                        symbol.id == instance.symbol && !symbol.rig.bindings.is_empty()
+                        symbol.id == instance.symbol
+                            && (!symbol.rig.bindings.is_empty()
+                                || symbol.rig.character_symbol.is_some())
                     })
                 })
             }) {

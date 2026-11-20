@@ -4,6 +4,57 @@ use std::sync::{Arc, OnceLock};
 
 thread_local! {
     static WORKER_GPU: std::cell::RefCell<Option<Arc<GpuLens>>> = const { std::cell::RefCell::new(None) };
+    static LIGHT_BATCH: std::cell::RefCell<Option<(Vec<crate::gpu_light::OwnedLightDispatch>, usize, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+// Preserve the CPU image until the complete chain succeeds, so any unsupported
+// light, allocation failure or device loss can replay the original CPU path.
+pub(crate) fn light_batch(pixels: &mut [u8], mut draw: impl FnMut(&mut [u8])) {
+    let gpu = WORKER_GPU.with(|slot| slot.borrow().clone());
+    let Some(gpu) = gpu else {
+        draw(pixels);
+        return;
+    };
+    if LIGHT_BATCH.with(|slot| slot.borrow().is_some()) {
+        draw(pixels);
+        return;
+    }
+    LIGHT_BATCH.with(|slot| *slot.borrow_mut() = Some((Vec::new(), 0, true)));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            LIGHT_BATCH.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    draw(pixels);
+    let (lights, _, valid) = LIGHT_BATCH.with(|slot| slot.borrow_mut().take().unwrap());
+    let inputs: Vec<_> = lights.iter().map(|light| light.borrowed()).collect();
+    let completed = valid
+        && gpu
+            .lights
+            .get_or_init(|| crate::gpu_light::GpuLight::new(gpu.device.clone(), gpu.queue.clone()))
+            .as_ref()
+            .is_some_and(|lights| lights.shade_many(pixels, &inputs));
+    if completed {
+        gpu.light_passes
+            .fetch_add(inputs.len(), std::sync::atomic::Ordering::Relaxed);
+    } else {
+        // A thread-local guard restores the device even if the CPU path panics.
+        struct Restore(Option<Arc<GpuLens>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                use_on_worker(self.0.take());
+            }
+        }
+        let _restore = Restore(Some(gpu));
+        use_on_worker(None);
+        draw(pixels);
+    }
+}
+
+pub(crate) fn collecting_lights() -> bool {
+    LIGHT_BATCH.with(|slot| slot.borrow().is_some())
 }
 
 pub(crate) fn use_on_worker(gpu: Option<Arc<GpuLens>>) {
@@ -20,13 +71,353 @@ pub(crate) fn blur_on_worker(
     WORKER_GPU.with(|slot| slot.borrow().as_ref()?.blur(image, offsets))
 }
 
+pub(crate) fn post_on_worker(pixels: &mut [u8], configs: &[Vec<u32>]) -> bool {
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let Some(gpu) = slot.as_ref() else {
+            return false;
+        };
+        gpu.post
+            .get_or_init(|| crate::gpu_post::GpuPost::new(gpu.device.clone(), gpu.queue.clone()))
+            .as_ref()
+            .is_some_and(|post| post.apply(pixels, configs))
+    })
+}
+
+pub(crate) fn available_on_worker() -> bool {
+    WORKER_GPU.with(|slot| slot.borrow().is_some())
+}
+pub(crate) fn on_worker() -> Option<Arc<GpuLens>> {
+    WORKER_GPU.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn surface_on_worker(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    bevel: f32,
+    texture: f32,
+    height_map: Option<&[u8]>,
+    step: usize,
+) -> Option<crate::light::Surface> {
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let gpu = slot.as_ref()?;
+        gpu.surfaces
+            .get_or_init(|| {
+                crate::gpu_surface::GpuSurface::new(gpu.device.clone(), gpu.queue.clone())
+            })
+            .as_ref()?
+            .surface(pixels, width, height, bevel, texture, height_map, step)
+    })
+}
+
+pub(crate) fn gaussian_on_worker(
+    source: &image::RgbaImage,
+    sigma: f32,
+) -> Option<image::RgbaImage> {
+    if source.len() < 256 * 256 * 4 {
+        return None;
+    }
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let gpu = slot.as_ref()?;
+        gpu.gaussian
+            .get_or_init(|| {
+                crate::gpu_gaussian::GpuGaussian::new(gpu.device.clone(), gpu.queue.clone())
+            })
+            .as_ref()?
+            .blur(source, sigma)
+    })
+}
+
+pub(crate) fn project_on_worker(
+    source: &Arc<Vec<u8>>,
+    source_size: [u32; 2],
+    output: [u32; 2],
+    start: eframe::egui::Pos2,
+    dx: eframe::egui::Vec2,
+    dy: eframe::egui::Vec2,
+) -> Option<Vec<u8>> {
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let gpu = slot.as_ref()?;
+        gpu.planes
+            .get_or_init(|| crate::gpu_plane::GpuPlane::new(gpu.device.clone(), gpu.queue.clone()))
+            .as_ref()?
+            .project(source, source_size, output, start, dx, dy)
+    })
+}
+
+pub(crate) fn raster_on_worker<'a>(
+    w: u32,
+    h: u32,
+    transparent: bool,
+    meshes: &[eframe::egui::ClippedPrimitive],
+    textures: impl Fn(eframe::egui::TextureId) -> Option<([usize; 2], &'a [u8])>,
+) -> Option<Vec<u8>> {
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let gpu = slot.as_ref()?;
+        gpu.raster
+            .get_or_init(|| {
+                crate::gpu_raster::GpuRaster::new(gpu.device.clone(), gpu.queue.clone())
+            })
+            .as_ref()?
+            .render(w, h, transparent, meshes, textures)
+    })
+}
+
+pub(crate) fn light_on_worker(
+    pixels: &mut [u8],
+    dispatch: &crate::gpu_light::LightDispatch<'_>,
+) -> bool {
+    let collected = LIGHT_BATCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some((lights, bytes, valid)) = slot.as_mut() else {
+            return false;
+        };
+        let additional =
+            dispatch.mask.map_or(0, |mask| mask.len()) + dispatch.gobo.map_or(0, |gobo| gobo.len());
+        if lights.len() >= 64 || bytes.saturating_add(additional) > 64 * 1024 * 1024 {
+            *valid = false;
+        } else if *valid {
+            *bytes += additional;
+            lights.push(crate::gpu_light::OwnedLightDispatch {
+                config: dispatch.config,
+                surface: dispatch.surface.clone(),
+                mask: dispatch.mask.map(<[u8]>::to_vec),
+                gobo: dispatch.gobo.map(<[u8]>::to_vec),
+            });
+        }
+        true
+    });
+    if collected {
+        return true;
+    }
+    WORKER_GPU.with(|slot| {
+        let slot = slot.borrow();
+        let Some(gpu) = slot.as_ref() else {
+            return false;
+        };
+        let Some(lights) = gpu
+            .lights
+            .get_or_init(|| crate::gpu_light::GpuLight::new(gpu.device.clone(), gpu.queue.clone()))
+        else {
+            return false;
+        };
+        let completed = lights.shade(pixels, dispatch);
+        if completed && dispatch.config[6] <= 6 {
+            gpu.light_passes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        completed
+    })
+}
+
 pub(crate) struct GpuLens {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) frame_lock: std::sync::Mutex<()>,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     pipeline: OnceLock<Option<wgpu::ComputePipeline>>,
+    pub(crate) lights: OnceLock<Option<crate::gpu_light::GpuLight>>,
+    pub(crate) post: OnceLock<Option<crate::gpu_post::GpuPost>>,
+    pub(crate) raster: OnceLock<Option<crate::gpu_raster::GpuRaster>>,
+    pub(crate) planes: OnceLock<Option<crate::gpu_plane::GpuPlane>>,
+    pub(crate) gaussian: OnceLock<Option<crate::gpu_gaussian::GpuGaussian>>,
+    pub(crate) surfaces: OnceLock<Option<crate::gpu_surface::GpuSurface>>,
+    resize: OnceLock<Option<crate::gpu_resize::GpuResize>>,
+    pub(crate) light_passes: std::sync::atomic::AtomicUsize,
+    pub(crate) composed_frames: std::sync::atomic::AtomicUsize,
 }
 
 impl GpuLens {
+    pub(crate) fn native_outline(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        distance: f32,
+        feather: f32,
+        opacity: f32,
+        color: [u8; 3],
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        let rgba = self
+            .surfaces
+            .get_or_init(|| {
+                crate::gpu_surface::GpuSurface::new(self.device.clone(), self.queue.clone())
+            })
+            .as_ref()?
+            .outline_native(source, distance, feather, opacity, color)?;
+        let mut config = vec![0u32; 16];
+        config[..3].copy_from_slice(&[source.width, source.height, 16]);
+        self.native_post(&rgba, &config, None)
+    }
+    pub(crate) fn native_resize(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        size: [u32; 2],
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        if [source.width, source.height] == size {
+            return Some(source.clone());
+        }
+        self.resize
+            .get_or_init(|| {
+                crate::gpu_resize::GpuResize::new(self.device.clone(), self.queue.clone())
+            })
+            .as_ref()?
+            .native(source, size)
+    }
+    pub(crate) fn native_blur(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        radius: f32,
+        optics: &crate::depth::Optics,
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        if radius < 0.1 {
+            return Some(source.clone());
+        }
+        let factor = match optics.quality {
+            crate::depth::Quality::Low => 0.25,
+            crate::depth::Quality::Medium => 0.5,
+            crate::depth::Quality::High => 1.,
+        };
+        let size = [
+            ((source.width as f32 * factor).round() as u32).max(1),
+            ((source.height as f32 * factor).round() as u32).max(1),
+        ];
+        let small = self.native_resize(source, size)?;
+        let blurred = if optics.method == crate::depth::BlurMethod::Gaussian {
+            self.native_gaussian(&small, (radius * factor * 0.5).max(0.1))?
+        } else {
+            let samples = match optics.quality {
+                crate::depth::Quality::Low => 8,
+                crate::depth::Quality::Medium => 20,
+                crate::depth::Quality::High => 48,
+            };
+            let offsets: Vec<_> = (0..samples)
+                .map(|i| {
+                    let a = i as f32 * 2.399963;
+                    let r = ((i as f32 + 0.5) / samples as f32).sqrt() * radius * factor;
+                    ((a.cos() * r).round() as i32, (a.sin() * r).round() as i32)
+                })
+                .collect();
+            self.native_lens(&small, &offsets)?
+        };
+        self.native_resize(&blurred, [source.width, source.height])
+    }
+    pub(crate) fn native_post(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        config: &[u32],
+        aux: Option<&crate::gpu_image::Image>,
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        self.post
+            .get_or_init(|| crate::gpu_post::GpuPost::new(self.device.clone(), self.queue.clone()))
+            .as_ref()?
+            .native(source, config, aux)
+    }
+    pub(crate) fn native_filter(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        kind: u32,
+        mask: Option<&crate::gpu_image::Image>,
+        values: &[f32],
+        color: [u8; 3],
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        let mut config = [0u32; 48];
+        config[..7].copy_from_slice(&[
+            source.width,
+            source.height,
+            0,
+            0,
+            source.width,
+            source.height,
+            kind,
+        ]);
+        for (i, v) in values.iter().enumerate() {
+            config[16 + i] = v.to_bits();
+        }
+        for (i, v) in color.into_iter().enumerate() {
+            config[28 + i] = (f32::from(v) / 255.).to_bits();
+        }
+        self.lights
+            .get_or_init(|| {
+                crate::gpu_light::GpuLight::new(self.device.clone(), self.queue.clone())
+            })
+            .as_ref()?
+            .native(
+                source,
+                &crate::gpu_light::LightDispatch {
+                    config,
+                    surface: None,
+                    mask: None,
+                    gobo: None,
+                },
+                None,
+                mask,
+            )
+    }
+    pub(crate) fn native_gaussian(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        sigma: f32,
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        if sigma < 0.05 {
+            return Some(source.clone());
+        }
+        self.gaussian
+            .get_or_init(|| {
+                crate::gpu_gaussian::GpuGaussian::new(self.device.clone(), self.queue.clone())
+            })
+            .as_ref()?
+            .native(source, sigma)
+    }
+    pub(crate) fn native_lens(
+        &self,
+        source: &Arc<crate::gpu_image::Image>,
+        offsets: &[(i32, i32)],
+    ) -> Option<Arc<crate::gpu_image::Image>> {
+        let pipeline = self
+            .pipeline
+            .get_or_init(|| self.create_pipeline())
+            .as_ref()?;
+        let mut data = vec![
+            source.width as i32,
+            source.height as i32,
+            offsets.len() as i32,
+        ];
+        data.extend(offsets.iter().flat_map(|&(x, y)| [x, y]));
+        let data: Vec<_> = data.into_iter().flat_map(i32::to_le_bytes).collect();
+        let params = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Resident lens samples"),
+                contents: &data,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let output = crate::gpu_image::Image::new(&self.device, source.width, source.height, 4);
+        let entries: Vec<_> = [&source.buffer, &params, &output.buffer]
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+        let bindings = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Resident lens blur"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bindings, &[]);
+            pass.dispatch_workgroups(source.width.div_ceil(16), source.height.div_ceil(16), 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        Some(output)
+    }
     pub(crate) fn from_renderer(render: &eframe::egui_wgpu::RenderState) -> Option<Self> {
         let caps = render.adapter.get_downlevel_capabilities();
         let limits = render.device.limits();
@@ -39,12 +430,26 @@ impl GpuLens {
             .then(|| Self::new(render.device.clone(), render.queue.clone()))
     }
 
-    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub(crate) fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         Self {
+            frame_lock: std::sync::Mutex::new(()),
             device,
             queue,
             pipeline: OnceLock::new(),
+            lights: OnceLock::new(),
+            post: OnceLock::new(),
+            raster: OnceLock::new(),
+            planes: OnceLock::new(),
+            gaussian: OnceLock::new(),
+            surfaces: OnceLock::new(),
+            resize: OnceLock::new(),
+            light_passes: std::sync::atomic::AtomicUsize::new(0),
+            composed_frames: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn light_pass_count(&self) -> usize {
+        self.light_passes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_pipeline(&self) -> Option<wgpu::ComputePipeline> {
@@ -197,7 +602,7 @@ impl GpuLens {
     }
 }
 
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     struct Wake(std::thread::Thread);
     impl std::task::Wake for Wake {
         fn wake(self: std::sync::Arc<Self>) {

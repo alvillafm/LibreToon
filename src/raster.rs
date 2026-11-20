@@ -80,10 +80,12 @@ impl Preset {
             pressure_opacity: false,
             smudge: 0.7,
             eraser_size: 25.,
+            texture: Texture::Preset,
+            texture_strength: 1.,
         }
     }
 
-    fn tip(self, x: f32, y: f32, hardness: f32, radius: f32, px: i32, py: i32) -> f32 {
+    fn falloff(self, x: f32, y: f32, hardness: f32, radius: f32) -> f32 {
         let (x, y) = match self {
             Self::Graphite => (x * 0.88, y * 1.35),
             Self::Dry => ((x + y * 0.28) * 0.96, y * 1.23),
@@ -92,13 +94,19 @@ impl Preset {
         let distance = x.hypot(y);
         let edge = (1. - hardness).max(0.7 / radius);
         let t = ((1. - distance) / edge).clamp(0., 1.);
-        let falloff = t * t * (3. - 2. * t);
+        t * t * (3. - 2. * t)
+    }
+
+    fn grain(self, px: i32, py: i32) -> f32 {
+        if !matches!(self, Self::Graphite | Self::Dry | Self::Chalk) {
+            return 1.;
+        }
         let mut hash =
             (px as u32).wrapping_mul(0x9e37_79b9) ^ (py as u32).wrapping_mul(0x85eb_ca6b);
         hash ^= hash >> 16;
         hash = hash.wrapping_mul(0x7feb_352d);
         let grain = (hash & 255) as f32 / 255.;
-        let texture = match self {
+        match self {
             Self::Graphite => 0.22 + 0.78 * grain.powi(2),
             Self::Dry => {
                 (0.26 + 0.74 * grain)
@@ -112,12 +120,51 @@ impl Preset {
                 }
             }
             _ => 1.,
-        };
-        falloff * texture
+        }
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum Texture {
+    #[default]
+    Preset,
+    Solid,
+    Graphite,
+    Bristle,
+    Chalk,
+}
+
+impl Texture {
+    const ALL: [Self; 5] = [
+        Self::Preset,
+        Self::Solid,
+        Self::Graphite,
+        Self::Bristle,
+        Self::Chalk,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Preset => "Use preset",
+            Self::Solid => "Solid",
+            Self::Graphite => "Graphite pencil",
+            Self::Bristle => "Dry bristle",
+            Self::Chalk => "Grainy chalk",
+        }
+    }
+
+    fn source(self, preset: Preset) -> Preset {
+        match self {
+            Self::Preset => preset,
+            Self::Solid => Preset::Ink,
+            Self::Graphite => Preset::Graphite,
+            Self::Bristle => Preset::Dry,
+            Self::Chalk => Preset::Chalk,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Brush {
     pub preset: Preset,
@@ -130,7 +177,52 @@ pub struct Brush {
     pressure_opacity: bool,
     smudge: f32,
     eraser_size: f32,
+    texture: Texture,
+    texture_strength: f32,
 }
+const MAX_PRESETS: usize = 64;
+const PRESET_FILE_LIMIT: usize = 64 * 1024;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct NamedBrush {
+    name: String,
+    brush: Brush,
+}
+
+fn read_brush_presets(path: &std::path::Path) -> Result<Vec<NamedBrush>, String> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(PRESET_FILE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > PRESET_FILE_LIMIT {
+        return Err("Brush preset file exceeds 64 KiB".into());
+    }
+    let presets: Vec<NamedBrush> =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if presets.len() > MAX_PRESETS
+        || presets.iter().any(|preset| {
+            let b = preset.brush;
+            preset.name.trim().is_empty()
+                || preset.name.chars().count() > 48
+                || !(1. ..=256.).contains(&b.size)
+                || !(1. ..=256.).contains(&b.eraser_size)
+                || !(0. ..=1.).contains(&b.hardness)
+                || !(0. ..=1.).contains(&b.opacity)
+                || !(0.01..=1.).contains(&b.flow)
+                || !(0.03..=0.75).contains(&b.spacing)
+                || !(0. ..=1.).contains(&b.smudge)
+                || !(0. ..=1.).contains(&b.texture_strength)
+        })
+    {
+        return Err("Invalid brush preset settings".into());
+    }
+    Ok(presets)
+}
+
 impl Default for Brush {
     fn default() -> Self {
         Preset::Ink.brush()
@@ -146,6 +238,81 @@ impl Brush {
         }
     }
 }
+fn brush_preview(ui: &mut egui::Ui, brush: Brush, color: [u8; 4]) {
+    let id = egui::Id::unique("current-raster-brush-preview");
+    let cached = ui
+        .ctx()
+        .data(|data| data.get_temp::<(Brush, [u8; 4], egui::TextureHandle)>(id))
+        .filter(|(previous, previous_color, _)| *previous == brush && *previous_color == color);
+    let texture = cached.map_or_else(
+        || {
+            let (w, h) = (224usize, 48usize);
+            let mut rgba = vec![0u8; w * h * 4];
+            let mut coverage = vec![0f32; w * h];
+            let size = brush.diameter(false).min(34.);
+            let step = (size * brush.spacing.clamp(0.03, 0.75)).max(0.5);
+            let grain = brush.texture.source(brush.preset);
+            let mut x = 7.;
+            while x <= (w - 7) as f32 {
+                let t = (x - 7.) / (w - 14) as f32;
+                let pressure = (std::f32::consts::PI * t).sin().max(0.08);
+                let radius = size * 0.5 * if brush.pressure_size { pressure } else { 1. };
+                let y = h as f32 * 0.5 + (t * std::f32::consts::TAU).sin() * 6.;
+                let reach = radius * 1.2 + 1.;
+                for py in
+                    ((y - reach).floor().max(0.) as usize)..((y + reach).ceil() as usize).min(h)
+                {
+                    for px in
+                        ((x - reach).floor().max(0.) as usize)..((x + reach).ceil() as usize).min(w)
+                    {
+                        let falloff = brush.preset.falloff(
+                            (px as f32 + 0.5 - x) / radius,
+                            (py as f32 + 0.5 - y) / radius,
+                            unit(brush.hardness),
+                            radius,
+                        );
+                        let tip = falloff
+                            * egui::lerp(
+                                1. ..=grain.grain(px as i32, py as i32),
+                                unit(brush.texture_strength),
+                            );
+                        let index = py * w + px;
+                        coverage[index] += (1. - coverage[index]) * unit(brush.flow) * tip;
+                        let opacity = unit(brush.opacity)
+                            * if brush.pressure_opacity { pressure } else { 1. };
+                        rgba[index * 4..index * 4 + 4].copy_from_slice(&blend(
+                            [0; 4],
+                            color,
+                            coverage[index] * opacity,
+                            false,
+                        ));
+                    }
+                }
+                x += step;
+            }
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let texture =
+                ui.ctx()
+                    .load_texture("current-brush-preview", image, egui::TextureOptions::LINEAR);
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(id, (brush, color, texture.clone())));
+            texture
+        },
+        |(_, _, texture)| texture,
+    );
+    let size = Vec2::new(ui.available_width().clamp(80., 280.), 48.);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 4., crate::themes::palette().canvas);
+    ui.painter().image(
+        texture.id(),
+        rect.shrink(3.),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+        Color32::WHITE,
+    );
+    response.on_hover_text(tr("Brush preview · pressure increases towards the centre"));
+}
+
 fn unit(v: f32) -> f32 {
     if v.is_finite() { v.clamp(0., 1.) } else { 1. }
 }
@@ -384,6 +551,15 @@ impl Stroke {
         } else {
             self.brush.preset
         };
+        let texture = if self.eraser {
+            Preset::Ink
+        } else {
+            self.brush.texture.source(brush)
+        };
+        let strength = unit(self.brush.texture_strength);
+        let textured =
+            strength > 0. && matches!(texture, Preset::Graphite | Preset::Dry | Preset::Chalk);
+        let hardness = unit(self.brush.hardness);
         let flow = unit(self.brush.flow);
         for ty in top..=bottom {
             for tx in left..=right {
@@ -427,17 +603,20 @@ impl Stroke {
                 let y1 = (oy + SIDE).min(bounds.bottom().ceil() as i32);
                 for py in y0..y1 {
                     for px in x0..x1 {
-                        let tip = brush.tip(
+                        let falloff = brush.falloff(
                             (px as f32 + 0.5 - point.x) / radius,
                             (py as f32 + 0.5 - point.y) / radius,
-                            unit(self.brush.hardness),
+                            hardness,
                             radius,
-                            px,
-                            py,
                         );
-                        if tip <= 0. {
+                        if falloff <= 0. {
                             continue;
                         }
+                        let tip = if textured {
+                            falloff * egui::lerp(1. ..=texture.grain(px, py), strength)
+                        } else {
+                            falloff
+                        };
                         let index = ((py - oy) * SIDE + px - ox) as usize;
                         let i = index * 4;
                         let value = if smudge {
@@ -636,6 +815,38 @@ impl Editor {
                 .changed()
             });
         }
+        if !eraser {
+            changed |= setting_row(ui, Icon::Grid, |ui| {
+                ui.label(tr("Brush texture"));
+                let mut selected = false;
+                egui::ComboBox::from_id_salt("raster-texture")
+                    .selected_text(tr(settings.texture.label()))
+                    .show_ui(ui, |ui| {
+                        for texture in Texture::ALL {
+                            selected |= ui
+                                .selectable_value(
+                                    &mut settings.texture,
+                                    texture,
+                                    tr(texture.label()),
+                                )
+                                .changed();
+                        }
+                    });
+                selected
+            });
+            if matches!(
+                settings.texture.source(settings.preset),
+                Preset::Graphite | Preset::Dry | Preset::Chalk
+            ) {
+                changed |= setting_row(ui, Icon::Grid, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut settings.texture_strength, 0. ..=1.)
+                            .text(tr("Texture strength")),
+                    )
+                    .changed()
+                });
+            }
+        }
         if !eraser && settings.preset == Preset::Smudge {
             changed |= setting_row(ui, Icon::Blur, |ui| {
                 ui.add(
@@ -655,6 +866,14 @@ impl Editor {
             )
             .changed()
         });
+        if !eraser {
+            brush_preview(
+                ui,
+                self.studio.prefs.raster_brush,
+                self.fill_color.to_srgba_unmultiplied(),
+            );
+            self.custom_raster_presets(ui);
+        }
         let key = egui::Id::unique("raster-brush-preferences-dirty");
         if changed {
             ui.ctx().data_mut(|data| data.insert_temp(key, true));
@@ -669,6 +888,139 @@ impl Editor {
         }
     }
 
+    fn custom_raster_presets(&mut self, ui: &mut egui::Ui) {
+        use crate::design::{Icon, button};
+
+        let mut changed = false;
+        let mut load = None;
+        let mut remove = None;
+        let mut import = false;
+        let mut export = false;
+        egui::CollapsingHeader::new(tr("Raster brush presets")).show(ui, |ui| {
+            let presets = &mut self.studio.prefs.raster_presets;
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.studio.brush_preset_name)
+                        .char_limit(48)
+                        .desired_width(120.)
+                        .hint_text(tr("Preset name")),
+                );
+                let name = self.studio.brush_preset_name.trim();
+                let existing = presets.iter().position(|preset| preset.name == name);
+                if button(
+                    ui,
+                    Icon::Save,
+                    "",
+                    "Guardar",
+                    false,
+                    !name.is_empty() && (existing.is_some() || presets.len() < MAX_PRESETS),
+                )
+                .clicked()
+                {
+                    let preset = NamedBrush {
+                        name: name.to_owned(),
+                        brush: self.studio.prefs.raster_brush,
+                    };
+                    if let Some(index) = existing {
+                        presets[index] = preset;
+                    } else {
+                        presets.push(preset);
+                    }
+                    changed = true;
+                }
+            });
+            egui::ScrollArea::vertical()
+                .max_height(160.)
+                .show(ui, |ui| {
+                    for (index, preset) in presets.iter().enumerate() {
+                        ui.push_id(index, |ui| {
+                            ui.horizontal(|ui| {
+                                if button(
+                                    ui,
+                                    preset.brush.preset.icon(),
+                                    &preset.name,
+                                    "",
+                                    false,
+                                    true,
+                                )
+                                .clicked()
+                                {
+                                    load = Some(index);
+                                }
+                                if button(ui, Icon::Close, "", "Eliminar", false, true).clicked() {
+                                    remove = Some(index);
+                                }
+                            })
+                        });
+                    }
+                });
+            ui.horizontal(|ui| {
+                import = button(
+                    ui,
+                    Icon::Open,
+                    "Abrir",
+                    "",
+                    false,
+                    presets.len() < MAX_PRESETS,
+                )
+                .clicked();
+                export =
+                    button(ui, Icon::Save, "Exportar", "", false, !presets.is_empty()).clicked();
+            });
+        });
+        if let Some(index) = load {
+            let preset = &self.studio.prefs.raster_presets[index];
+            self.studio.brush_preset_name.clone_from(&preset.name);
+            let eraser_size = self.studio.prefs.raster_brush.eraser_size;
+            self.studio.prefs.raster_brush = Brush {
+                eraser_size,
+                ..preset.brush
+            };
+            changed = true;
+        }
+        if let Some(index) = remove {
+            self.studio.prefs.raster_presets.remove(index);
+            changed = true;
+        }
+        if import
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("LibreToon", &["ltbrush"])
+                .pick_file()
+        {
+            match read_brush_presets(&path) {
+                Ok(imported) => {
+                    let presets = &mut self.studio.prefs.raster_presets;
+                    for preset in imported {
+                        if presets.len() >= MAX_PRESETS {
+                            break;
+                        }
+                        if !presets.iter().any(|old| old.name == preset.name) {
+                            presets.push(preset);
+                            changed = true;
+                        }
+                    }
+                }
+                Err(error) => self.status = error,
+            }
+        }
+        if export
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("LibreToon", &["ltbrush"])
+                .set_file_name("brushes.ltbrush")
+                .save_file()
+        {
+            let result = serde_json::to_vec_pretty(&self.studio.prefs.raster_presets)
+                .map_err(|error| error.to_string())
+                .and_then(|data| std::fs::write(path, data).map_err(|error| error.to_string()));
+            if let Err(error) = result {
+                self.status = error;
+            }
+        }
+        if changed && let Err(error) = self.studio.save() {
+            self.status = error;
+        }
+    }
+
     pub(crate) fn raster_presets(&mut self, ui: &mut egui::Ui) {
         for preset in Preset::ALL {
             let current = self.studio.prefs.raster_brush.preset == preset;
@@ -676,23 +1028,42 @@ impl Editor {
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(40., 22.), egui::Sense::hover());
                 let brush = preset.brush();
                 let color = crate::themes::palette().text;
-                for y in 0..18 {
-                    for x in 0..38 {
-                        let center = 10. + (x as f32 * 0.11).sin() * 2.;
-                        let dy = (y as f32 - center) / (3. + x as f32 / 8.);
-                        let alpha = preset.tip(0., dy, brush.hardness, 9., x, y) * brush.opacity;
-                        if alpha > 0. {
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    rect.min + Vec2::new(x as f32, y as f32),
-                                    Vec2::splat(1.),
-                                ),
-                                0.,
-                                color.gamma_multiply(alpha),
-                            );
-                        }
-                    }
-                }
+                let id = egui::Id::unique(("raster-brush-preset-preview", preset as u8));
+                let cached = ui.ctx().data(|data| {
+                    data.get_temp::<(Color32, egui::TextureHandle)>(id)
+                        .filter(|(previous, _)| *previous == color)
+                });
+                let texture = cached.map_or_else(
+                    || {
+                        let pixels = (0..18)
+                            .flat_map(|y| {
+                                (0..38).map(move |x| {
+                                    let center = 10. + (x as f32 * 0.11).sin() * 2.;
+                                    let dy = (y as f32 - center) / (3. + x as f32 / 8.);
+                                    let alpha = preset.falloff(0., dy, brush.hardness, 9.)
+                                        * preset.grain(x, y)
+                                        * brush.opacity;
+                                    color.gamma_multiply(alpha)
+                                })
+                            })
+                            .collect();
+                        let texture = ui.ctx().load_texture(
+                            "raster-brush-preset-preview",
+                            egui::ColorImage::new([38, 18], pixels),
+                            egui::TextureOptions::NEAREST,
+                        );
+                        ui.ctx()
+                            .data_mut(|data| data.insert_temp(id, (color, texture.clone())));
+                        texture
+                    },
+                    |(_, texture)| texture,
+                );
+                ui.painter().image(
+                    texture.id(),
+                    Rect::from_min_size(rect.min, Vec2::new(38., 18.)),
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                    Color32::WHITE,
+                );
                 if crate::design::button(ui, preset.icon(), preset.name(), "", current, true)
                     .clicked()
                 {
@@ -1203,8 +1574,8 @@ mod tests {
 
     #[test]
     fn softness_changes_dab_coverage_and_eraser_preserves_rgb() {
-        let hard = Preset::Ink.tip(0.75, 0., 0.95, 12., 7, 0);
-        let soft = Preset::Soft.tip(0.75, 0., 0.1, 12., 7, 0);
+        let hard = Preset::Ink.falloff(0.75, 0., 0.95, 12.);
+        let soft = Preset::Soft.falloff(0.75, 0., 0.1, 12.);
         assert!(hard > soft * 3.);
         let color = blend([0; 4], [160, 80, 20, 255], 0.5, false);
         assert_eq!(color, [160, 80, 20, 128]);

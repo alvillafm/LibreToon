@@ -244,10 +244,30 @@ pub struct Shadow {
     offset: [f32; 2],
     softness: f32,
     strength: f32,
+    #[serde(default)]
+    follow_light: bool,
+    #[serde(default = "shadow_height")]
+    height: f32,
+}
+
+fn shadow_height() -> f32 {
+    64.
 }
 
 impl Shadow {
     pub fn apply(&self, floor: &mut [u8], mask: Vec<u8>, w: u32, h: u32, scale: f32, opacity: f32) {
+        self.apply_transformed(floor, mask, w, h, scale, opacity, ([0., 0.], 1.));
+    }
+    fn apply_transformed(
+        &self,
+        floor: &mut [u8],
+        mask: Vec<u8>,
+        w: u32,
+        h: u32,
+        scale: f32,
+        opacity: f32,
+        projection: ([f32; 2], f32),
+    ) {
         let mask = if self.softness > 0. {
             crate::depth::blur(
                 mask,
@@ -261,16 +281,54 @@ impl Shadow {
         };
         let dx = (self.offset[0] * scale).round() as isize;
         let dy = (self.offset[1] * scale).round() as isize;
+        let mut config = [0u32; 48];
+        config[..7].copy_from_slice(&[w, h, 0, 0, w, h, 6]);
+        for (i, value) in [
+            dx as f32,
+            dy as f32,
+            projection.1,
+            projection.0[0],
+            projection.0[1],
+            self.strength * opacity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            config[16 + i] = value.to_bits();
+        }
+        if crate::gpu_lens::light_on_worker(
+            floor,
+            &crate::gpu_light::LightDispatch {
+                config,
+                surface: None,
+                mask: Some(&mask),
+                gobo: None,
+            },
+        ) {
+            return;
+        }
         let w = w as usize;
         let h = h as usize;
         for (i, pixel) in floor.chunks_exact_mut(4).enumerate() {
             if pixel[3] == 0 {
                 continue;
             }
-            let Some(x) = (i % w).checked_add_signed(-dx).filter(|x| *x < w) else {
+            let sx =
+                ((i % w) as f32 - dx as f32 - projection.0[0]) / projection.1 + projection.0[0];
+            let sy =
+                ((i / w) as f32 - dy as f32 - projection.0[1]) / projection.1 + projection.0[1];
+            let Some(x) = (sx.round() as isize)
+                .try_into()
+                .ok()
+                .filter(|x: &usize| *x < w)
+            else {
                 continue;
             };
-            let Some(y) = (i / w).checked_add_signed(-dy).filter(|y| *y < h) else {
+            let Some(y) = (sy.round() as isize)
+                .try_into()
+                .ok()
+                .filter(|y: &usize| *y < h)
+            else {
                 continue;
             };
             let darkness = f32::from(mask[(y * w + x) * 4 + 3]) / 255. * self.strength * opacity;
@@ -314,6 +372,23 @@ struct PresetLight {
     visible: bool,
 }
 
+impl Preset {
+    pub(crate) fn valid(&self) -> bool {
+        !self.name.trim().is_empty()
+            && self.name.chars().count() <= 48
+            && self
+                .size
+                .iter()
+                .all(|dimension| (1..=16384).contains(dimension))
+            && (1..=100).contains(&self.lights.len())
+            && self.lights.iter().all(|item| {
+                item.name.chars().count() <= 256
+                    && (0. ..=1.).contains(&item.opacity)
+                    && item.light.valid()
+            })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PresetTarget {
     All,
@@ -340,12 +415,236 @@ pub struct Light {
     base: Settings,
     #[serde(default)]
     keys: SharedVec<(usize, Settings)>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    key_easing: std::sync::Arc<std::collections::BTreeMap<usize, crate::animation::Curve>>,
 }
 
 #[derive(PartialEq)]
 pub(crate) struct ShadingKey(Kind, Settings, MaskMode, f32, Option<SharedVec<u8>>);
 
+pub(crate) struct NativeSettings {
+    pub config: [u32; 48],
+    pub bevel: f32,
+    pub texture: f32,
+    pub relief: bool,
+    pub feather: f32,
+    pub gobo: Option<SharedVec<u8>>,
+}
+pub(crate) struct NativeShadow {
+    pub floor: u64,
+    pub caster: Option<u64>,
+    pub softness: f32,
+    pub values: [f32; 6],
+}
+
 impl Light {
+    pub(crate) fn native_shadow(
+        &self,
+        w: u32,
+        h: u32,
+        padding: u32,
+        doc: &crate::Document,
+        frame: usize,
+        camera: bool,
+        opacity: f32,
+    ) -> Option<NativeShadow> {
+        let shadow = self.shadow.as_ref()?;
+        let scale = ((w - padding * 2) as f32 / doc.width as f32)
+            .min((h - padding * 2) as f32 / doc.height as f32);
+        let mut offset = shadow.offset;
+        let mut center = Pos2::ZERO;
+        let mut expansion = 1.;
+        if shadow.follow_light {
+            let settings = self.at(frame);
+            let doc_center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
+            let mut point = crate::vector::pos(settings.position);
+            let mut zoom = 1.;
+            let mut angle = settings.angle.to_radians();
+            if camera && let Some(track) = crate::depth::camera(doc, frame) {
+                let pose = crate::animation::camera_at(track, frame);
+                zoom = pose.zoom;
+                point = doc_center
+                    + egui::emath::Rot2::from_angle(-pose.angle)
+                        * (point - crate::vector::pos(pose.center))
+                        * zoom;
+                angle -= pose.angle;
+            }
+            center = Pos2::new(w as f32 * 0.5, h as f32 * 0.5) + (point - doc_center) * scale;
+            if matches!(self.kind, Kind::Point | Kind::Spot) {
+                let height = (settings.radius * settings.elevation.to_radians().sin())
+                    .max(shadow.height + 1.);
+                expansion = (height / (height - shadow.height)).clamp(1., 8.);
+            } else {
+                let delta = -Vec2::angled(angle)
+                    * (shadow.height / settings.elevation.to_radians().tan().max(0.05))
+                    * zoom;
+                offset[0] += delta.x;
+                offset[1] += delta.y;
+            }
+        }
+        Some(NativeShadow {
+            floor: shadow.floor,
+            caster: shadow.caster,
+            softness: (shadow.softness * scale).min(128.),
+            values: [
+                (offset[0] * scale).round(),
+                (offset[1] * scale).round(),
+                expansion,
+                center.x,
+                center.y,
+                shadow.strength * opacity,
+            ],
+        })
+    }
+    pub(crate) fn native_settings(
+        &self,
+        frame: usize,
+        size: [u32; 2],
+        view: crate::canvas::View,
+        step: usize,
+        opacity: f32,
+        masked: bool,
+    ) -> NativeSettings {
+        let s = self.at(frame);
+        let p = view.screen(crate::vector::pos(s.position));
+        let radius = (s.radius * view.scale).max(1.);
+        let angle = s.angle.to_radians();
+        let aim = Vec2::angled(angle);
+        let elevation = s.elevation.to_radians();
+        let direction = aim * elevation.cos();
+        let half = s.cone.to_radians() * 0.5;
+        let outer = half.cos();
+        let inner = (half * (1. - s.softness)).cos();
+        let mut config = [0u32; 48];
+        config[..16].copy_from_slice(&[
+            size[0],
+            size[1],
+            0,
+            0,
+            size[0],
+            size[1],
+            self.kind as u32,
+            if !masked || !self.uses_mask() {
+                0
+            } else if self.mask_mode == MaskMode::Protect {
+                2
+            } else {
+                1
+            },
+            if s.relief > 0. && self.kind != Kind::Ambient {
+                size[0].div_ceil(step as u32)
+            } else {
+                0
+            },
+            size[1].div_ceil(step as u32),
+            step as u32,
+            u32::from(s.steps),
+            u32::from(s.preserve_lines),
+            s.gobo as u32,
+            u32::from(self.gobo_matte.is_some()),
+            0,
+        ]);
+        for (i, v) in [
+            p.x,
+            p.y,
+            radius,
+            direction.x,
+            direction.y,
+            elevation.sin().max(0.08),
+            s.relief,
+            s.intensity,
+            s.shadow,
+            s.specular,
+            s.gloss,
+            s.falloff,
+            f32::from(s.color[0]) / 255.,
+            f32::from(s.color[1]) / 255.,
+            f32::from(s.color[2]) / 255.,
+            s.softness,
+            aim.x,
+            aim.y,
+            outer,
+            (inner - outer).max(0.0001),
+            s.gobo_offset,
+            opacity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            config[16 + i] = v.to_bits();
+        }
+        NativeSettings {
+            config,
+            bevel: s.bevel * view.scale,
+            texture: s.texture_relief,
+            relief: s.relief > 0. && self.kind != Kind::Ambient,
+            feather: self.mask_feather * view.scale,
+            gobo: self.gobo_matte.clone(),
+        }
+    }
+    pub(crate) fn apply_shadow(
+        &self,
+        floor: &mut [u8],
+        mask: Vec<u8>,
+        w: u32,
+        h: u32,
+        padding: u32,
+        doc: &crate::Document,
+        frame: usize,
+        camera: bool,
+        opacity: f32,
+    ) {
+        let Some(shadow) = &self.shadow else {
+            return;
+        };
+        let scale = ((w - padding * 2) as f32 / doc.width as f32)
+            .min((h - padding * 2) as f32 / doc.height as f32);
+        if !shadow.follow_light {
+            shadow.apply(floor, mask, w, h, scale, opacity);
+            return;
+        }
+        let settings = self.at(frame);
+        let mut projected = shadow.clone();
+        let mut center = Pos2::new(doc.width as f32 * 0.5, doc.height as f32 * 0.5);
+        let mut point = crate::vector::pos(settings.position);
+        let mut zoom = 1.;
+        let mut angle = settings.angle.to_radians();
+        if camera && let Some(track) = crate::depth::camera(doc, frame) {
+            let pose = crate::animation::camera_at(track, frame);
+            zoom = pose.zoom;
+            point = center
+                + egui::emath::Rot2::from_angle(-pose.angle)
+                    * (point - crate::vector::pos(pose.center))
+                    * zoom;
+            angle -= pose.angle;
+        }
+        point = Pos2::new(w as f32 * 0.5, h as f32 * 0.5) + (point - center) * scale;
+        center = point;
+        let expansion = if matches!(self.kind, Kind::Point | Kind::Spot) {
+            let lamp_height =
+                (settings.radius * settings.elevation.to_radians().sin()).max(shadow.height + 1.);
+            (lamp_height / (lamp_height - shadow.height)).clamp(1., 8.)
+        } else {
+            let delta = -Vec2::angled(angle)
+                * (shadow.height / settings.elevation.to_radians().tan().max(0.05))
+                * zoom;
+            projected.offset[0] += delta.x;
+            projected.offset[1] += delta.y;
+            1.
+        };
+        projected.apply_transformed(
+            floor,
+            mask,
+            w,
+            h,
+            scale,
+            opacity,
+            ([center.x, center.y], expansion),
+        );
+    }
+    pub(crate) fn batchable_at(&self, frame: usize) -> bool {
+        self.at(frame).texture_relief == 0.
+    }
     pub(crate) fn shading_key(&self, frame: usize) -> ShadingKey {
         ShadingKey(
             self.kind,
@@ -377,6 +676,7 @@ impl Light {
                 ..Settings::default()
             },
             keys: Default::default(),
+            key_easing: Default::default(),
         }
     }
 
@@ -390,6 +690,7 @@ impl Light {
                 .is_none_or(|matte| matte.len() == GOBO_SIZE * GOBO_SIZE)
             && self.shadow.as_ref().is_none_or(|shadow| {
                 (0. ..=1.).contains(&shadow.strength)
+                    && (0. ..=1024.).contains(&shadow.height)
                     && (0. ..=128.).contains(&shadow.softness)
                     && shadow.offset.iter().all(|x| (-1024. ..=1024.).contains(x))
             })
@@ -402,6 +703,50 @@ impl Light {
                 .iter()
                 .all(|(frame, settings)| *frame < 10_000 && settings.valid())
             && self.keys.windows(2).all(|pair| pair[0].0 < pair[1].0)
+            && self.key_easing.len() <= self.keys.len() + 1
+            && self
+                .key_easing
+                .iter()
+                .all(|(&frame, curve)| (frame == 0 || self.keyed(frame)) && curve.valid())
+    }
+
+    pub(crate) fn timing_segment(
+        &self,
+        frame: usize,
+    ) -> Option<(usize, usize, Option<&crate::animation::Curve>)> {
+        let next = self.keys.partition_point(|key| key.0 <= frame);
+        let end = self.keys.get(next)?.0;
+        let start = next.checked_sub(1).map_or(0, |i| self.keys[i].0);
+        Some((start, end, self.key_easing.get(&start)))
+    }
+
+    pub(crate) fn set_timing(&mut self, frame: usize, curve: crate::animation::Curve) {
+        std::sync::Arc::make_mut(&mut self.key_easing).insert(frame, curve);
+    }
+
+    pub(crate) fn demo_orbit(w: u32, h: u32, color: [u8; 3], phase: f32) -> Self {
+        let mut light = Self::new(w, h, Kind::Point);
+        light.base.color = color;
+        light.base.radius = 650.;
+        light.base.intensity = 0.72;
+        light.base.relief = 0.85;
+        light.base.specular = 0.22;
+        light.base.gloss = 32.;
+        for frame in [0, 18, 36, 54, 71] {
+            let angle = phase + frame as f32 / 71. * std::f32::consts::TAU;
+            let settings = Settings {
+                position: [
+                    w as f32 * 0.5 + angle.cos() * 260.,
+                    h as f32 * 0.5 + angle.sin() * 170.,
+                ],
+                ..light.base
+            };
+            if frame == 0 {
+                light.base = settings;
+            }
+            light.set(frame, settings);
+        }
+        light
     }
 
     pub fn keyed(&self, frame: usize) -> bool {
@@ -424,6 +769,7 @@ impl Light {
             return start;
         };
         let t = (frame - a) as f32 / b.saturating_sub(a).max(1) as f32;
+        let t = self.key_easing.get(&a).map_or(t, |curve| curve.time(t));
         let lerp = |a: f32, b: f32| a + (b - a) * t;
         Settings {
             position: std::array::from_fn(|i| lerp(start.position[i], end.position[i])),
@@ -626,131 +972,223 @@ impl Light {
         let dir = aim * elevation.cos();
         let height = elevation.sin().max(0.08);
         let tint = settings.color.map(|c| f32::from(c) / 255.);
-        for py in top..bottom {
-            for px in left..right {
-                let idx = (py * width + px) * 4;
-                let alpha = f32::from(pixels[idx + 3]);
-                if alpha == 0. {
-                    continue;
-                }
-                let (lx, ly, lz, mut attenuation) = match self.kind {
-                    Kind::Directional | Kind::Ambient | Kind::Rim | Kind::RimShadow => {
-                        (dir.x, dir.y, height, 1.)
+        let spot = (self.kind == Kind::Spot).then(|| {
+            let half = settings.cone.to_radians() * 0.5;
+            let outer = half.cos();
+            let inner = (half * (1. - settings.softness)).cos();
+            (Vec2::new(-aim.y, aim.x), outer, (inner - outer).max(0.0001))
+        });
+        let uses_specular = settings.specular > 0.
+            && matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot);
+        let stride = width * 4;
+        if (right - left) * (bottom - top) >= 64 * 1024 || crate::gpu_lens::collecting_lights() {
+            let mut config = [0u32; 48];
+            config[..16].copy_from_slice(&[
+                w,
+                h,
+                left as u32,
+                top as u32,
+                right as u32,
+                bottom as u32,
+                self.kind as u32,
+                if mask.is_none() {
+                    0
+                } else if self.mask_mode == MaskMode::Protect {
+                    2
+                } else {
+                    1
+                },
+                surface.as_ref().map_or(0, |s| s.width as u32),
+                surface.as_ref().map_or(0, |s| s.height as u32),
+                surface.as_ref().map_or(1, |s| s.step as u32),
+                u32::from(settings.steps),
+                u32::from(settings.preserve_lines),
+                settings.gobo as u32,
+                u32::from(self.gobo_matte.is_some()),
+                0,
+            ]);
+            let half = settings.cone.to_radians() * 0.5;
+            let outer = half.cos();
+            let inner = (half * (1. - settings.softness)).cos();
+            for (index, value) in [
+                x,
+                y,
+                radius,
+                dir.x,
+                dir.y,
+                height,
+                settings.relief,
+                settings.intensity,
+                settings.shadow,
+                settings.specular,
+                settings.gloss,
+                settings.falloff,
+                tint[0],
+                tint[1],
+                tint[2],
+                settings.softness,
+                aim.x,
+                aim.y,
+                outer,
+                (inner - outer).max(0.0001),
+                settings.gobo_offset,
+                opacity,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                config[16 + index] = value.to_bits();
+            }
+            let dispatch = crate::gpu_light::LightDispatch {
+                config,
+                surface: surface.clone(),
+                mask,
+                gobo: self.gobo_matte.as_deref().map(|matte| matte.as_slice()),
+            };
+            if crate::gpu_lens::light_on_worker(pixels, &dispatch) {
+                return;
+            }
+        }
+        let shade_rows = |first_row: usize, rows: &mut [u8]| {
+            for (row, pixels) in rows.chunks_exact_mut(stride).enumerate() {
+                let py = first_row + row;
+                for px in left..right {
+                    let idx = px * 4;
+                    let alpha = f32::from(pixels[idx + 3]);
+                    if alpha == 0. {
+                        continue;
                     }
-                    Kind::Point | Kind::Spot => {
-                        let dx = (x - px as f32) / radius;
-                        let dy = (y - py as f32) / radius;
-                        let d2 = dx * dx + dy * dy;
-                        if d2 >= 1. {
+                    let (lx, ly, lz, mut attenuation) = match self.kind {
+                        Kind::Directional | Kind::Ambient | Kind::Rim | Kind::RimShadow => {
+                            (dir.x, dir.y, height, 1.)
+                        }
+                        Kind::Point | Kind::Spot => {
+                            let dx = (x - px as f32) / radius;
+                            let dy = (y - py as f32) / radius;
+                            let d2 = dx * dx + dy * dy;
+                            if d2 >= 1. {
+                                continue;
+                            }
+                            let z = height * 0.85;
+                            let inverse = (d2 + z * z).sqrt().recip();
+                            (
+                                dx * inverse,
+                                dy * inverse,
+                                z * inverse,
+                                (1. - d2.sqrt()).powf(settings.falloff),
+                            )
+                        }
+                    };
+                    if let Some((cross_axis, outer, transition)) = spot {
+                        let ray = Vec2::new(px as f32 - x, py as f32 - y) / radius;
+                        let along = ray.dot(aim);
+                        let across = ray.dot(cross_axis);
+                        let cos = along / ray.length().max(0.00001);
+                        let edge = ((cos - outer) / transition).clamp(0., 1.);
+                        attenuation *= edge
+                            * edge
+                            * (3. - 2. * edge)
+                            * if settings.gobo == Gobo::Library {
+                                self.gobo_matte.as_ref().map_or(1., |matte| {
+                                    sample_gobo(matte, along, across + settings.gobo_offset)
+                                })
+                            } else {
+                                settings
+                                    .gobo
+                                    .transmission(along, across, settings.gobo_offset)
+                            };
+                        if attenuation <= 0. {
                             continue;
                         }
-                        let z = height * 0.85;
-                        let inverse = (d2 + z * z).sqrt().recip();
-                        (
-                            dx * inverse,
-                            dy * inverse,
-                            z * inverse,
-                            (1. - d2.sqrt()).powf(settings.falloff),
-                        )
                     }
-                };
-                if self.kind == Kind::Spot {
-                    let ray = Vec2::new(px as f32 - x, py as f32 - y) / radius;
-                    let along = ray.dot(aim);
-                    let across = ray.dot(Vec2::new(-aim.y, aim.x));
-                    let cos = along / ray.length().max(0.00001);
-                    let half = settings.cone.to_radians() * 0.5;
-                    let outer = half.cos();
-                    let inner = (half * (1. - settings.softness)).cos();
-                    let edge = ((cos - outer) / (inner - outer).max(0.0001)).clamp(0., 1.);
-                    attenuation *= edge
-                        * edge
-                        * (3. - 2. * edge)
-                        * if settings.gobo == Gobo::Library {
-                            self.gobo_matte.as_ref().map_or(1., |matte| {
-                                sample_gobo(matte, along, across + settings.gobo_offset)
-                            })
-                        } else {
-                            settings
-                                .gobo
-                                .transmission(along, across, settings.gobo_offset)
-                        };
-                    if attenuation <= 0. {
-                        continue;
-                    }
-                }
-                let n = surface
-                    .as_ref()
-                    .map_or(Vec2::ZERO, |surface| surface.slope(px, py))
-                    * settings.relief
-                    * 3.2;
-                let nz = (1. + n.length_sq()).sqrt().recip();
-                let mut diffuse = match self.kind {
-                    Kind::Ambient => 0.65,
-                    Kind::Rim => ((n.x * lx + n.y * ly) * nz).max(0.) * (1. - nz).sqrt(),
-                    Kind::RimShadow => {
-                        let edge = (1. - nz).sqrt();
-                        let strength = (-(n.x * lx + n.y * ly) * nz).max(0.) * edge * 3.;
-                        if settings.softness == 0. {
-                            f32::from(strength >= 0.23)
-                        } else {
-                            ((strength - 0.23) / settings.softness + 0.5).clamp(0., 1.)
-                                * (strength * 3.).min(1.)
+                    let n = surface
+                        .as_ref()
+                        .map_or(Vec2::ZERO, |surface| surface.slope(px, py))
+                        * settings.relief
+                        * 3.2;
+                    let nz = (1. + n.length_sq()).sqrt().recip();
+                    let mut diffuse = match self.kind {
+                        Kind::Ambient => 0.65,
+                        Kind::Rim => ((n.x * lx + n.y * ly) * nz).max(0.) * (1. - nz).sqrt(),
+                        Kind::RimShadow => {
+                            let edge = (1. - nz).sqrt();
+                            let strength = (-(n.x * lx + n.y * ly) * nz).max(0.) * edge * 3.;
+                            if settings.softness == 0. {
+                                f32::from(strength >= 0.23)
+                            } else {
+                                ((strength - 0.23) / settings.softness + 0.5).clamp(0., 1.)
+                                    * (strength * 3.).min(1.)
+                            }
                         }
+                        _ => ((n.x * lx + n.y * ly + lz) * nz).clamp(0., 1.),
+                    };
+                    if settings.steps >= 2 {
+                        let steps = f32::from(settings.steps - 1);
+                        let level = diffuse * steps;
+                        let blend = ((level.fract() - 0.40) / 0.20).clamp(0., 1.);
+                        diffuse = (level.floor() + blend * blend * (3. - 2. * blend)) / steps;
                     }
-                    _ => ((n.x * lx + n.y * ly + lz) * nz).clamp(0., 1.),
-                };
-                if settings.steps >= 2 {
-                    let steps = f32::from(settings.steps - 1);
-                    let level = diffuse * steps;
-                    let blend = ((level.fract() - 0.40) / 0.20).clamp(0., 1.);
-                    diffuse = (level.floor() + blend * blend * (3. - 2. * blend)) / steps;
-                }
-                let halfway = (2. + 2. * lz).sqrt();
-                let specular = if settings.specular > 0.
-                    && matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot)
-                {
-                    (((n.x * lx + n.y * ly + lz + 1.) * nz) / halfway)
-                        .clamp(0., 1.)
-                        .powf(settings.gloss)
-                        * settings.specular
-                } else {
-                    0.
-                };
-                let influence = mask.map_or(1., |mask| {
-                    let alpha = f32::from(mask[idx + 3]) / 255.;
-                    if self.mask_mode == MaskMode::Protect {
-                        1. - alpha
+                    let specular = if uses_specular {
+                        let halfway = (2. + 2. * lz).sqrt();
+                        (((n.x * lx + n.y * ly + lz + 1.) * nz) / halfway)
+                            .clamp(0., 1.)
+                            .powf(settings.gloss)
+                            * settings.specular
                     } else {
-                        alpha
-                    }
-                });
-                let strength = settings.intensity * attenuation * opacity * influence;
-                let shade = if matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot) {
-                    (1. - diffuse) * settings.shadow * strength
-                } else {
-                    0.
-                };
-                for channel in 0..3 {
-                    let value = f32::from(pixels[idx + channel]);
-                    if self.kind == Kind::RimShadow {
-                        let ink = if settings.preserve_lines {
-                            (value / alpha * 6.).min(1.)
+                        0.
+                    };
+                    let influence = mask.map_or(1., |mask| {
+                        let alpha = f32::from(mask[py * stride + idx + 3]) / 255.;
+                        if self.mask_mode == MaskMode::Protect {
+                            1. - alpha
                         } else {
-                            1.
-                        };
-                        let weight = (diffuse * strength * ink).clamp(0., 1.);
-                        pixels[idx + channel] =
-                            (value * (1. - weight * (1. - tint[channel]))).round() as u8;
-                        continue;
+                            alpha
+                        }
+                    });
+                    let strength = settings.intensity * attenuation * opacity * influence;
+                    let shade = if matches!(self.kind, Kind::Point | Kind::Directional | Kind::Spot)
+                    {
+                        (1. - diffuse) * settings.shadow * strength
+                    } else {
+                        0.
+                    };
+                    for channel in 0..3 {
+                        let value = f32::from(pixels[idx + channel]);
+                        if self.kind == Kind::RimShadow {
+                            let ink = if settings.preserve_lines {
+                                (value / alpha * 6.).min(1.)
+                            } else {
+                                1.
+                            };
+                            let weight = (diffuse * strength * ink).clamp(0., 1.);
+                            pixels[idx + channel] =
+                                (value * (1. - weight * (1. - tint[channel]))).round() as u8;
+                            continue;
+                        }
+                        let lit = value * (1. - shade)
+                            + ((alpha - value) * diffuse * 0.64 + alpha * specular)
+                                * strength
+                                * tint[channel];
+                        pixels[idx + channel] = lit.clamp(0., alpha).round() as u8;
                     }
-                    let lit = value * (1. - shade)
-                        + ((alpha - value) * diffuse * 0.64 + alpha * specular)
-                            * strength
-                            * tint[channel];
-                    pixels[idx + channel] = lit.clamp(0., alpha).round() as u8;
                 }
             }
+        };
+        let rows = &mut pixels[top * stride..bottom * stride];
+        static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let available = *THREADS
+            .get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get().min(4)));
+        let worker_count = ((right - left) * (bottom - top) / (256 * 1024)).clamp(1, available);
+        if worker_count == 1 {
+            shade_rows(top, rows);
+        } else {
+            let chunk_height = (bottom - top).div_ceil(worker_count);
+            std::thread::scope(|scope| {
+                let shade_rows = &shade_rows;
+                for (index, rows) in rows.chunks_mut(chunk_height * stride).enumerate() {
+                    scope.spawn(move || shade_rows(top + index * chunk_height, rows));
+                }
+            });
         }
     }
 
@@ -759,9 +1197,17 @@ impl Light {
             (Ok(index), Some(to)) if to != frame && !self.keyed(to) => {
                 let value = self.keys.remove(index).1;
                 self.set(to, value);
+                if self.key_easing.contains_key(&frame) {
+                    let easing = std::sync::Arc::make_mut(&mut self.key_easing);
+                    let curve = easing.remove(&frame).unwrap();
+                    easing.insert(to, curve);
+                }
             }
             (Ok(index), None) => {
                 self.keys.remove(index);
+                if self.key_easing.contains_key(&frame) {
+                    std::sync::Arc::make_mut(&mut self.key_easing).remove(&frame);
+                }
             }
             (Err(_), Some(to)) if to == frame => {
                 self.set(frame, self.at(frame));
@@ -783,13 +1229,13 @@ struct SurfaceEntry {
     width: usize,
     height: usize,
     bevel: f32,
-    alpha: Vec<u8>,
+    alpha: std::sync::Arc<Vec<u8>>,
     surface: std::sync::Arc<Surface>,
 }
 
 impl SurfaceEntry {
     fn bytes(&self) -> usize {
-        self.alpha.len() + self.surface.slopes.len() * std::mem::size_of::<Vec2>()
+        self.surface.slopes.len() * std::mem::size_of::<Vec2>()
     }
 }
 
@@ -802,13 +1248,25 @@ impl SurfaceCache {
         bevel: f32,
         step: usize,
     ) -> std::sync::Arc<Surface> {
+        let _span = crate::render_profile::span("surface normals");
         let alpha = || pixels[3..].iter().step_by(4).copied();
-        if let Some(index) = self.entries.iter().position(|entry| {
-            entry.width == width
-                && entry.height == height
-                && entry.bevel == bevel
-                && entry.surface.step == step
-                && entry.alpha.iter().copied().eq(alpha())
+        let shared_alpha = self
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.width == width
+                    && entry.height == height
+                    && entry.alpha.iter().copied().eq(alpha())
+            })
+            .map(|entry| entry.alpha.clone());
+        if let Some(index) = shared_alpha.as_ref().and_then(|alpha| {
+            self.entries.iter().position(|entry| {
+                entry.width == width
+                    && entry.height == height
+                    && entry.bevel == bevel
+                    && entry.surface.step == step
+                    && std::sync::Arc::ptr_eq(alpha, &entry.alpha)
+            })
         }) {
             let entry = self.entries.remove(index).unwrap();
             let surface = entry.surface.clone();
@@ -817,18 +1275,33 @@ impl SurfaceCache {
         }
         let surface =
             std::sync::Arc::new(Surface::new(pixels, width, height, bevel, 0., None, step));
-        let size = width * height + surface.slopes.len() * std::mem::size_of::<Vec2>();
-        const LIMIT: usize = 32 * 1024 * 1024;
+        let alpha = shared_alpha.unwrap_or_else(|| std::sync::Arc::new(alpha().collect()));
+        let size = alpha.len() + surface.slopes.len() * std::mem::size_of::<Vec2>();
+        const LIMIT: usize = 64 * 1024 * 1024;
         if size <= LIMIT {
-            let mut bytes = size + self.entries.iter().map(SurfaceEntry::bytes).sum::<usize>();
-            while bytes > LIMIT || self.entries.len() >= 8 {
-                bytes -= self.entries.pop_front().unwrap().bytes();
+            let storage = |entries: &std::collections::VecDeque<SurfaceEntry>| {
+                let mut alphas = std::collections::HashSet::new();
+                alphas.insert(std::sync::Arc::as_ptr(&alpha));
+                size + entries
+                    .iter()
+                    .map(|entry| {
+                        entry.bytes()
+                            + if alphas.insert(std::sync::Arc::as_ptr(&entry.alpha)) {
+                                entry.alpha.len()
+                            } else {
+                                0
+                            }
+                    })
+                    .sum::<usize>()
+            };
+            while storage(&self.entries) > LIMIT || self.entries.len() >= 32 {
+                self.entries.pop_front().unwrap();
             }
             self.entries.push_back(SurfaceEntry {
                 width,
                 height,
                 bevel,
-                alpha: alpha().collect(),
+                alpha,
                 surface: surface.clone(),
             });
         }
@@ -836,11 +1309,11 @@ impl SurfaceCache {
     }
 }
 
-struct Surface {
-    width: usize,
-    height: usize,
-    step: usize,
-    slopes: Vec<Vec2>,
+pub(crate) struct Surface {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) step: usize,
+    pub(crate) slopes: Vec<Vec2>,
 }
 impl Surface {
     fn new(
@@ -852,6 +1325,11 @@ impl Surface {
         height_map: Option<&[u8]>,
         step: usize,
     ) -> Self {
+        if let Some(surface) = crate::gpu_lens::surface_on_worker(
+            pixels, width, height, bevel, texture, height_map, step,
+        ) {
+            return surface;
+        }
         let w = width.div_ceil(step);
         let h = height.div_ceil(step);
         let limit = (bevel / step as f32).max(1.);
@@ -1101,6 +1579,7 @@ impl Editor {
                         let mut light = layer.options.light.clone()?;
                         light.base = light.at(self.frame);
                         light.keys.clear();
+                        light.key_easing = Default::default();
                         light.receivers.clear();
                         light.shadow = None;
                         Some(PresetLight {
@@ -1177,6 +1656,16 @@ impl Editor {
                     });
                 }
             });
+        if crate::preset_file::exchange(
+            ui,
+            &mut self.studio.prefs.light_presets,
+            "ltlights",
+            Preset::valid,
+            &mut self.status,
+        ) && let Err(error) = self.studio.save()
+        {
+            self.status = error;
+        }
         if let Some((index, target)) = apply {
             let preset = self.studio.prefs.light_presets[index].clone();
             self.apply_light_preset(&preset, target);
@@ -1222,6 +1711,7 @@ impl Editor {
             let mut light = saved.light.clone();
             light.receivers = receiver.into_iter().collect();
             light.keys.clear();
+            light.key_easing = Default::default();
             light.shadow = None;
             let scale_point = |p: [f32; 2]| {
                 [
@@ -1530,6 +2020,16 @@ impl Editor {
                 }
             });
             if let Some(shadow) = &mut updated.shadow {
+                ui.checkbox(&mut shadow.follow_light, tr("Follow light"));
+                if shadow.follow_light {
+                    control(
+                        ui,
+                        Icon::Depth,
+                        "Occluder height",
+                        &mut shadow.height,
+                        0. ..=1024.,
+                    );
+                }
                 ui.menu_button(tr("Shadow caster"), |ui| {
                     if ui
                         .selectable_label(shadow.caster.is_none(), tr("All artwork above receiver"))
@@ -1620,6 +2120,8 @@ impl Editor {
                     offset: [24., 16.],
                     softness: 10.,
                     strength: 0.38,
+                    follow_light: true,
+                    height: shadow_height(),
                 });
             }
             if let Some(index) = new_caster
@@ -1826,7 +2328,7 @@ impl Editor {
                 light.gobo_matte = Some(matte);
             }
             if remove {
-                light.keys.retain(|key| key.0 != self.frame);
+                light.edit_key(self.frame, None);
             } else if light.keys.is_empty() && !insert && self.frame == 0 {
                 light.base = value;
             } else {
@@ -2060,6 +2562,521 @@ fn control(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a GPU; native frame graph with camera, guide, masks and projected shadows"]
+    fn gpu_scene_masks_guides_and_shadows_match_the_reference() {
+        use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
+        let square = |x: f32, y: f32, size: f32, color| crate::Mark {
+            points: vec![[x, y], [x + size, y + size]].into(),
+            fill: Some(color),
+            color,
+            width: 1.,
+            rectangle: true,
+            closed: true,
+            stroke: false,
+            ..Default::default()
+        };
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
+        let mut doc = crate::Document::default();
+        doc.width = 96;
+        doc.height = 64;
+        doc.layers[0].frames[0].push(square(-20., -20., 140., [100, 110, 120, 255]));
+        doc.layers[0].options.light_receiver = Some(100);
+        let mut art = doc.layers[0].clone();
+        art.name = "Caster".into();
+        art.options.light_receiver = Some(200);
+        art.frames[0].clear();
+        art.frames[0].push(square(28., 18., 25., [80, 110, 150, 220]));
+        let mut guide = square(30., 20., 12., [255, 255, 255, 150]);
+        guide.style.surface_height = Some(0.4);
+        art.frames[0].push(guide);
+        doc.layers.push(art);
+        let mut mask = doc.layers[0].clone();
+        mask.name = "Light mask".into();
+        mask.options.light_receiver = None;
+        mask.options.light_mask = true;
+        mask.options.light_mask_target = Some(200);
+        mask.frames[0].clear();
+        mask.frames[0].push(square(32., 15., 25., [255, 255, 255, 160]));
+        doc.layers.push(mask);
+        let mut light = Light::new(96, 64, Kind::Point);
+        light.base.position = [15., 8.];
+        light.base.radius = 120.;
+        light.base.texture_relief = 0.15;
+        light.mask_feather = 3.;
+        light.shadow = Some(Shadow {
+            floor: 100,
+            caster: Some(200),
+            offset: [3., 4.],
+            softness: 3.,
+            strength: 0.45,
+            follow_light: true,
+            height: 12.,
+        });
+        let mut lamp = doc.layers[0].clone();
+        lamp.frames[0].clear();
+        lamp.options.light_receiver = None;
+        lamp.options.light = Some(light);
+        doc.layers.push(lamp);
+        doc.extras.cameras.push(crate::features::Camera {
+            id: 1,
+            name: "Camera".into(),
+            start: 0,
+            duration: 24,
+            center: [48., 32.],
+            zoom: 1.75,
+            angle: 0.15,
+            optics: Default::default(),
+            animation: Default::default(),
+        });
+        let ctx = eframe::egui::Context::default();
+        for mode in [MaskMode::PaintLight, MaskMode::Protect, MaskMode::Ignore] {
+            doc.layers[3].options.light.as_mut().unwrap().mask_mode = mode;
+            use_on_worker(None);
+            let expected = crate::exporter::raster(
+                &doc,
+                0,
+                192,
+                128,
+                &ctx,
+                &mut crate::paint::RenderCache::default(),
+            );
+            use_on_worker(Some(gpu.clone()));
+            let mut cache = crate::paint::RenderCache::default();
+            let actual = crate::exporter::raster(&doc, 0, 192, 128, &ctx, &mut cache);
+            use_on_worker(None);
+            assert_eq!(
+                cache.native_scene.frames, 1,
+                "native masks and shadows must execute: {}",
+                cache.native_scene.reason
+            );
+            let max = expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            let rms = (expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)).powi(2))
+                .sum::<f64>()
+                / expected.len() as f64)
+                .sqrt();
+            eprintln!("native mask mode {}: max {max}, RMS {rms}", mode.name());
+            assert!(max <= 5 && rms < 0.4);
+        }
+    }
+    #[test]
+    fn bevel_variants_share_coverage_and_retain_recent_surfaces() {
+        let mut cache = SurfaceCache::default();
+        let pixels = [60, 70, 80, 200].repeat(64 * 48);
+        let first = cache.get(&pixels, 64, 48, 1., 1);
+        for bevel in 2..=14 {
+            cache.get(&pixels, 64, 48, bevel as f32, 1);
+        }
+        let again = cache.get(&pixels, 64, 48, 1., 1);
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        let alpha = &cache.entries[0].alpha;
+        assert!(
+            cache
+                .entries
+                .iter()
+                .all(|entry| std::sync::Arc::ptr_eq(alpha, &entry.alpha))
+        );
+    }
+    #[test]
+    #[ignore = "requires a GPU; distance-transform relief parity across alpha and bevel sizes"]
+    fn gpu_surface_preserves_the_relief_field() {
+        use crate::gpu_lens::block_on;
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu =
+            crate::gpu_surface::GpuSurface::new(device, queue).expect("surface shaders compile");
+        let (w, h) = (320, 240);
+        let mut pixels = vec![0; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let distance = ((x as f32 - 160.).powi(2) + (y as f32 - 120.).powi(2)).sqrt();
+                let alpha = ((100.5 - distance) * 0.5).clamp(0., 1.);
+                let i = (y * w + x) * 4;
+                pixels[i..i + 4]
+                    .copy_from_slice(&[70., 110., 150., 255.].map(|v| (v * alpha).round() as u8));
+            }
+        }
+        for step in [1, 2, 3] {
+            for bevel in [8., 28., 72.] {
+                let expected = Surface::new(&pixels, w, h, bevel, 0., None, step);
+                let actual = gpu
+                    .surface(&pixels, w, h, bevel, 0., None, step)
+                    .expect("surface dispatch");
+                let max = expected
+                    .slopes
+                    .iter()
+                    .zip(&actual.slopes)
+                    .map(|(a, b)| (*a - *b).abs().max_elem())
+                    .fold(0., f32::max);
+                eprintln!("surface step {step}, bevel {bevel}: max normal difference {max}");
+                assert!(max < 0.002);
+            }
+        }
+    }
+    #[test]
+    fn projected_occluders_follow_the_light_and_keep_old_shadows_compatible() {
+        let mut doc = crate::Document::default();
+        doc.width = 64;
+        doc.height = 32;
+        let mut light = Light::new(64, 32, Kind::Point);
+        light.base.radius = 200.;
+        light.base.elevation = 45.;
+        light.shadow = Some(Shadow {
+            floor: 1,
+            caster: None,
+            offset: [0., 0.],
+            softness: 0.,
+            strength: 0.8,
+            follow_light: true,
+            height: 32.,
+        });
+        let mut mask = vec![0; 64 * 32 * 4];
+        for y in 10..22 {
+            for x in 24..32 {
+                mask[(y * 64 + x) * 4 + 3] = 255;
+            }
+        }
+        let mut centroids = Vec::new();
+        for x in [8., 56.] {
+            light.base.position = [x, 16.];
+            let mut pixels = [100, 100, 100, 255].repeat(64 * 32);
+            light.apply_shadow(&mut pixels, mask.clone(), 64, 32, 0, &doc, 0, false, 1.);
+            let mut sum = 0.;
+            let mut weighted = 0.;
+            for (i, p) in pixels.chunks_exact(4).enumerate() {
+                let darkness = 100. - f32::from(p[0]);
+                sum += darkness;
+                weighted += darkness * (i % 64) as f32;
+                assert_eq!(p[3], 255);
+            }
+            assert!(sum > 0.);
+            centroids.push(weighted / sum);
+        }
+        assert!(
+            centroids[0] > centroids[1] + 8.,
+            "moving a point light must move its occluder's shadow in the opposite direction"
+        );
+        let mut legacy = serde_json::to_value(&light).unwrap();
+        let shadow = legacy["shadow"].as_object_mut().unwrap();
+        shadow.remove("follow_light");
+        shadow.remove("height");
+        let restored: Light = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.shadow.as_ref().unwrap().follow_light);
+        assert!(restored.valid());
+    }
+    #[test]
+    #[ignore = "requires a GPU; resident light chain and CPU fallback parity"]
+    fn gpu_resident_light_chain_matches_cpu() {
+        use crate::gpu_lens::{GpuLens, block_on, light_batch, use_on_worker};
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
+        let (w, h) = (320, 240);
+        let source: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if i % 320 > 20 && i % 320 < 300 {
+                    [65, 82, 93, 200]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        let lights: Vec<_> = [
+            Kind::Point,
+            Kind::Spot,
+            Kind::Rim,
+            Kind::Directional,
+            Kind::Ambient,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let mut light = Light::new(w, h, kind);
+            light.base.radius = 400.;
+            light.base.intensity = 0.22;
+            light
+        })
+        .collect();
+        let mut surfaces = SurfaceCache::default();
+        let mut draw = |pixels: &mut [u8]| {
+            for light in &lights {
+                light.shade(
+                    pixels,
+                    w,
+                    h,
+                    0,
+                    Pos2::new(160., 100.),
+                    1.,
+                    0.,
+                    0.8,
+                    None,
+                    None,
+                    Some(2),
+                    Some(&mut surfaces),
+                );
+            }
+        };
+        let mut expected = source.clone();
+        use_on_worker(None);
+        draw(&mut expected);
+        let mut actual = source.clone();
+        use_on_worker(Some(gpu.clone()));
+        light_batch(&mut actual, &mut draw);
+        use_on_worker(None);
+        assert_eq!(gpu.light_pass_count(), lights.len());
+        let max = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(max <= 2, "resident light chain max {max}");
+        // The bounded collector must replay the complete chain on CPU rather
+        // than publish partial lighting when its command budget is exceeded.
+        let many = |pixels: &mut [u8]| {
+            for _ in 0..65 {
+                lights[4].shade(
+                    pixels,
+                    w,
+                    h,
+                    0,
+                    Pos2::new(160., 100.),
+                    1.,
+                    0.,
+                    0.01,
+                    None,
+                    None,
+                    Some(2),
+                    None,
+                );
+            }
+        };
+        let mut expected = source.clone();
+        many(&mut expected);
+        let mut actual = source;
+        use_on_worker(Some(gpu));
+        light_batch(&mut actual, many);
+        use_on_worker(None);
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    #[ignore = "requires a compute GPU, compares all light kinds with CPU"]
+    fn gpu_lights_match_cpu_with_relief_masks_and_gobos() {
+        use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
+        use eframe::wgpu;
+
+        let instance = wgpu::Instance::default();
+        let adapter =
+            block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+        let (device, queue) =
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
+        let (w, h) = (640u32, 480u32);
+        let mut source = vec![0; w as usize * h as usize * 4];
+        let mut mask = source.clone();
+        for y in 10..h - 10 {
+            for x in 20..w - 20 {
+                let index = (y as usize * w as usize + x as usize) * 4;
+                let alpha =
+                    (((x - 20).min(w - 21 - x).min(y - 10).min(h - 11 - y)) as f32 / 3.).min(1.);
+                source[index..index + 4].copy_from_slice(
+                    &[72, 105, 141, 200].map(|value| (value as f32 * alpha) as u8),
+                );
+                mask[index + 3] = ((x * 7 + y * 13) % 256) as u8;
+            }
+        }
+        let mut cpu_total = std::time::Duration::ZERO;
+        let mut gpu_total = std::time::Duration::ZERO;
+        let mut largest_error = 0u8;
+        let mut count = 0;
+        let mut surfaces = SurfaceCache::default();
+        for kind in [
+            Kind::Point,
+            Kind::Directional,
+            Kind::Ambient,
+            Kind::Rim,
+            Kind::RimShadow,
+            Kind::Spot,
+        ] {
+            for mode in [MaskMode::Ignore, MaskMode::PaintLight, MaskMode::Protect] {
+                let gobos: &[Gobo] = if kind == Kind::Spot {
+                    &[
+                        Gobo::None,
+                        Gobo::Blinds,
+                        Gobo::Window,
+                        Gobo::Leaves,
+                        Gobo::Library,
+                    ]
+                } else {
+                    &[Gobo::None]
+                };
+                for &gobo in gobos {
+                    let mut light = Light::new(w, h, kind);
+                    light.mask_mode = mode;
+                    light.base.gobo = gobo;
+                    light.base.position = [320., 240.];
+                    light.base.radius = 560.;
+                    light.base.steps = if mode == MaskMode::PaintLight { 4 } else { 0 };
+                    light.base.specular = 0.55;
+                    light.gobo_matte = (gobo == Gobo::Library)
+                        .then(|| (0..48 * 48).map(|i| ((i * 17) % 256) as u8).collect());
+                    let mut expected = source.clone();
+                    let mut actual = source.clone();
+                    use_on_worker(None);
+                    let began = std::time::Instant::now();
+                    light.shade(
+                        &mut expected,
+                        w,
+                        h,
+                        0,
+                        Pos2::new(320., 240.),
+                        1.,
+                        0.2,
+                        0.87,
+                        None,
+                        Some(&mask),
+                        Some(2),
+                        Some(&mut surfaces),
+                    );
+                    cpu_total += began.elapsed();
+                    use_on_worker(Some(gpu.clone()));
+                    let began = std::time::Instant::now();
+                    light.shade(
+                        &mut actual,
+                        w,
+                        h,
+                        0,
+                        Pos2::new(320., 240.),
+                        1.,
+                        0.2,
+                        0.87,
+                        None,
+                        Some(&mask),
+                        Some(2),
+                        Some(&mut surfaces),
+                    );
+                    gpu_total += began.elapsed();
+                    count += 1;
+                    assert_eq!(gpu.light_pass_count(), count, "compute pass must execute");
+                    for (&a, &b) in actual.iter().zip(&expected) {
+                        largest_error = largest_error.max(a.abs_diff(b));
+                    }
+                    assert!(
+                        actual
+                            .iter()
+                            .zip(&expected)
+                            .all(|(&a, &b)| a.abs_diff(b) <= 1),
+                        "{} GPU error {largest_error}",
+                        kind.name()
+                    );
+                }
+            }
+        }
+        use_on_worker(None);
+        eprintln!(
+            "{}: {count} lighting passes at {w}x{h}, CPU {cpu_total:?}, GPU {gpu_total:?}, maximum channel error {largest_error}/255",
+            adapter.get_info().name
+        );
+    }
+
+    #[test]
+    fn keyed_light_easing_follows_moved_key_and_roundtrips() {
+        let mut light = Light::new(640, 360, Kind::Point);
+        light.set(
+            2,
+            Settings {
+                intensity: 0.,
+                ..light.base
+            },
+        );
+        light.set(
+            10,
+            Settings {
+                intensity: 1.,
+                ..light.base
+            },
+        );
+        assert_eq!(light.at(6).intensity, 0.5);
+        light.set_timing(
+            2,
+            crate::animation::Curve {
+                pace: [0., 0.6],
+                ..Default::default()
+            },
+        );
+        assert!(light.at(6).intensity < 0.4);
+        assert!(light.edit_key(2, Some(4)));
+        let curve = light.timing_segment(7).unwrap().2.unwrap();
+        assert_eq!(curve.pace, [0., 0.6]);
+        let reopened: Light = serde_json::from_slice(&serde_json::to_vec(&light).unwrap()).unwrap();
+        assert_eq!(reopened.at(7).intensity, light.at(7).intensity);
+    }
+
+    #[test]
+    fn large_masked_light_matches_independent_small_row_bands() {
+        let (w, h) = (1024, 1024);
+        let mut light = Light::new(w, h, Kind::Point);
+        light.base.radius = 800.;
+        light.base.relief = 0.;
+        let center = Pos2::new(512., 512.);
+        let row_bytes = w as usize * 4;
+        let mut image = vec![0; row_bytes * h as usize];
+        let mut mask = image.clone();
+        for (index, pixel) in image.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[34, 56, (index % 97) as u8, 170]);
+            mask[index * 4 + 3] = ((index * 13 + index / w as usize) % 256) as u8;
+        }
+        let mut reference = image.clone();
+        light.shade(
+            &mut image,
+            w,
+            h,
+            0,
+            center,
+            1.,
+            0.,
+            0.9,
+            None,
+            Some(&mask),
+            None,
+            None,
+        );
+        for (band, (pixels, mask)) in reference
+            .chunks_exact_mut(row_bytes * 128)
+            .zip(mask.chunks_exact(row_bytes * 128))
+            .enumerate()
+        {
+            let point = center - Vec2::new(0., (band * 128) as f32);
+            light.shade(
+                pixels,
+                w,
+                128,
+                0,
+                point,
+                1.,
+                0.,
+                0.9,
+                None,
+                Some(mask),
+                None,
+                None,
+            );
+        }
+        assert_eq!(image, reference);
+    }
 
     #[test]
     fn scene_mask_brush_can_paint_and_subtract_on_a_vector_receiver() {
@@ -2277,6 +3294,8 @@ mod tests {
             offset: [24., 16.],
             softness: 0.,
             strength: 0.5,
+            follow_light: false,
+            height: shadow_height(),
         });
         lamp.options.light = Some(light);
         doc.layers.push(caster);

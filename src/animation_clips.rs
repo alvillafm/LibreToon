@@ -815,6 +815,8 @@ impl Editor {
         let mut apply = None;
         let mut remove = None;
         let mut save = None;
+        let mut imported = None;
+        let mut transfer_status = String::new();
         egui::CollapsingHeader::new(tr("Rig poses")).show(ui, |ui| {
             let scope = ui.scope_id().with("pose-group");
             let mut group = ui.data(|data| data.get_temp::<usize>(scope)).unwrap_or(0);
@@ -897,10 +899,37 @@ impl Editor {
                         });
                     }
                 });
+            let controls = self.capture_rig_controls(frame, 3);
+            imported = crate::preset_file::transfer(
+                ui,
+                &self.doc.extras.rig_poses,
+                "ltpose",
+                100,
+                |pose| {
+                    pose.valid()
+                        && pose
+                            .bones
+                            .iter()
+                            .all(|(id, _)| rig.bones.iter().any(|bone| bone.id == *id))
+                        && pose
+                            .controls
+                            .iter()
+                            .all(|(id, _, _)| controls.iter().any(|(track, _, _)| track == id))
+                },
+                &mut transfer_status,
+            );
         });
+        if !transfer_status.is_empty() {
+            self.status = transfer_status;
+        }
         if let Some(pose) = save {
             self.checkpoint();
             self.doc.extras.rig_poses.push(pose);
+            self.recover();
+        }
+        if let Some(poses) = imported.filter(|poses| !poses.is_empty()) {
+            self.checkpoint();
+            self.doc.extras.rig_poses.extend(poses);
             self.recover();
         }
         if let Some(index) = apply {

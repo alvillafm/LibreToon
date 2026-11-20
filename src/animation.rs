@@ -254,6 +254,10 @@ pub struct State {
     pub(crate) tag_drag: Option<crate::dialogue::TagDrag>,
     pub(crate) space_press: Option<(f64, bool)>,
     pub(crate) exposure_sheet: bool,
+    pub(crate) graph_open: bool,
+    graph_selected: usize,
+    graph_handle: Option<usize>,
+    graph_transaction: bool,
     pub(crate) rig_channels_open: bool,
     pub(crate) frame_workflow: crate::frame_workflow::State,
     pub scenes_open: bool,
@@ -271,6 +275,223 @@ pub struct State {
     pub camera_mode: usize,
     pub thumbnail_cache: crate::paint::RenderCache,
 }
+#[derive(Clone, Copy)]
+enum GraphTarget {
+    Drawing {
+        layer: usize,
+        tween: usize,
+    },
+    Camera(usize),
+    Bone {
+        bone: usize,
+        key: usize,
+    },
+    Light {
+        layer: usize,
+        frame: usize,
+    },
+    Effects {
+        layer: usize,
+        band: usize,
+        key: usize,
+    },
+}
+
+impl Editor {
+    pub(crate) fn animation_graph_ui(&mut self, ctx: &eframe::egui::Context) {
+        use crate::{
+            design::{Icon, button},
+            i18n::tr,
+        };
+        use eframe::egui;
+
+        if self.hub.home || !self.animation.graph_open {
+            return;
+        }
+        let drawing_layer = self
+            .canvas
+            .selected
+            .first()
+            .map_or(self.layer, |&(layer, _)| layer);
+        let layer = &self.doc.layers[drawing_layer];
+        let drawing = (!layer.options.locked)
+            .then(|| {
+                layer
+                    .options
+                    .tweens
+                    .iter()
+                    .position(|tween| (tween.start..=tween.end).contains(&self.frame))
+            })
+            .flatten()
+            .map(|tween| {
+                let span = &layer.options.tweens[tween];
+                (
+                    GraphTarget::Drawing {
+                        layer: drawing_layer,
+                        tween,
+                    },
+                    &span.curve,
+                    span.end - span.start + 1,
+                    layer.name.as_str(),
+                )
+            });
+        let cameras = &self.doc.extras.cameras;
+        let camera = self
+            .feature
+            .selected_camera
+            .or_else(|| crate::depth::camera(&self.doc, self.frame).map(|camera| camera.id))
+            .and_then(|id| cameras.iter().position(|camera| camera.id == id))
+            .map(|index| {
+                let camera = &cameras[index];
+                (
+                    GraphTarget::Camera(index),
+                    &camera.animation.curve,
+                    camera.duration,
+                    camera.name.as_str(),
+                )
+            });
+        let bones = &self.doc.extras.rig.bones;
+        let bone = self
+            .rigging
+            .bone
+            .and_then(|id| bones.iter().position(|bone| bone.id == id))
+            .and_then(|index| {
+                let bone = &bones[index];
+                let frame = self.group_rig_frame();
+                let key = bone.keys.iter().rposition(|key| key.frame <= frame)?;
+                let start = &bone.keys[key];
+                let duration = bone
+                    .keys
+                    .get(key + 1)
+                    .map_or(1, |end| end.frame - start.frame + 1);
+                Some((
+                    GraphTarget::Bone { bone: index, key },
+                    &start.curve,
+                    duration,
+                    bone.name.as_str(),
+                ))
+            });
+        let linear = Curve::default();
+        let active_layer = &self.doc.layers[self.layer];
+        let unlocked = !active_layer.options.locked;
+        let light = active_layer
+            .options
+            .light
+            .as_ref()
+            .filter(|_| unlocked)
+            .and_then(|light| light.timing_segment(self.frame))
+            .map(|(start, end, curve)| {
+                (
+                    GraphTarget::Light {
+                        layer: self.layer,
+                        frame: start,
+                    },
+                    curve.unwrap_or(&linear),
+                    end - start + 1,
+                    active_layer.name.as_str(),
+                )
+            });
+        let effects = unlocked
+            .then(|| crate::post::timing_segment(active_layer, self.frame))
+            .flatten()
+            .map(|(band, key, frames, curve)| {
+                (
+                    GraphTarget::Effects {
+                        layer: self.layer,
+                        band,
+                        key,
+                    },
+                    curve.unwrap_or(&linear),
+                    frames,
+                    active_layer.name.as_str(),
+                )
+            });
+        let targets = [drawing, camera, bone, light, effects];
+        let mut open = true;
+        let mut edit = None;
+        if !ctx.input(|input| input.pointer.primary_down()) {
+            self.animation.graph_transaction = false;
+        }
+        egui::Window::new(tr("Animation curves"))
+            .id(egui::Id::unique("animation-graph"))
+            .open(&mut open)
+            .default_width(390.)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (index, (icon, name)) in [
+                        (Icon::Tween, "Motion tween"),
+                        (Icon::Camera, "Cámara"),
+                        (Icon::Bones, "Bone"),
+                        (Icon::Bulb, "Light"),
+                        (Icon::Fx, "Adjustment layer"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if button(
+                            ui,
+                            icon,
+                            name,
+                            "",
+                            index == self.animation.graph_selected,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.animation.graph_selected = index;
+                            self.animation.graph_handle = None;
+                            self.animation.graph_transaction = false;
+                        }
+                    }
+                });
+                if let Some((target, old, frames, name)) = targets[self.animation.graph_selected] {
+                    ui.label(name);
+                    let mut curve = old.clone();
+                    crate::visual_controls::timing_controls(
+                        ui,
+                        &mut curve,
+                        &mut self.animation.graph_handle,
+                        frames,
+                    );
+                    if curve != *old {
+                        edit = Some((target, curve));
+                    }
+                } else {
+                    ui.label(tr("No keyframes"));
+                }
+            });
+        self.animation.graph_open = open;
+        if let Some((target, curve)) = edit {
+            if !self.animation.graph_transaction {
+                let selected = self.canvas.selected.clone();
+                self.checkpoint();
+                self.canvas.selected = selected;
+            }
+            self.animation.graph_transaction = self.animation.graph_handle.is_some();
+            match target {
+                GraphTarget::Drawing { layer, tween } => {
+                    self.doc.layers[layer].options.tweens[tween].curve = curve
+                }
+                GraphTarget::Camera(camera) => {
+                    self.doc.extras.cameras[camera].animation.curve = curve
+                }
+                GraphTarget::Bone { bone, key } => {
+                    self.doc.extras.rig.bones[bone].keys[key].curve = curve
+                }
+                GraphTarget::Light { layer, frame } => {
+                    if let Some(light) = &mut self.doc.layers[layer].options.light {
+                        light.set_timing(frame, curve);
+                    }
+                }
+                GraphTarget::Effects { layer, band, key } => {
+                    crate::post::set_timing(&mut self.doc.layers[layer], band, key, curve);
+                }
+            }
+            self.recover();
+        }
+    }
+}
+
 pub fn scene_from(doc: &Document, id: u64, name: String) -> Scene {
     Scene {
         markers: doc.extras.markers.clone(),

@@ -303,6 +303,8 @@ pub fn valid(effects: &[Effect]) -> bool {
 struct Key {
     frame: i32,
     effects: crate::shared::SharedVec<Effect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ease: Option<crate::animation::Curve>,
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -322,7 +324,14 @@ impl Band {
         let frame = frame as i32;
         match self.keys.binary_search_by_key(&frame, |key| key.frame) {
             Ok(index) => self.keys[index].effects = effects,
-            Err(index) => self.keys.insert(index, Key { frame, effects }),
+            Err(index) => self.keys.insert(
+                index,
+                Key {
+                    frame,
+                    effects,
+                    ease: None,
+                },
+            ),
         }
     }
 
@@ -337,6 +346,7 @@ impl Band {
             (None, Some(key)) | (Some(key), None) => key.effects.as_slice().into(),
             (Some(a), Some(b)) => {
                 let t = (frame - a.frame) as f32 / (b.frame - a.frame) as f32;
+                let t = a.ease.as_ref().map_or(t, |curve| curve.time(t));
                 if t == 0. {
                     return a.effects.as_slice().into();
                 }
@@ -366,6 +376,43 @@ impl Band {
     }
 }
 
+pub(crate) fn timing_segment(
+    layer: &crate::document::Layer,
+    frame: usize,
+) -> Option<(usize, usize, usize, Option<&crate::animation::Curve>)> {
+    let (band, entry) = layer
+        .options
+        .adjustment_bands
+        .as_ref()?
+        .iter()
+        .enumerate()
+        .find(|(_, band)| band.range(layer.frames.len()).contains(&frame))?;
+    let next = entry.keys.partition_point(|key| key.frame <= frame as i32);
+    let key = next.checked_sub(1)?;
+    let from = &entry.keys[key];
+    let to = entry.keys.get(next)?;
+    Some((
+        band,
+        key,
+        (to.frame - from.frame) as usize + 1,
+        from.ease.as_ref(),
+    ))
+}
+
+pub(crate) fn set_timing(
+    layer: &mut crate::document::Layer,
+    band: usize,
+    key: usize,
+    curve: crate::animation::Curve,
+) {
+    if let Some(bands) = &mut layer.options.adjustment_bands
+        && let Some(entry) = bands.get_mut(band)
+        && let Some(key) = entry.keys.get_mut(key)
+    {
+        key.ease = Some(curve);
+    }
+}
+
 pub(crate) fn valid_bands(layer: &crate::document::Layer) -> bool {
     layer.options.adjustment_bands.as_ref().is_none_or(|bands| {
         let Some(base) = &layer.options.adjustment else {
@@ -386,6 +433,7 @@ pub(crate) fn valid_bands(layer: &crate::document::Layer) -> bool {
                     && band.keys.iter().all(|key| {
                         (-1_000_000..=1_000_000).contains(&key.frame)
                             && valid(&key.effects)
+                            && key.ease.as_ref().is_none_or(crate::animation::Curve::valid)
                             && key.effects.len() == base.len()
                             && key
                                 .effects
@@ -502,6 +550,37 @@ fn smooth(x: f32) -> f32 {
     t * t * (3. - 2. * t)
 }
 
+pub(crate) fn gpu_filter(
+    pixels: &mut [u8],
+    w: u32,
+    h: u32,
+    kind: u32,
+    mask: Option<&[u8]>,
+    values: &[f32],
+    color: [u8; 3],
+) -> bool {
+    if pixels.len() < 256 * 256 * 4 || !crate::gpu_lens::available_on_worker() {
+        return false;
+    }
+    let mut config = [0u32; 48];
+    config[..7].copy_from_slice(&[w, h, 0, 0, w, h, kind]);
+    for (i, v) in values.iter().enumerate() {
+        config[16 + i] = v.to_bits();
+    }
+    for (i, v) in color.into_iter().enumerate() {
+        config[28 + i] = (f32::from(v) / 255.).to_bits();
+    }
+    crate::gpu_lens::light_on_worker(
+        pixels,
+        &crate::gpu_light::LightDispatch {
+            config,
+            surface: None,
+            mask,
+            gobo: None,
+        },
+    )
+}
+
 // Retain one adjustment input and its recent prefixes. Comparing exact bytes
 // keeps reuse valid across edits, undo, animated layers and preview resolutions.
 #[derive(Default)]
@@ -526,7 +605,7 @@ impl EffectCache {
         if bytes == 0
             || bytes > LIMIT / 2
             || !effects.iter().any(|e| {
-                e.enabled
+                has_pixel_effect(e)
                     && matches!(
                         e.kind,
                         Kind::Gaussian | Kind::Lens | Kind::Glow | Kind::Sharpen
@@ -555,14 +634,15 @@ impl EffectCache {
             *end
         });
         for (index, effect) in effects.iter().enumerate().skip(start) {
-            apply(pixels, w, h, std::slice::from_ref(effect), scale);
-            if effect.enabled {
-                let capacity = (LIMIT / bytes).saturating_sub(1).min(4);
-                while self.prefixes.len() >= capacity {
-                    self.prefixes.pop_front();
-                }
-                self.prefixes.push_back((index + 1, pixels.clone()));
+            if !has_pixel_effect(effect) {
+                continue;
             }
+            apply(pixels, w, h, std::slice::from_ref(effect), scale);
+            let capacity = (LIMIT / bytes).saturating_sub(1).min(4);
+            while self.prefixes.len() >= capacity {
+                self.prefixes.pop_front();
+            }
+            self.prefixes.push_back((index + 1, pixels.clone()));
         }
         self.effects.clear();
         self.effects.extend_from_slice(effects);
@@ -636,6 +716,20 @@ fn apply_new_effect(pixels: &mut Vec<u8>, w: u32, h: u32, effect: &Effect, scale
     });
     let matte = blurred.as_deref().unwrap_or(&source);
     let opacity = c.clamp(0., 1.);
+    if effect.kind == Kind::InnerShadow {
+        let delta = direction * distance;
+        if gpu_filter(
+            pixels,
+            w,
+            h,
+            10,
+            Some(matte),
+            &[delta.x, delta.y, opacity],
+            effect.color,
+        ) {
+            return true;
+        }
+    }
     let outline_distance = (effect.kind == Kind::Outline).then(|| {
         let inverse_coverage: Vec<_> = source
             .chunks_exact(4)
@@ -703,9 +797,168 @@ fn apply_new_effect(pixels: &mut Vec<u8>, w: u32, h: u32, effect: &Effect, scale
     true
 }
 
+pub(crate) fn has_pixel_effect(effect: &Effect) -> bool {
+    let [a, _, c] = effect.values;
+    effect.enabled
+        && match effect.kind {
+            Kind::Glow => c > 0.,
+            Kind::Sharpen => a != 0.,
+            _ => true,
+        }
+}
+
+pub(crate) fn gpu_config(effect: &Effect, w: u32, h: u32, scale: f32) -> Option<Vec<u32>> {
+    let kind = match effect.kind {
+        Kind::Hue => 0,
+        Kind::Levels | Kind::Curves => 1,
+        Kind::Vignette => 2,
+        Kind::Harmony => 3,
+        Kind::Exposure => 4,
+        Kind::Posterize => 5,
+        Kind::Grain => 6,
+        Kind::DirectionalBlur => 7,
+        Kind::RgbSplit => 8,
+        _ => return None,
+    };
+    let [a, b, c] = effect.values;
+    let tint = effect.color.map(|v| f32::from(v) / 255.);
+    let mut config = vec![0u32; 16];
+    config[..4].copy_from_slice(&[w, h, kind, effect.grain_seed]);
+    let extra = match effect.kind {
+        Kind::Exposure => 2f32.powf(a),
+        Kind::DirectionalBlur | Kind::RgbSplit => (a * scale).clamp(0., 128.),
+        _ => scale,
+    };
+    for (i, v) in [a, b, c, extra, tint[0], tint[1], tint[2], luma(tint)]
+        .into_iter()
+        .enumerate()
+    {
+        config[4 + i] = v.to_bits();
+    }
+    if kind == 1 {
+        for channel in 0..4 {
+            config.extend((0..=1024).map(|i| {
+                let v = i as f32 / 1024.;
+                let value = if effect.kind == Kind::Curves && !effect.curves[channel].is_empty() {
+                    evaluate_curve(&effect.curves[channel], v)
+                } else {
+                    channel_value(effect.kind, v, effect.channels[channel])
+                };
+                value.to_bits()
+            }));
+        }
+    }
+    Some(config)
+}
+
+pub(crate) fn native_apply(
+    gpu: &crate::gpu_lens::GpuLens,
+    mut image: std::sync::Arc<crate::gpu_image::Image>,
+    effects: &[Effect],
+    scale: f32,
+) -> Option<std::sync::Arc<crate::gpu_image::Image>> {
+    for effect in effects.iter().filter(|e| has_pixel_effect(e)) {
+        let [a, b, c] = effect.values;
+        if let Some(config) = gpu_config(effect, image.width, image.height, scale) {
+            image = gpu.native_post(&image, &config, None)?;
+            continue;
+        }
+        let blur = |image: &std::sync::Arc<crate::gpu_image::Image>, radius: f32, lens: bool| {
+            let radius = (radius * scale).clamp(0., 128.);
+            if radius < 0.1 {
+                return Some(image.clone());
+            }
+            if lens {
+                let offsets: Vec<_> = (0..48)
+                    .map(|i| {
+                        let angle = i as f32 * 2.399963;
+                        let r = ((i as f32 + 0.5) / 48.).sqrt() * radius;
+                        (
+                            (angle.cos() * r).round() as i32,
+                            (angle.sin() * r).round() as i32,
+                        )
+                    })
+                    .collect();
+                gpu.native_lens(image, &offsets)
+            } else {
+                gpu.native_gaussian(image, (radius * 0.5).max(0.1))
+            }
+        };
+        image = match effect.kind {
+            Kind::Gaussian => blur(&image, a, false)?,
+            Kind::Lens => blur(&image, a, true)?,
+            Kind::Glow => {
+                let bright = gpu.native_filter(&image, 7, None, &[a], effect.color)?;
+                let glow = blur(&bright, b, false)?;
+                gpu.native_filter(&image, 8, Some(&glow), &[c.clamp(0., 2.)], effect.color)?
+            }
+            Kind::Sharpen => {
+                let blurred = blur(&image, b, false)?;
+                gpu.native_filter(&image, 9, Some(&blurred), &[a], effect.color)?
+            }
+            Kind::InnerShadow => {
+                let distance = (a * scale).clamp(0., 128.);
+                let softness = distance * 0.5;
+                let matte = if softness > 0.5 {
+                    gpu.native_blur(&image, softness, &crate::depth::Optics::default())?
+                } else {
+                    image.clone()
+                };
+                let delta = Vec2::angled(b.to_radians()) * distance;
+                gpu.native_filter(
+                    &image,
+                    10,
+                    Some(&matte),
+                    &[delta.x, delta.y, c.clamp(0., 1.)],
+                    effect.color,
+                )?
+            }
+            Kind::Outline => gpu.native_outline(
+                &image,
+                (a * scale).clamp(0., 128.),
+                (b * scale).clamp(1., 32.),
+                c.clamp(0., 1.),
+                effect.color,
+            )?,
+            _ => return None,
+        };
+    }
+    Some(image)
+}
+
 pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f32) {
+    let _span = crate::render_profile::span("post effects");
+    if pixels.len() < 256 * 256 * 4 || !crate::gpu_lens::available_on_worker() {
+        apply_cpu(pixels, w, h, effects, scale);
+        return;
+    }
+    let mut start = 0;
+    while start < effects.len() {
+        let mut end = start;
+        let mut configs = Vec::new();
+        while end < effects.len() && configs.len() < 64 {
+            let effect = &effects[end];
+            if has_pixel_effect(effect) {
+                let Some(config) = gpu_config(effect, w, h, scale) else {
+                    break;
+                };
+                configs.push(config);
+            }
+            end += 1;
+        }
+        if end == start {
+            end += 1;
+        }
+        if configs.is_empty() || !crate::gpu_lens::post_on_worker(pixels, &configs) {
+            apply_cpu(pixels, w, h, &effects[start..end], scale);
+        }
+        start = end;
+    }
+}
+
+pub(crate) fn apply_cpu(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f32) {
     // Stored in application order. The inspector displays the top effect first.
-    for effect in effects.iter().filter(|e| e.enabled) {
+    for effect in effects.iter().filter(|e| has_pixel_effect(e)) {
         let [a, b, c] = effect.values;
         let kind = effect.kind;
         if apply_new_effect(pixels, w, h, effect, scale) {
@@ -737,25 +990,35 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
             continue;
         }
         if kind == Kind::Glow {
-            if c <= 0. {
-                continue;
-            }
             let mut bright = pixels.clone();
-            for p in bright.chunks_exact_mut(4) {
-                let alpha = f32::from(p[3]).max(1.);
-                let strength = smooth(
-                    (luma([
-                        f32::from(p[0]) / alpha,
-                        f32::from(p[1]) / alpha,
-                        f32::from(p[2]) / alpha,
-                    ]) - a)
-                        / (1. - a).max(0.01),
-                );
-                for v in p {
-                    *v = (f32::from(*v) * strength).round() as u8;
+            if !gpu_filter(&mut bright, w, h, 7, None, &[a], effect.color) {
+                for p in bright.chunks_exact_mut(4) {
+                    let alpha = f32::from(p[3]).max(1.);
+                    let strength = smooth(
+                        (luma([
+                            f32::from(p[0]) / alpha,
+                            f32::from(p[1]) / alpha,
+                            f32::from(p[2]) / alpha,
+                        ]) - a)
+                            / (1. - a).max(0.01),
+                    );
+                    for v in p {
+                        *v = (f32::from(*v) * strength).round() as u8;
+                    }
                 }
             }
             let glow = blur(bright, b, crate::depth::BlurMethod::Gaussian);
+            if gpu_filter(
+                pixels,
+                w,
+                h,
+                8,
+                Some(&glow),
+                &[c.clamp(0., 2.)],
+                effect.color,
+            ) {
+                continue;
+            }
             for (p, g) in pixels.chunks_exact_mut(4).zip(glow.chunks_exact(4)) {
                 let ga = f32::from(g[3]) * c.clamp(0., 2.);
                 let alpha = (f32::from(p[3]) + ga * (1. - f32::from(p[3]) / 255.)).min(255.);
@@ -768,9 +1031,6 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
             }
             continue;
         }
-        if kind == Kind::Sharpen && a == 0. {
-            continue;
-        }
         let exposure = if kind == Kind::Exposure {
             2f32.powf(a)
         } else {
@@ -779,6 +1039,11 @@ pub fn apply(pixels: &mut Vec<u8>, w: u32, h: u32, effects: &[Effect], scale: f3
         let tint_luma = luma(effect.color.map(|v| f32::from(v) / 255.));
         let blurred = (kind == Kind::Sharpen)
             .then(|| blur(pixels.clone(), b, crate::depth::BlurMethod::Gaussian));
+        if let Some(blurred) = &blurred
+            && gpu_filter(pixels, w, h, 9, Some(blurred), &[a], effect.color)
+        {
+            continue;
+        }
         let tint = effect.color.map(|v| f32::from(v) / 255.);
         let curves: [Option<Vec<f32>>; 4] = std::array::from_fn(|channel| {
             let nodes = &effect.curves[channel];
@@ -1179,12 +1444,28 @@ impl StackEdit {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Preset {
+    name: String,
+    effects: crate::shared::SharedVec<Effect>,
+}
+
+impl Preset {
+    pub(crate) fn valid(&self) -> bool {
+        !self.name.trim().is_empty()
+            && self.name.chars().count() <= 48
+            && !self.effects.is_empty()
+            && valid(&self.effects)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct State {
     pub hidden: bool,
     pub hide_lights: bool,
     pub solo_light: bool,
     pub preset_name: String,
+    effect_preset_name: String,
     selected: usize,
     channel: usize,
     transaction: bool,
@@ -1471,6 +1752,92 @@ impl Editor {
         self.doc.layers.get(self.layer).is_some_and(is_adjustment)
     }
 
+    fn effect_presets_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        current: &crate::shared::SharedVec<Effect>,
+    ) -> bool {
+        let mut apply = None;
+        let mut changed = false;
+        egui::CollapsingHeader::new(tr("FX presets")).show(ui, |ui| {
+            let presets = &mut self.studio.prefs.effect_presets;
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.post.effect_preset_name)
+                        .desired_width(130.)
+                        .char_limit(48)
+                        .hint_text(tr("Preset name")),
+                );
+                let name = self.post.effect_preset_name.trim();
+                if button(
+                    ui,
+                    Icon::Save,
+                    "",
+                    "Guardar",
+                    false,
+                    !name.is_empty() && !current.is_empty() && presets.len() < 64,
+                )
+                .clicked()
+                {
+                    presets.push(Preset {
+                        name: name.to_owned(),
+                        effects: current.clone(),
+                    });
+                    self.post.effect_preset_name.clear();
+                    changed = true;
+                }
+            });
+            let can_apply = self.doc.layers.len() < 100 && self.feature.symbol_stack.is_empty();
+            let mut remove = None;
+            egui::ScrollArea::vertical()
+                .id_salt("effect-preset-list")
+                .max_height(160.)
+                .show(ui, |ui| {
+                    for (index, preset) in presets.iter().enumerate() {
+                        ui.push_id(index, |ui| {
+                            ui.horizontal(|ui| {
+                                if button(
+                                    ui,
+                                    Icon::Fx,
+                                    &preset.name,
+                                    "New adjustment layer",
+                                    false,
+                                    can_apply,
+                                )
+                                .clicked()
+                                {
+                                    apply = Some(preset.clone());
+                                }
+                                if button(ui, Icon::Trash, "", "Eliminar", false, true).clicked() {
+                                    remove = Some(index);
+                                }
+                            })
+                        });
+                    }
+                });
+            if let Some(index) = remove {
+                presets.remove(index);
+                changed = true;
+            }
+            changed |=
+                crate::preset_file::exchange(ui, presets, "ltfx", Preset::valid, &mut self.status);
+        });
+        if changed && let Err(error) = self.studio.save() {
+            self.status = error;
+        }
+        if let Some(preset) = apply {
+            self.add_layer_advanced(false);
+            let layer = &mut self.doc.layers[self.layer];
+            layer.name = preset.name;
+            layer.options.adjustment = Some(preset.effects);
+            self.post.selected = 0;
+            self.recover();
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn adjustment_properties(&mut self, ui: &mut egui::Ui) {
         let layer = self.layer;
         let frame = self.frame;
@@ -1584,6 +1951,9 @@ impl Editor {
             }
         });
         ui.separator();
+        if self.effect_presets_ui(ui, &before) {
+            return;
+        }
         ui.add_enabled_ui(!locked, |ui| {
             ui.horizontal(|ui| {
                 let add = button(ui, Icon::Plus, "", "Add effect", false, effects.len() < 16);
@@ -1757,6 +2127,188 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a GPU; all post-processing effects without intermediate readback"]
+    fn gpu_native_effects_match_the_reference() {
+        use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = GpuLens::new(device, queue);
+        let (w, h) = (319, 237);
+        let source: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (35..280).contains(&(i % w)) && (28..210).contains(&(i / w)) {
+                    [45, 76, 120, 180]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        let image = crate::gpu_image::Image::upload(&gpu.device, w, h, &source);
+        for kind in Kind::ALL {
+            let mut effect = Effect::new(kind);
+            if kind == Kind::Glow {
+                effect.values = [0.2, 18., 0.7];
+            }
+            if kind == Kind::Hue {
+                effect.values = [-60., 0.3, 0.1];
+            }
+            if kind == Kind::Exposure {
+                effect.values = [0.3, 0.2, 0.];
+            }
+            effect.grain_seed = 123456;
+            use_on_worker(None);
+            let mut expected = source.clone();
+            apply_cpu(&mut expected, w, h, std::slice::from_ref(&effect), 1.);
+            let actual = crate::gpu_image::checked_scope(&gpu.device, || {
+                native_apply(&gpu, image.clone(), std::slice::from_ref(&effect), 1.)?
+                    .read(&gpu.device, &gpu.queue)
+            })
+            .expect("resident effect completes");
+            let max = expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            let rms = (expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)).powi(2))
+                .sum::<f64>()
+                / expected.len() as f64)
+                .sqrt();
+            eprintln!("resident {kind:?}: max {max}, RMS {rms}");
+            assert!(max <= 3 && rms < 0.3, "{kind:?}: image parity");
+        }
+    }
+    #[test]
+    #[ignore = "requires a GPU; complete spatial effects against the CPU renderer"]
+    fn gpu_spatial_effects_match_cpu() {
+        use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
+        let (w, h) = (320, 240);
+        let source: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (40..280).contains(&(i % w)) && (30..210).contains(&(i / w)) {
+                    [45, 76, 120, 180]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        for kind in [
+            Kind::Gaussian,
+            Kind::Lens,
+            Kind::Glow,
+            Kind::Sharpen,
+            Kind::InnerShadow,
+        ] {
+            let effect = Effect::new(kind);
+            let mut expected = source.clone();
+            let mut actual = source.clone();
+            use_on_worker(None);
+            apply(&mut expected, w, h, std::slice::from_ref(&effect), 1.);
+            use_on_worker(Some(gpu.clone()));
+            apply(&mut actual, w, h, std::slice::from_ref(&effect), 1.);
+            use_on_worker(None);
+            let max = expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            let rms = (expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)).powi(2))
+                .sum::<f64>()
+                / expected.len() as f64)
+                .sqrt();
+            eprintln!("{kind:?}: max {max}, RMS {rms}");
+            assert!(max <= 2 && rms < 0.25, "{kind:?} parity");
+        }
+    }
+    #[test]
+    #[ignore = "requires a compute GPU; post-processing image parity and timings"]
+    fn gpu_post_chain_matches_cpu() {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter =
+            crate::gpu_lens::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            crate::gpu_lens::block_on(adapter.request_device(&Default::default())).unwrap();
+        let gpu = crate::gpu_post::GpuPost::new(device, queue).expect("post shader must compile");
+        let (w, h) = (320, 240);
+        let source: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let alpha = (i % 256) as u8;
+                [
+                    ((i * 17) % u32::from(alpha).max(1)) as u8,
+                    ((i * 29) % u32::from(alpha).max(1)) as u8,
+                    ((i * 7) % u32::from(alpha).max(1)) as u8,
+                    alpha,
+                ]
+            })
+            .collect();
+        let mut all = Vec::new();
+        for kind in [
+            Kind::Hue,
+            Kind::Levels,
+            Kind::Curves,
+            Kind::Vignette,
+            Kind::Harmony,
+            Kind::Exposure,
+            Kind::Posterize,
+            Kind::Grain,
+            Kind::DirectionalBlur,
+            Kind::RgbSplit,
+        ] {
+            let mut effect = Effect::new(kind);
+            match kind {
+                Kind::Hue => effect.values = [-135., 0.3, -0.12],
+                Kind::Exposure => effect.values = [0.3, 0.2, 0.],
+                Kind::Levels => effect.channels[0] = [0.05, 0.9, 1.7, 0.03, 0.95],
+                Kind::Curves => effect.curves[0] = linear_nodes(&[0., 0.1, 0.65, 0.9, 1.]),
+                Kind::DirectionalBlur | Kind::RgbSplit => effect.values[1] = 37.,
+                _ => {}
+            }
+            let mut cpu = source.clone();
+            let mut actual = source.clone();
+            apply_cpu(&mut cpu, w, h, std::slice::from_ref(&effect), 1.);
+            assert!(gpu.apply(&mut actual, &[gpu_config(&effect, w, h, 1.).unwrap()]));
+            let max = cpu
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            let changed = cpu.iter().zip(&actual).filter(|(a, b)| a != b).count();
+            eprintln!("{kind:?}: max {max}/255; {changed} changed channels");
+            assert!(max <= 1, "{kind:?}: maximum difference {max}");
+            all.push(effect);
+        }
+        let mut expected = source.clone();
+        apply_cpu(&mut expected, w, h, &all, 1.);
+        let mut actual = source.clone();
+        let configs: Vec<_> = all
+            .iter()
+            .map(|e| gpu_config(e, w, h, 1.).unwrap())
+            .collect();
+        assert!(gpu.apply(&mut actual, &configs));
+        let rms = (expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| f64::from(a.abs_diff(*b)).powi(2))
+            .sum::<f64>()
+            / expected.len() as f64)
+            .sqrt();
+        assert!(rms < 0.5, "chain RMS {rms}");
+        eprintln!("{}: chain RMS {rms}/255", adapter.get_info().name);
+    }
 
     #[test]
     fn outline_targets_artwork_over_an_opaque_background() {
@@ -1969,6 +2521,43 @@ mod tests {
         let bands = bands_for(&editor.doc.layers[0]);
         assert_eq!(bands[0].range(24), 4..9);
         assert_eq!(bands[0].keys[0].frame, 6);
+    }
+
+    #[test]
+    fn adjustment_easing_uses_the_outgoing_key_curve_and_roundtrips() {
+        let mut band = Band::default();
+        let mut first = Effect::new(Kind::Glow);
+        let mut last = first.clone();
+        first.values[2] = 0.;
+        last.values[2] = 1.;
+        band.set_key(0, vec![first].into());
+        band.set_key(20, vec![last].into());
+        assert_eq!(band.evaluate(&[], 10)[0].values[2], 0.5);
+        band.keys[0].ease = Some(crate::animation::Curve {
+            pace: [0., 0.6],
+            ..Default::default()
+        });
+        assert!(band.evaluate(&[], 10)[0].values[2] < 0.4);
+        let reopened: Band = serde_json::from_slice(&serde_json::to_vec(&band).unwrap()).unwrap();
+        assert_eq!(
+            reopened.evaluate(&[], 10)[0].values[2],
+            band.evaluate(&[], 10)[0].values[2]
+        );
+    }
+
+    #[test]
+    fn zero_strength_adjustments_skip_image_cache_without_changing_pixels() {
+        let pixels = vec![17, 29, 57, 128, 0, 0, 0, 0];
+        let mut rendered = pixels.clone();
+        let mut glow = Effect::new(Kind::Glow);
+        glow.values[2] = 0.;
+        let mut sharpen = Effect::new(Kind::Sharpen);
+        sharpen.values[0] = 0.;
+        let mut cache = EffectCache::default();
+        cache.apply(&mut rendered, 2, 1, &[glow, sharpen], 1.);
+        assert_eq!(rendered, pixels);
+        assert!(cache.input.is_empty());
+        assert!(cache.prefixes.is_empty());
     }
 
     #[test]

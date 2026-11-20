@@ -172,7 +172,9 @@ pub struct Preferences {
     pub(crate) viewport_quality: crate::depth::ViewportQuality,
     pub saving: crate::project_save::Options,
     pub raster_brush: crate::raster::Brush,
+    pub(crate) raster_presets: Vec<crate::raster::NamedBrush>,
     pub(crate) light_presets: Vec<crate::light::Preset>,
+    pub(crate) effect_presets: Vec<crate::post::Preset>,
     pub(crate) export_presets: Vec<crate::exporter::Preset>,
     pub(crate) favorite_colors: Vec<[u8; 4]>,
     pub(crate) color_preset: usize,
@@ -212,7 +214,9 @@ impl Default for Preferences {
             viewport_quality: Default::default(),
             saving: Default::default(),
             raster_brush: Default::default(),
+            raster_presets: Vec::new(),
             light_presets: Vec::new(),
+            effect_presets: Vec::new(),
             export_presets: Vec::new(),
             favorite_colors: Vec::new(),
             color_preset: 0,
@@ -234,6 +238,7 @@ pub struct Studio {
     pub credits_open: bool,
     pub(crate) palette: crate::palette::Panel,
     preference_category: usize,
+    preference_filter: String,
     pub stage_only: bool,
     pub(crate) layer_objects_open: bool,
     pub(crate) command_helper: bool,
@@ -252,6 +257,8 @@ pub struct Studio {
     pub tone_mode: usize,
     capture: Option<usize>,
     shortcut_filter: String,
+    pub(crate) command_search: Option<String>,
+    pub(crate) brush_preset_name: String,
     held: Option<Instant>,
     brush_menu: bool,
     pub brush: Tool,
@@ -301,12 +308,18 @@ impl Studio {
         }
         prefs.dpi = prefs.dpi.clamp(1., 2400.);
         prefs.view.normalize();
+        prefs.preview_cache_mib = prefs.preview_cache_mib.clamp(128, 1024);
+        prefs.light_presets.retain(crate::light::Preset::valid);
+        prefs.light_presets.truncate(64);
+        prefs.effect_presets.retain(crate::post::Preset::valid);
+        prefs.effect_presets.truncate(64);
         Self {
             prefs,
             preferences_open: false,
             credits_open: false,
             palette: Default::default(),
             preference_category: 0,
+            preference_filter: String::new(),
             stage_only: false,
             layer_objects_open: false,
             command_helper: false,
@@ -325,6 +338,8 @@ impl Studio {
             tone_mode: 0,
             capture: None,
             shortcut_filter: String::new(),
+            command_search: None,
+            brush_preset_name: String::new(),
             held: None,
             brush_menu: false,
             brush: Tool::Brush,
@@ -535,7 +550,11 @@ impl Editor {
         }
     }
     pub fn tool_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.studio.preferences_open || self.studio.export.is_some() {
+        if self.studio.preferences_open
+            || self.studio.command_search.is_some()
+            || self.studio.export.is_some()
+            || ctx.egui_wants_keyboard_input()
+        {
             return;
         }
         let found = TOOLS
@@ -1321,12 +1340,43 @@ impl Editor {
         let mut save = false;
         egui::Window::new(tr("Preferencias del programa…"))
             .id(egui::Id::unique("preferences")).open(&mut open).default_size([730.,620.])
+            .vscroll(true)
             .anchor(egui::Align2::CENTER_CENTER,Vec2::ZERO).show(ctx,|ui| {
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(Vec2::new(155.,560.),egui::Layout::top_down(egui::Align::Min),|ui|{
                         ui.add_space(8.);
-                        for (index,label,icon) in [(0,"Interfaz",crate::design::Icon::Settings),(1,"Atajos de teclado",crate::design::Icon::Node),(2,"Opciones de guardado",crate::design::Icon::Save),(3,"Layer colors",crate::design::Icon::Layers),(4,"Performance",crate::design::Icon::Zoom),(5,"Tablet diagnostics",crate::design::Icon::Pen)] {
-                            if crate::design::button(ui,icon,label,label,self.studio.preference_category==index,true).clicked(){self.studio.preference_category=index;self.studio.capture=None;}
+                        use crate::design::Icon;
+                        let search = ui.add(egui::TextEdit::singleline(&mut self.studio.preference_filter)
+                            .desired_width(145.)
+                            .hint_text(tr("Buscar herramienta o acción…")));
+                        let term = self.studio.preference_filter.to_lowercase();
+                        let categories = [
+                            ("Interfaz", Icon::Settings, &["Tema", "Idioma"][..]),
+                            ("Atajos de teclado", Icon::Node, &["Atajos de teclado"][..]),
+                            ("Opciones de guardado", Icon::Save, &["Autoguardado", "Autoguardado incremental", "Recovery file"][..]),
+                            ("Layer colors", Icon::Layers, &["Layer colors"][..]),
+                            ("Performance", Icon::Zoom, &["Preview cache memory", "Viewport quality", "Cached frames"][..]),
+                            ("Tablet diagnostics", Icon::Pen, &["Input source", "Pressure", "Eraser tip"][..]),
+                        ];
+                        let matches = |label: &str, terms: &[&str]| {
+                            std::iter::once(label).chain(terms.iter().copied()).any(|option|
+                                tr(option).to_lowercase().contains(&term) || option.to_lowercase().contains(&term))
+                        };
+                        let mut first = None;
+                        for (index, (label, icon, terms)) in categories.into_iter().enumerate() {
+                            if !matches(label, terms) {
+                                continue;
+                            }
+                            first.get_or_insert(index);
+                            if crate::design::button(ui, icon, label, label, self.studio.preference_category == index, true).clicked() {
+                                self.studio.preference_category = index;
+                                self.studio.capture = None;
+                            }
+                        }
+                        let (label, _, terms) = categories[self.studio.preference_category];
+                        if search.changed() && !matches(label, terms) && let Some(index) = first {
+                            self.studio.preference_category = index;
+                            self.studio.capture = None;
                         }
                     });
                     ui.separator();
@@ -1360,8 +1410,31 @@ impl Editor {
                                     }
                                 });
                             });
+                            ui.horizontal(|ui| {
+                                ui.label(tr("Viewport quality"));
+                                let quality = &mut self.studio.prefs.viewport_quality;
+                                egui::ComboBox::from_id_salt("preferences-viewport-quality")
+                                    .selected_text(tr(quality.label()))
+                                    .show_ui(ui, |ui| {
+                                        for option in crate::depth::ViewportQuality::ALL {
+                                            save |= ui.selectable_value(quality, option, tr(option.label())).changed();
+                                        }
+                                    });
+                            });
                             let (used, count) = self.depth.cache_usage();
                             ui.label(format!("{:.1} MiB · {} {}", used as f64 / 1048576., count, tr("Cached frames")));
+                            if let Some(passes) = self.depth.gpu_lighting_passes() {
+                                ui.label(format!("{} · {passes}", tr("GPU lighting passes")));
+                                if let Some(frames)=self.depth.gpu_composed_frames(){ui.label(format!("{} · {frames}",tr("GPU composed frames")));}
+                            } else {
+                                ui.label(tr("CPU lighting"));
+                            }
+                            if ui.button(tr("Restablecer")).clicked() {
+                                let defaults = Preferences::default();
+                                self.studio.prefs.preview_cache_mib = defaults.preview_cache_mib;
+                                self.studio.prefs.viewport_quality = defaults.viewport_quality;
+                                save = true;
+                            }
                         } else if self.studio.preference_category == 2 {
                             ui.heading(tr("Opciones de guardado"));
                             ui.add_space(12.);
@@ -1374,6 +1447,10 @@ impl Editor {
                             });
                             ui.label(tr("El intervalo se aplica al modo de autoguardado seleccionado."));
                             ui.label(tr("Incremental: guarda una nueva versión numerada y conserva las anteriores."));
+                            if ui.button(tr("Restablecer")).clicked() {
+                                *options = crate::project_save::Options::default();
+                                save = true;
+                            }
                         } else if self.studio.preference_category == 3 {
                             ui.heading(tr("Layer colors"));
                             ui.add_space(12.);
@@ -1526,7 +1603,7 @@ fn reserved(b: &Binding) -> bool {
         || b.key == "Escape"
         || b.key == "Delete"
         || (!b.ctrl && !b.shift && !b.alt && ["F8", "Comma", "Period"].contains(&b.key.as_str()))
-        || (b.ctrl && ["A", "C", "X", "V", "S", "D"].contains(&b.key.as_str()))
+        || (b.ctrl && ["A", "C", "X", "V", "S", "D", "K"].contains(&b.key.as_str()))
         || (!b.ctrl && !b.alt && !b.shift && ["X", "D"].contains(&b.key.as_str()))
 }
 pub fn tone(mut c: [u8; 4], strength: f32, light: bool, mode: usize) -> [u8; 4] {

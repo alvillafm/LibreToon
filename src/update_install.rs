@@ -241,7 +241,7 @@ fn overlay(payload: &Path, target: &Path, backup: &Path) -> Result<(), String> {
     fs::create_dir(backup).map_err(|e| e.to_string())?;
     let mut replaced = Vec::new();
     let result = (|| {
-        for rel in files {
+        for (index, rel) in files.into_iter().enumerate() {
             let destination = target.join(&rel);
             // Reject symlinks in the destination path too.
             for ancestor in destination.ancestors().take_while(|p| *p != target) {
@@ -252,6 +252,21 @@ fn overlay(payload: &Path, target: &Path, backup: &Path) -> Result<(), String> {
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
+            let staged = backup.join(format!(".staged-{}-{index}", std::process::id()));
+            let source = payload.join(&rel);
+            {
+                let mut input = fs::File::open(&source).map_err(|e| e.to_string())?;
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staged)
+                    .map_err(|e| e.to_string())?;
+                std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+                output.sync_all().map_err(|e| e.to_string())?;
+                output
+                    .set_permissions(input.metadata().map_err(|e| e.to_string())?.permissions())
+                    .map_err(|e| e.to_string())?;
+            }
             let saved = backup.join(&rel);
             let existed = destination.exists();
             if existed && !destination.is_file() {
@@ -261,10 +276,10 @@ fn overlay(payload: &Path, target: &Path, backup: &Path) -> Result<(), String> {
                 if let Some(parent) = saved.parent() {
                     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                fs::rename(&destination, &saved).map_err(|e| e.to_string())?;
+                move_update_file(&destination, &saved).map_err(|e| e.to_string())?;
             }
             replaced.push((destination.clone(), saved, existed));
-            fs::copy(payload.join(rel), &destination).map_err(|e| e.to_string())?;
+            move_update_file(&staged, &destination).map_err(|e| e.to_string())?;
         }
         Ok(())
     })();
@@ -278,7 +293,7 @@ fn overlay(payload: &Path, target: &Path, backup: &Path) -> Result<(), String> {
                 }
             }
             if existed {
-                if let Err(e) = fs::rename(&saved, &destination) {
+                if let Err(e) = move_update_file(&saved, &destination) {
                     rollback_errors.push(e.to_string());
                 }
             }
@@ -300,13 +315,29 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
+fn move_update_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // File scanners can briefly hold the old executable after the UI exits.
+        for delay_ms in [25, 50, 100, 200, 400, 800] {
+            match fs::rename(from, to) {
+                Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) => {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                }
+                result => return result,
+            }
+        }
+    }
+    fs::rename(from, to)
+}
+
 fn replace_path(source: &Path, target: &Path, backup: &Path) -> Result<(), String> {
     if backup.exists() {
         return Err("Preserving an existing update backup".into());
     }
-    fs::rename(target, backup).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(source, target) {
-        fs::rename(backup, target).map_err(|rollback| {
+    move_update_file(target, backup).map_err(|e| e.to_string())?;
+    if let Err(e) = move_update_file(source, target) {
+        move_update_file(backup, target).map_err(|rollback| {
             format!(
                 "{e}; restore failed: {rollback}; backup: {}",
                 backup.display()
@@ -362,8 +393,9 @@ fn unpack_windows(package: &Path, unpacked: &Path) -> Result<(), String> {
             fs::create_dir_all(target).map_err(|e| e.to_string())?;
             continue;
         }
+        let remaining = 2 * 1024 * 1024 * 1024usize - total;
         let data = archive
-            .entry_limited(&name, 512 * 1024 * 1024)?
+            .entry_limited(&name, remaining.min(512 * 1024 * 1024))?
             .ok_or("Missing ZIP entry")?;
         total = total
             .checked_add(data.len())
@@ -997,6 +1029,28 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn failed_portable_overlay_restores_files_already_replaced() {
+        let root = test_dir("overlay-rollback");
+        fs::create_dir_all(root.join("payload")).unwrap();
+        fs::create_dir_all(root.join("target/z-conflict")).unwrap();
+        fs::write(root.join("payload/libretoon.exe"), "new").unwrap();
+        fs::write(root.join("payload/z-conflict"), "invalid").unwrap();
+        fs::write(root.join("target/libretoon.exe"), "old").unwrap();
+        let result = overlay(
+            &root.join("payload"),
+            &root.join("target"),
+            &root.join("backup"),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("target/libretoon.exe")).unwrap(),
+            "old"
+        );
+        assert!(root.join("target/z-conflict").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn development_copy_is_not_a_portable_install() {
         assert!(

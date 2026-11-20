@@ -606,6 +606,19 @@ impl Editor {
                     });
                     top_menu(ui, "Vista", |ui| self.view_menu(ui));
                     top_menu(ui, "Herramientas", |ui| {
+                        if button(
+                            ui,
+                            Icon::CommandHelper,
+                            "Find a command…",
+                            "",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.studio.command_search = Some(String::new());
+                            ui.close();
+                        }
                         if button(ui, Icon::Reference, "RefTool", "RefTool", false, true).clicked()
                         {
                             self.new_reference_window();
@@ -683,6 +696,9 @@ impl Editor {
                 });
             });
         self.document_tabs(ui);
+        if !self.hub.home {
+            self.hub.cancel_preview();
+        }
         if self.hub.home {
             self.home_ui(ui);
             self.document_settings_ui(&ctx);
@@ -1066,6 +1082,8 @@ impl Editor {
         }
         self.document_settings_ui(&ctx);
         self.preferences_ui(&ctx);
+        self.command_search_ui(&ctx);
+        self.animation_graph_ui(&ctx);
         self.scenes_ui(&ctx);
         self.frame_picker_ui(&ctx);
         self.export_ui(&ctx);

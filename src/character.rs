@@ -116,6 +116,26 @@ pub(crate) const VIEWS: [&str; 8] = [
     "Front ¾ L",
 ];
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct AngleDriver {
+    bone: u64,
+    angles: [f32; 2],
+}
+
+impl AngleDriver {
+    fn position(self, rig: &rig::Rig, frame: usize) -> Option<f32> {
+        let bone = rig.bones.iter().find(|bone| bone.id == self.bone)?;
+        let angle = rig::bone_value(bone, frame).angle.to_degrees();
+        let [start, end] = self.angles;
+        let span = end - start;
+        Some(if span.abs() <= 0.001 {
+            0.
+        } else {
+            ((angle - start) / span).clamp(0., 1.)
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Piece {
     pub track: u64,
@@ -160,6 +180,8 @@ pub(crate) struct Piece {
     tween_hand_poses: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     renamed_bone: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    angle_driver: Option<AngleDriver>,
 }
 
 fn opposite_view(view: usize) -> usize {
@@ -449,6 +471,13 @@ impl Piece {
 
     pub(crate) fn valid(&self) -> bool {
         self.track != 0
+            && self.angle_driver.is_none_or(|driver| {
+                driver.bone != 0
+                    && driver
+                        .angles
+                        .into_iter()
+                        .all(|angle| (-360. ..=360.).contains(&angle))
+            })
             && self.lip_poses.len() <= 128
             && self.lip_poses.iter().all(|pose| pose.valid())
             && self.lip_tweens.len() == self.lip_poses.len()
@@ -518,6 +547,9 @@ impl Piece {
         self.eye_mask = self.eye_mask.map(&mut track);
         self.eye_parent = self.eye_parent.map(&mut track);
         self.renamed_bone = self.renamed_bone.map(&mut bone);
+        if let Some(driver) = &mut self.angle_driver {
+            driver.bone = bone(driver.bone);
+        }
         self.track = track(self.track);
         for (id, _) in self.joints.iter_mut().flatten() {
             *id = bone(*id);
@@ -898,7 +930,13 @@ fn lip_drawing(layer: &Layer, piece: &Piece, pose: usize, turn: f32) -> SharedVe
         .unwrap_or_default()
 }
 
-fn control_drawing(layer: &Layer, piece: &Piece, frame: usize, body_turn: f32) -> SharedVec<Mark> {
+fn control_drawing(
+    layer: &Layer,
+    piece: &Piece,
+    frame: usize,
+    body_turn: f32,
+    rig: Option<&rig::Rig>,
+) -> SharedVec<Mark> {
     let axes = piece.motion(frame);
     let count = piece.lip_poses.len();
     if count == 0 {
@@ -927,7 +965,12 @@ fn control_drawing(layer: &Layer, piece: &Piece, frame: usize, body_turn: f32) -
     if piece.face != FacePart::Slider {
         return lip_drawing(layer, piece, piece.variant(frame).min(count - 1), body_turn);
     }
-    let position = (axes[0] * 127.).clamp(0., (count - 1) as f32);
+    let position = rig
+        .and_then(|rig| piece.angle_driver?.position(rig, frame))
+        .map_or_else(
+            || (axes[0] * 127.).clamp(0., (count - 1) as f32),
+            |t| t * (count - 1) as f32,
+        );
     let mut left = None;
     let mut right = None;
     for pose in 0..count {
@@ -1010,7 +1053,7 @@ pub(crate) fn rigged_eye_artwork(
         };
         if piece.face.control() {
             output.extend(
-                control_drawing(layer, piece, frame, turn)
+                control_drawing(layer, piece, frame, turn, Some(rig))
                     .iter()
                     .map(|mark| crate::features::affine(mark, inverse)),
             );
@@ -2117,7 +2160,7 @@ impl Editor {
                     .saturating_sub(1)
                     .min(test.lip_poses.len().saturating_sub(1));
                 let marks = if test.face.control() {
-                    control_drawing(layer, &test, 0, turn)
+                    control_drawing(layer, &test, 0, turn, Some(&self.doc.extras.rig))
                 } else if test.is_lip() {
                     lip_drawing(layer, &test, pose, turn)
                 } else if test.face == FacePart::Eye {
@@ -2585,6 +2628,8 @@ impl Editor {
             .unwrap();
         let frame = self.group_rig_frame();
         let mut edit = None;
+        let mut driver_edit = None;
+        let rig = &self.doc.extras.rig;
         let icon = Icon::Puppet;
         for (row, layer) in self.doc.extras.symbols[symbol_index]
             .layers
@@ -2623,8 +2668,17 @@ impl Editor {
                     }
                     FacePart::Slider => {
                         let range = (piece.lip_poses.len() - 1).max(1) as f32;
-                        let mut value = (axes[0] * 127. / range).clamp(0., 1.);
-                        if rig_slider(ui, &mut value, piece.lip_poses.len(), "Rig pose").changed() {
+                        let driven = piece
+                            .angle_driver
+                            .and_then(|driver| driver.position(rig, frame));
+                        let mut value =
+                            driven.unwrap_or_else(|| (axes[0] * 127. / range).clamp(0., 1.));
+                        let response = ui
+                            .add_enabled_ui(driven.is_none(), |ui| {
+                                rig_slider(ui, &mut value, piece.lip_poses.len(), "Rig pose")
+                            })
+                            .inner;
+                        if response.changed() {
                             axes[0] = value * range / 127.;
                             edit = Some((row, None, axes));
                         }
@@ -2633,6 +2687,64 @@ impl Editor {
                                 [((value * range).round() as usize).min(piece.lip_poses.len() - 1)]
                             .name,
                         );
+                        if !rig.bones.is_empty() || piece.angle_driver.is_some() {
+                            ui.collapsing(tr("Bone driver"), |ui| {
+                                let mut driver = piece.angle_driver;
+                                egui::ComboBox::from_id_salt("corrective-bone")
+                                    .selected_text(
+                                        driver
+                                            .and_then(|driver| {
+                                                rig.bones.iter().find(|bone| bone.id == driver.bone)
+                                            })
+                                            .map_or(tr("Manual control"), |bone| {
+                                                bone.name.as_str()
+                                            }),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                driver.is_none(),
+                                                tr("Manual control"),
+                                            )
+                                            .clicked()
+                                        {
+                                            driver = None;
+                                        }
+                                        for bone in &rig.bones {
+                                            if ui
+                                                .selectable_label(
+                                                    driver.is_some_and(|driver| {
+                                                        driver.bone == bone.id
+                                                    }),
+                                                    &bone.name,
+                                                )
+                                                .clicked()
+                                            {
+                                                driver = Some(AngleDriver {
+                                                    bone: bone.id,
+                                                    angles: driver
+                                                        .map_or([0., 90.], |old| old.angles),
+                                                });
+                                            }
+                                        }
+                                    });
+                                if let Some(driver) = &mut driver {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for (label, angle) in [("Start", 0), ("End", 1)] {
+                                            ui.label(tr(label));
+                                            ui.add(
+                                                egui::DragValue::new(&mut driver.angles[angle])
+                                                    .range(-360. ..=360.)
+                                                    .suffix("°"),
+                                            );
+                                        }
+                                    });
+                                }
+                                if driver != piece.angle_driver {
+                                    driver_edit = Some((row, driver));
+                                }
+                            });
+                        }
                     }
                     FacePart::Hand | FacePart::Switch => {
                         if piece.face == FacePart::Hand {
@@ -2697,6 +2809,24 @@ impl Editor {
         if active && !dragging {
             ui.data_mut(|data| data.remove::<bool>(gesture));
             self.recover();
+        }
+        if let Some((row, driver)) = driver_edit {
+            let selected = self.canvas.selected.clone();
+            if !active {
+                self.checkpoint();
+            }
+            self.canvas.selected = selected;
+            self.doc.extras.symbols[symbol_index].layers[row]
+                .options
+                .character_piece
+                .as_mut()
+                .unwrap()
+                .angle_driver = driver;
+            if dragging {
+                ui.data_mut(|data| data.insert_temp(gesture, true));
+            } else {
+                self.recover();
+            }
         }
     }
 
@@ -4211,6 +4341,7 @@ impl Editor {
                             wrist_origin: None,
                             tween_hand_poses: false,
                             renamed_bone: None,
+                            angle_driver: None,
                             pupil_area: Default::default(),
                             circular_pupil_areas: 0,
                             brow_points: Default::default(),
@@ -4961,6 +5092,7 @@ mod tests {
             wrist_origin: None,
             tween_hand_poses: false,
             renamed_bone: None,
+            angle_driver: None,
             pupil_area: Default::default(),
             circular_pupil_areas: 0,
             brow_points: Default::default(),
@@ -5189,11 +5321,46 @@ mod tests {
                 &controls,
                 controls.options.character_piece.as_ref().unwrap(),
                 5,
-                0.
+                0.,
+                None
             )[0]
             .points[0],
             [10., 0.]
         );
+
+        let driver = AngleDriver {
+            bone: 42,
+            angles: [0., 90.],
+        };
+        let mut rig = rig::Rig::default();
+        rig.bones.push(rig::Bone {
+            id: 42,
+            name: "Elbow".into(),
+            parent: None,
+            start: [0., 0.],
+            end: [10., 0.],
+            radius: 10.,
+            ik: false,
+            targets: Default::default(),
+            keys: vec![
+                rig::BoneKey::default(),
+                rig::BoneKey {
+                    frame: 10,
+                    angle: std::f32::consts::FRAC_PI_2,
+                    ..Default::default()
+                },
+            ]
+            .into(),
+        });
+        let piece = controls.options.character_piece.as_mut().unwrap();
+        piece.angle_driver = Some(driver);
+        let piece = controls.options.character_piece.as_ref().unwrap();
+        assert_eq!(
+            control_drawing(&controls, piece, 10, 0., Some(&rig))[0].points[0],
+            [30., 0.]
+        );
+        assert_eq!(driver.position(&rig, 5), Some(0.5));
+        assert_eq!(driver.position(&rig::Rig::default(), 5), None);
 
         let piece = controls.options.character_piece.as_mut().unwrap();
         piece.face = FacePart::Toggle;
@@ -5203,7 +5370,8 @@ mod tests {
                 &controls,
                 controls.options.character_piece.as_ref().unwrap(),
                 5,
-                0.
+                0.,
+                None
             )
             .is_empty()
         );
@@ -5221,7 +5389,8 @@ mod tests {
                 &controls,
                 controls.options.character_piece.as_ref().unwrap(),
                 5,
-                4.
+                4.,
+                None
             )[0]
             .points[0],
             [0., 0.]

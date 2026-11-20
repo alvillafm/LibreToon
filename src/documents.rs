@@ -96,9 +96,19 @@ struct PreviewFrames {
     size: [usize; 2],
     duration: f64,
 }
-fn preview_frames(path: &std::path::Path) -> Result<PreviewFrames, String> {
+fn preview_frames(
+    path: &std::path::Path,
+    canceled: impl Fn() -> bool,
+) -> Result<Option<PreviewFrames>, String> {
+    if canceled() {
+        return Ok(None);
+    }
     let doc = if path == std::path::Path::new(EXAMPLE_PREVIEW_KEY) {
         motion_tween_example()?
+    } else if path == std::path::Path::new(COMPOSITE_PREVIEW_KEY) {
+        composition_example()?
+    } else if let Some(project) = path.to_str().and_then(crate::examples::project) {
+        project?
     } else {
         read_project(path)?
     };
@@ -111,36 +121,42 @@ fn preview_frames(path: &std::path::Path) -> Result<PreviewFrames, String> {
         (doc.width as f32 * scale).round().max(1.) as usize,
         (doc.height as f32 * scale).round().max(1.) as usize,
     ];
-    let mut pixels: Vec<Vec<u8>> = (0..samples)
-        .map(|i| {
-            crate::exporter::raster(
-                &doc,
-                i * count / samples,
-                size[0] as u32,
-                size[1] as u32,
-                &ctx,
-                &mut cache,
-            )
-        })
-        .collect();
+    let mut pixels = Vec::with_capacity(samples);
+    for i in 0..samples {
+        if canceled() {
+            return Ok(None);
+        }
+        pixels.push(crate::exporter::raster(
+            &doc,
+            i * count / samples,
+            size[0] as u32,
+            size[1] as u32,
+            &ctx,
+            &mut cache,
+        ));
+    }
     if pixels.iter().all(|p| p == &pixels[0]) {
         pixels.truncate(1);
     }
-    Ok(PreviewFrames {
+    Ok(Some(PreviewFrames {
         pixels,
         size,
         duration: count as f64 / doc.fps as f64,
-    })
+    }))
 }
+
+type PreviewCancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+type PreviewResult = (PathBuf, Result<Option<PreviewFrames>, String>);
+
 pub struct Hub {
     pub home: bool,
     pub active: Option<usize>,
     pub tabs: Vec<Tab>,
     catalogue: Catalogue,
     previews: Vec<Preview>,
-    pending: Option<PathBuf>,
-    request: mpsc::SyncSender<PathBuf>,
-    response: mpsc::Receiver<(PathBuf, Result<PreviewFrames, String>)>,
+    pending: Option<PreviewCancel>,
+    request: mpsc::SyncSender<(PathBuf, PreviewCancel)>,
+    response: mpsc::Receiver<PreviewResult>,
     pub closing: Option<usize>,
     pub quitting: bool,
     pub allow_quit: bool,
@@ -150,6 +166,7 @@ pub struct Hub {
     live_cache: crate::paint::RenderCache,
     pub tab_extent: (f32, f32),
     pub tab_offset: f32,
+    recovery_error: Option<(PathBuf, String, Option<PathBuf>)>,
 }
 fn catalogue_path() -> PathBuf {
     #[cfg(test)]
@@ -173,13 +190,20 @@ fn catalogue_path() -> PathBuf {
 
 pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
     use std::io::Read;
+    const LIMIT: u64 = 256 * 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let declared = file.metadata().map_or(0, |metadata| metadata.len());
+    if declared > LIMIT {
+        return Err("El proyecto supera el límite de lectura de 256 MiB".into());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(256 * 1024 * 1024 + 1)
+    bytes
+        .try_reserve_exact(declared as usize)
+        .map_err(|e| e.to_string())?;
+    file.take(LIMIT + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > 256 * 1024 * 1024 {
+    if bytes.len() as u64 > LIMIT {
         return Err("El proyecto supera el límite de lectura de 256 MiB".into());
     }
     let json = bytes
@@ -235,11 +259,17 @@ impl Default for Hub {
                 }
             }
         }
-        let (tx, requests) = mpsc::sync_channel::<PathBuf>(1);
+        let (tx, requests) = mpsc::sync_channel::<(PathBuf, PreviewCancel)>(1);
         let (results, rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            while let Ok(path) = requests.recv() {
-                let doc = preview_frames(&path);
+            while let Ok((path, cancel)) = requests.recv() {
+                use std::sync::atomic::Ordering;
+                let doc = preview_frames(&path, || cancel.load(Ordering::Relaxed));
+                let doc = if cancel.load(Ordering::Relaxed) {
+                    Ok(None)
+                } else {
+                    doc
+                };
                 if results.send((path, doc)).is_err() {
                     break;
                 }
@@ -263,10 +293,17 @@ impl Default for Hub {
             live_cache: Default::default(),
             tab_extent: (0., 0.),
             tab_offset: 0.,
+            recovery_error: None,
         }
     }
 }
 impl Hub {
+    pub(crate) fn cancel_preview(&self) {
+        if let Some(cancel) = &self.pending {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub fn has_sessions(&self) -> bool {
         !self.catalogue.sessions.is_empty()
     }
@@ -394,9 +431,41 @@ impl Editor {
                 self.status = "Proyecto abierto".into();
             }
             Err(error) => {
-                self.status =
-                    crate::i18n::message("No se pudo recuperar el documento: {e}", &[("e", error)]);
+                self.hub.recovery_error =
+                    Some((recovery, error, self.hub.tabs[index].record.path.clone()));
             }
+        }
+    }
+
+    pub(crate) fn recovery_error_ui(&mut self, ctx: &egui::Context) {
+        use crate::i18n::tr;
+
+        let Some((recovery, error, saved)) = &self.hub.recovery_error else {
+            return;
+        };
+        let mut open_copy = false;
+        let response = egui::Modal::new(egui::Id::unique("recovery-error")).show(ctx, |ui| {
+            ui.set_max_width(500.);
+            ui.heading(tr("Recovery file"));
+            ui.label(recovery.display().to_string());
+            ui.label(crate::i18n::message(
+                "No se pudo recuperar el documento: {e}",
+                &[("e", error.clone())],
+            ));
+            if saved.is_some() {
+                open_copy = ui.button(tr("Abrir copia guardada…")).clicked();
+            }
+            if ui.button(tr("Cancelar")).clicked() {
+                ui.close();
+            }
+        });
+        if open_copy {
+            if let Some(path) = saved.clone() {
+                self.loader.request_saved_copy(path);
+            }
+            self.hub.recovery_error = None;
+        } else if response.should_close() {
+            self.hub.recovery_error = None;
         }
     }
 
@@ -593,10 +662,41 @@ impl Editor {
                                             ui,
                                             crate::design::Icon::Film,
                                             &label,
-                                            "Cambiar de documento",
+                                            "",
                                             active,
                                             true,
-                                        );
+                                        )
+                                        .on_hover_ui(|ui| {
+                                            use crate::i18n::tr;
+
+                                            ui.label(tab.record.path.as_ref().map_or_else(
+                                                || tr("Unsaved project").to_owned(),
+                                                |path| path.display().to_string(),
+                                            ));
+                                            ui.label(tr(if tab.record.dirty {
+                                                "Unsaved changes"
+                                            } else {
+                                                "No unsaved changes"
+                                            }));
+                                            if let Some(age) = tab
+                                                .record
+                                                .stamp
+                                                .and_then(crate::project_save::Stamp::age)
+                                            {
+                                                let elapsed = age.as_secs();
+                                                ui.label(format!(
+                                                    "{} · {:02}:{:02}:{:02}",
+                                                    tr("Time since last disk save"),
+                                                    elapsed / 3600,
+                                                    elapsed / 60 % 60,
+                                                    elapsed % 60
+                                                ));
+                                            }
+                                            if tab.record.recovery.is_file() {
+                                                ui.label(tr("Recovery file"));
+                                                ui.label(tab.record.recovery.display().to_string());
+                                            }
+                                        });
                                         if r.clicked() {
                                             activate = Some(i);
                                         }
@@ -710,6 +810,11 @@ impl Editor {
     pub fn home_ui(&mut self, ui: &mut egui::Ui) {
         while let Ok((path, doc)) = self.hub.response.try_recv() {
             self.hub.pending = None;
+            let doc = match doc {
+                Ok(None) => continue,
+                Ok(Some(frames)) => Ok(frames),
+                Err(error) => Err(error),
+            };
             if self.hub.previews.len() >= 96 {
                 self.hub.previews.remove(0);
             }
@@ -758,19 +863,25 @@ impl Editor {
                 .collect();
             let seconds = self.hub.preview_clock.elapsed().as_secs_f64();
             let width = (ui.available_width() / 4. - 10.).clamp(175., 264.);
-            let mut open_example = false;
+            let mut open_example = None;
             let mut selected_tab = None;
             let mut open_path = None;
+            let mut locate = None;
+            let mut reveal = None;
             self.hub.live_cache.begin_frame();
             egui::ScrollArea::vertical().id_salt("home-sections").show(ui, |ui| {
                 ui.add_space(12.);
                 crate::design::category(ui, "EJEMPLOS");
                 gallery_row(ui, "examples", |ui| {
-                    let (preview, response) = gallery_card(ui, EXAMPLE_TITLE, width);
-                    if preview.intersects(ui.clip_rect()) {
-                        self.hub.paint_file_preview(ui, preview, std::path::Path::new(EXAMPLE_PREVIEW_KEY), seconds);
+                    for (title, key) in [(EXAMPLE_TITLE, EXAMPLE_PREVIEW_KEY), (COMPOSITE_TITLE, COMPOSITE_PREVIEW_KEY)].into_iter().chain(crate::examples::PROJECTS) {
+                        let (preview, response) = gallery_card(ui, title, width);
+                        if preview.intersects(ui.clip_rect()) {
+                            self.hub.paint_file_preview(ui, preview, std::path::Path::new(key), seconds);
+                        }
+                        if response.on_hover_text(crate::i18n::tr("Open a copy of the example")).clicked() {
+                            open_example = Some((title, key));
+                        }
                     }
-                    open_example = response.on_hover_text(crate::i18n::tr("Open a copy of the example")).clicked();
                 });
                 ui.add_space(12.);
                 crate::design::category(ui, "EN CURSO");
@@ -820,15 +931,46 @@ impl Editor {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let (preview, response) = gallery_card(ui, &name, width);
                         if preview.intersects(ui.clip_rect()) { self.hub.paint_file_preview(ui, preview, path, seconds); }
-                        if response.on_hover_text(path.display().to_string()).clicked() { open_path = Some(path.clone()); }
+                        let response = response.on_hover_ui(|ui| {
+                            ui.label(path.display().to_string());
+                            if let Some(Err(error)) = self.hub.previews.iter().find(|preview| preview.path == *path).map(|preview| &preview.frames) {
+                                ui.weak(error);
+                            }
+                        });
+                        if response.clicked() { open_path = Some(path.clone()); }
+                        response.context_menu(|ui| {
+                            use crate::design::{Icon, button};
+                            if button(ui, Icon::Open, "Locate project…", "", false, true).clicked() {
+                                locate = Some(path.clone());
+                                ui.close();
+                            }
+                            if button(ui, Icon::Folder, "Open file location", "", false, true).clicked() {
+                                reveal = Some(path.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 });
             });
-            if open_example {
-                match motion_tween_example() {
+            if let Some(path) = locate {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("LibreToon / Adobe Animate", &["ltoon", "fla", "json"]);
+                if let Some(parent) = path.parent().filter(|parent| parent.is_dir()) {
+                    dialog = dialog.set_directory(parent);
+                }
+                open_path = dialog.pick_file();
+            }
+            if let Some(path) = reveal
+                && let Err(error) = open_project_location(&path)
+            {
+                self.status = error.to_string();
+            }
+            if let Some((title, key)) = open_example {
+                let document = if key == EXAMPLE_PREVIEW_KEY { motion_tween_example() } else if key == COMPOSITE_PREVIEW_KEY { composition_example() } else { crate::examples::project(key).unwrap() };
+                match document {
                     Ok(doc) => {
                         self.add_document(doc, None);
-                        if let Some(index) = self.hub.active { self.hub.tabs[index].record.name = EXAMPLE_TITLE.into(); }
+                        if let Some(index) = self.hub.active { self.hub.tabs[index].record.name = title.into(); }
                     }
                     Err(error) => self.status = error,
                 }
@@ -846,6 +988,8 @@ impl Editor {
 
 const EXAMPLE_TITLE: &str = "Motion Tween Example";
 const EXAMPLE_PREVIEW_KEY: &str = ":builtin-motion-tween-example";
+const COMPOSITE_TITLE: &str = "Night Train";
+const COMPOSITE_PREVIEW_KEY: &str = ":builtin-night-train";
 
 impl Hub {
     fn paint_file_preview(
@@ -876,14 +1020,46 @@ impl Hub {
                 crate::design::Icon::Film,
                 crate::themes::muted(),
             );
-            if item.is_none()
-                && self.pending.is_none()
-                && self.request.try_send(path.to_owned()).is_ok()
-            {
-                self.pending = Some(path.to_owned());
+            if item.is_none() && self.pending.is_none() {
+                let cancel = PreviewCancel::default();
+                if self
+                    .request
+                    .try_send((path.to_owned(), cancel.clone()))
+                    .is_ok()
+                {
+                    self.pending = Some(cancel);
+                }
             }
         }
     }
+}
+
+fn open_project_location(path: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Command;
+
+    let folder = path
+        .ancestors()
+        .skip(1)
+        .find(|parent| parent.is_dir())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Project location is unavailable",
+            )
+        })?;
+    let mut command = if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        Command::new(PathBuf::from(root).join("explorer.exe"))
+    } else if cfg!(target_os = "macos") {
+        Command::new("/usr/bin/open")
+    } else {
+        Command::new("xdg-open")
+    };
+    let mut child = command.arg(folder).spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn fit_thumbnail(rect: Rect, size: Vec2) -> Rect {
@@ -957,6 +1133,198 @@ fn motion_tween_example() -> Result<Document, String> {
     .ok_or_else(|| "Missing LibreToon example document".into())
 }
 
+fn composition_example() -> Result<Document, String> {
+    use crate::animation::{CameraAnimation, CameraKey, Curve};
+    use crate::{
+        Mark,
+        document::Layer,
+        features::{Camera, LayerOptions},
+        shared::SharedVec,
+    };
+
+    let mut doc = Document::default();
+    let count = 48;
+    doc.fps = 24;
+    let paint = |points: &[[f32; 2]], color| Mark {
+        points: points.to_vec().into(),
+        fill: Some(color),
+        stroke: false,
+        closed: true,
+        ..Default::default()
+    };
+    let rect = |left, top, right, bottom, color| {
+        paint(
+            &[[left, top], [right, top], [right, bottom], [left, bottom]],
+            color,
+        )
+    };
+    let circle = |x, y, radius, color| {
+        let points = (0..48)
+            .map(|i| {
+                let angle = std::f32::consts::TAU * i as f32 / 48.;
+                [x + radius * angle.cos(), y + radius * angle.sin()]
+            })
+            .collect::<Vec<_>>();
+        paint(&points, color)
+    };
+    let layer = |name: &str, marks: Vec<Mark>, options| {
+        let cel: SharedVec<Mark> = marks.into();
+        let mut layer = Layer {
+            name: name.into(),
+            visible: true,
+            frames: vec![cel; count].into(),
+            options,
+        };
+        layer.init_keys();
+        layer
+    };
+    let sky = vec![
+        rect(-120., -80., 1080., 620., [30, 36, 71, 255]),
+        circle(728., 152., 71., [255, 170, 137, 255]),
+    ];
+    let hills = vec![
+        paint(
+            &[
+                [-120., 416.],
+                [152., 185.],
+                [346., 310.],
+                [481., 228.],
+                [705., 337.],
+                [850., 266.],
+                [1080., 452.],
+                [1080., 640.],
+                [-120., 640.],
+            ],
+            [70, 67, 110, 255],
+        ),
+        paint(
+            &[
+                [-120., 488.],
+                [215., 326.],
+                [405., 382.],
+                [575., 322.],
+                [753., 412.],
+                [1080., 336.],
+                [1080., 640.],
+                [-120., 640.],
+            ],
+            [45, 49, 82, 255],
+        ),
+    ];
+    let mut train = vec![
+        rect(-120., 467., 1080., 640., [22, 26, 45, 255]),
+        rect(-120., 465., 1080., 470., [124, 111, 151, 255]),
+        paint(
+            &[
+                [240., 450.],
+                [240., 371.],
+                [267., 350.],
+                [652., 350.],
+                [697., 383.],
+                [697., 450.],
+            ],
+            [119, 57, 91, 255],
+        ),
+        rect(240., 428., 697., 442., [205, 101, 123, 255]),
+    ];
+    for x in [274., 350., 426., 502., 578.] {
+        train.push(rect(x, 373., x + 53., 414., [255, 201, 135, 255]));
+    }
+    for x in [302., 636.] {
+        train.push(circle(x, 447., 22., [23, 29, 48, 255]));
+        train.push(circle(x, 447., 9., [143, 120, 155, 255]));
+    }
+    let id = crate::features::id();
+    let mut light = crate::light::Light::new(doc.width, doc.height, crate::light::Kind::Rim);
+    light.receivers.push(crate::light::Receiver::Layer(id));
+    doc.layers = vec![
+        layer("Sky and moon", sky, LayerOptions::default()),
+        layer("Mountain silhouettes", hills, LayerOptions::default()),
+        layer(
+            "Train",
+            train,
+            LayerOptions {
+                light_receiver: Some(id),
+                ..Default::default()
+            },
+        ),
+        layer(
+            "Train rim light",
+            vec![],
+            LayerOptions {
+                light: Some(light),
+                ..Default::default()
+            },
+        ),
+        layer(
+            "Bloom",
+            vec![],
+            LayerOptions {
+                adjustment: Some(vec![crate::post::Effect::new(crate::post::Kind::Glow)].into()),
+                ..Default::default()
+            },
+        ),
+    ]
+    .into();
+    let from = CameraKey {
+        optics: None,
+        frame: 0,
+        center: [470., 267.],
+        zoom: 1.,
+        angle: 0.,
+    };
+    let to = CameraKey {
+        optics: None,
+        frame: count - 1,
+        center: [522., 296.],
+        zoom: 1.14,
+        angle: 0.,
+    };
+    doc.extras.cameras.push(Camera {
+        optics: Default::default(),
+        animation: CameraAnimation {
+            keys: vec![from.clone(), to].into(),
+            curve: Curve::default(),
+        },
+        id: crate::features::id(),
+        name: "Night train camera".into(),
+        start: 0,
+        duration: count,
+        center: from.center,
+        zoom: from.zoom,
+        angle: from.angle,
+    });
+    doc.validate()?;
+    Ok(doc)
+}
+
+#[cfg(test)]
+#[test]
+fn night_train_example_opens_with_an_animated_preview() {
+    assert!(
+        preview_frames(std::path::Path::new(":does-not-exist"), || true)
+            .unwrap()
+            .is_none()
+    );
+    let document = composition_example().unwrap();
+    assert!(
+        document
+            .layers
+            .iter()
+            .any(|layer| layer.options.light.is_some())
+    );
+    assert!(
+        document
+            .layers
+            .iter()
+            .any(|layer| layer.options.adjustment.is_some())
+    );
+    let preview = preview_frames(std::path::Path::new(COMPOSITE_PREVIEW_KEY), || false)
+        .unwrap()
+        .unwrap();
+    assert_ne!(preview.pixels.first(), preview.pixels.last());
+}
+
 #[cfg(test)]
 #[test]
 fn motion_tween_example_is_compact_and_retains_its_animation() {
@@ -975,7 +1343,9 @@ fn motion_tween_example_is_compact_and_retains_its_animation() {
 #[cfg(test)]
 #[test]
 fn gallery_example_has_a_valid_preview_and_widescreen_fills_its_card() {
-    let frames = preview_frames(std::path::Path::new(EXAMPLE_PREVIEW_KEY)).unwrap();
+    let frames = preview_frames(std::path::Path::new(EXAMPLE_PREVIEW_KEY), || false)
+        .unwrap()
+        .unwrap();
     assert!(frames.pixels.len() > 1);
     assert!(
         frames

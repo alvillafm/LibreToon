@@ -164,6 +164,7 @@ impl Prepared {
 }
 #[derive(Default)]
 pub struct RenderCache {
+    pub(crate) native_scene: crate::gpu_scene::Cache,
     pub(crate) lit_planes: crate::exporter::LitPlanes,
     pub(crate) post_fx: crate::post::EffectCache,
     entries: HashMap<Key, (Arc<Prepared>, u64)>,

@@ -1,3 +1,4 @@
+use crate::helper_process::BoundedOutput;
 use crate::{Editor, canvas::View, features::id, i18n::tr, shared::SharedVec};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use serde::{Deserialize, Serialize};
@@ -6,10 +7,43 @@ use std::{
     process::Command,
 };
 
-const ASSET_LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const ASSET_LIMIT: usize = 64 * 1024 * 1024;
 const LIBRARY_LIMIT: usize = 256 * 1024 * 1024;
 const DEMUXERS: &str =
     "mov,matroska,avi,mp3,wav,ogg,flac,aac,png_pipe,jpeg_pipe,bmp_pipe,tiff_pipe,webp_pipe,image2";
+fn read_media_file(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let length = file.metadata().map_or(0, |metadata| metadata.len());
+    if length > ASSET_LIMIT as u64 {
+        return Err("Media file exceeds 64 MiB".into());
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(length as usize)
+        .map_err(|error| error.to_string())?;
+    file.take(ASSET_LIMIT as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|error| error.to_string())?;
+    if data.len() > ASSET_LIMIT {
+        return Err("Media file exceeds 64 MiB".into());
+    }
+    Ok(data)
+}
+
+fn decode_media_image(
+    reader: impl std::io::BufRead + std::io::Seek,
+    side_limit: u32,
+) -> image::ImageResult<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(reader).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(side_limit);
+    limits.max_image_height = Some(side_limit);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode()
+}
+
 type StagedVideo = std::sync::Arc<MediaFile>;
 type VideoFrame = (u64, StagedVideo, image::RgbaImage);
 
@@ -278,7 +312,7 @@ pub(crate) fn imported_audio(data: Vec<u8>, name: String) -> Option<Asset> {
                 ])
                 .arg(&file.0)
                 .args(["-t", "0", "-f", "null", "-"])
-                .output()
+                .bounded_output(20, 0)
                 .ok()?;
             let details = String::from_utf8_lossy(&result.stderr);
             duration(&details)
@@ -368,10 +402,7 @@ impl Editor {
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
         {
-            let data = std::fs::read(path).map_err(|error| error.to_string())?;
-            if data.len() > ASSET_LIMIT {
-                return Err("Media file exceeds 64 MiB".into());
-            }
+            let data = read_media_file(path)?;
             if let Some(wave) = crate::lip::Wave::read(&data)
                 && wave.frames() > 0
             {
@@ -423,10 +454,14 @@ impl Editor {
             command
         };
         let asset = if kind == Kind::Image {
-            let decoded = image::open(path).or_else(|_| {
-                let result = ffmpeg().args(["-frames:v", "1", "-vf", "scale=w=min(iw\\,4096):h=min(ih\\,4096):force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]).output()
+            let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+            let decoded = decode_media_image(std::io::BufReader::new(file), 4096).or_else(|error| {
+                if matches!(error, image::ImageError::Limits(_)) {
+                    return Err(error);
+                }
+                let result = ffmpeg().args(["-frames:v", "1", "-vf", "scale=w=min(iw\\,4096):h=min(ih\\,4096):force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]).bounded_output(30, 72 * 1024 * 1024)
                     .map_err(image::ImageError::IoError)?;
-                image::load_from_memory(&result.stdout)
+                decode_media_image(std::io::Cursor::new(result.stdout), 4096)
             }).map_err(|error| format!("Cannot decode image. JPEG and WebP require FFmpeg: {error}"))?.to_rgba8();
             if decoded.width() > 4096 || decoded.height() > 4096 {
                 return Err("Image dimensions exceed 4096 pixels".into());
@@ -436,7 +471,7 @@ impl Editor {
         } else {
             let output = ffmpeg()
                 .args(["-t", "0", "-f", "null", "-"])
-                .output()
+                .bounded_output(20, 0)
                 .map_err(|e| format!("FFmpeg is required to import video and audio: {e}"))?;
             let details = String::from_utf8_lossy(&output.stderr);
             let stream = if kind == Kind::Video {
@@ -453,7 +488,7 @@ impl Editor {
                 folder: None,
                 raster_tile: false,
                 kind,
-                data: std::fs::read(path).map_err(|e| e.to_string())?.into(),
+                data: read_media_file(path)?.into(),
                 size: [0; 2],
                 seconds,
                 peaks: if kind == Kind::Audio {
@@ -462,7 +497,7 @@ impl Editor {
                             "-map", "0:a:0", "-t", "420", "-ac", "1", "-ar", "8000", "-f", "s16le",
                             "pipe:1",
                         ])
-                        .output()
+                        .bounded_output(60, 7 * 1024 * 1024)
                         .ok()
                         .filter(|output| output.status.success())
                         .map(|output| waveform(&output.stdout))
@@ -2102,7 +2137,7 @@ impl Editor {
                             "-map", "0:a:0", "-t", "420", "-ac", "1", "-ar", "8000", "-f", "s16le",
                             "pipe:1",
                         ])
-                        .output()
+                        .bounded_output(60, 7 * 1024 * 1024)
                         .ok()?;
                     output.status.success().then(|| waveform(&output.stdout))
                 })()
@@ -2296,12 +2331,16 @@ fn decode_video_file(
     }
     let output = command
         .args(["-f", "image2pipe", "-vcodec", "png", "pipe:1"])
-        .output()
+        .bounded_output(30, 256 * 1024 * 1024)
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    Some(image::load_from_memory(&output.stdout).ok()?.to_rgba8())
+    Some(
+        decode_media_image(std::io::Cursor::new(output.stdout), 8192)
+            .ok()?
+            .to_rgba8(),
+    )
 }
 
 pub(crate) struct MediaFile(std::path::PathBuf);
@@ -2367,7 +2406,7 @@ pub(crate) fn decode_lip_audio(
             "160001024",
         ])
         .arg(&output.0)
-        .output()
+        .bounded_output(120, 0)
         .map_err(|_| error)?;
     if !result.status.success() {
         return Err(error);
@@ -3103,7 +3142,7 @@ fn prepare_audio(
             "f32le",
         ])
         .arg(&output.0)
-        .output()
+        .bounded_output(180, 0)
         .map_err(|e| e.to_string())?;
     if !result.status.success() {
         return Err(format!(

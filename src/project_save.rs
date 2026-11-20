@@ -68,6 +68,12 @@ pub struct State {
     pub(crate) update_save: Option<Option<usize>>,
     pub(crate) quit_after_save: bool,
 }
+impl Stamp {
+    pub(crate) fn age(self) -> Option<Duration> {
+        self.modified.elapsed().ok()
+    }
+}
+
 impl State {
     pub(crate) fn conflicted(&self) -> bool {
         self.conflict.is_some()

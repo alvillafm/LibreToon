@@ -308,7 +308,8 @@ pub(crate) mod cels {
             return frames.serialize(serializer);
         }
         let mut indices = HashMap::new();
-        let mut unique = Vec::new();
+        let mut unique: Vec<&Cel> = Vec::new();
+        let mut candidates = HashMap::new();
         let mut exposures = Vec::with_capacity(frames.len());
         let mut previous: Option<(&Cel, usize)> = None;
         for frame in frames {
@@ -318,8 +319,36 @@ pub(crate) mod cels {
                 {
                     return index;
                 }
+                // Cheap structural fingerprint followed by exact comparison.
+                // Bound work even if many distinct drawings share a fingerprint.
+                let mark = |mark: &Mark| {
+                    let point = mark
+                        .points
+                        .first()
+                        .copied()
+                        .or_else(|| mark.nodes.first().map(|node| node.position));
+                    let coordinate = |value: f32| if value == 0. { 0 } else { value.to_bits() };
+                    (
+                        mark.points.len(),
+                        mark.nodes.len(),
+                        mark.color,
+                        point.map(|p| p.map(coordinate)),
+                    )
+                };
+                let fingerprint = (frame.len(), frame.first().map(mark), frame.last().map(mark));
+                let recent = candidates.entry(fingerprint).or_insert_with(|| [None; 4]);
+                if let Some(index) = recent
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .find(|&index| unique[index] == frame)
+                {
+                    return index;
+                }
                 let index = unique.len();
                 unique.push(frame);
+                recent.rotate_right(1);
+                recent[0] = Some(index);
                 index
             });
             exposures.push(index);
@@ -504,6 +533,28 @@ mod tests {
         assert_eq!(frames.len(), 96);
         assert!(frames[0] == doc.layers[0].frames[0]);
         assert_eq!(frames[0].identity(), frames[95].identity());
+    }
+
+    #[test]
+    fn compact_cels_share_equal_drawings_separated_by_different_exposures() {
+        let mut doc = crate::fresh_document();
+        let draw = |width| {
+            [crate::Mark {
+                width,
+                ..Default::default()
+            }]
+            .into_iter()
+            .collect()
+        };
+        doc.layers[0].frames = vec![draw(1.), draw(2.), draw(1.)].into();
+        let frames = &doc.layers[0].frames;
+        assert_ne!(frames[0].identity(), frames[2].identity());
+        let json = cels::compact(|| serde_json::to_vec(&doc)).unwrap();
+        let reopened: Document = serde_json::from_slice(&json).unwrap();
+        let cels = &reopened.layers[0].frames;
+        assert_eq!(cels[0].identity(), cels[2].identity());
+        assert_ne!(cels[0].identity(), cels[1].identity());
+        assert!(frames == cels);
     }
 
     #[test]
