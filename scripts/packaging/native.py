@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import plistlib
 import re
@@ -135,13 +136,24 @@ def asset(release, name, destination):
     return item
 
 
-def appimage_runtime(work, appdir):
+def linux_architecture(machine=None):
+    machine = (machine or platform.machine()).lower()
+    if machine in ("x86_64", "amd64"):
+        return "x64", "x86_64", "amd64"
+    if machine in ("aarch64", "arm64"):
+        return "arm64", "aarch64", "arm64"
+    raise RuntimeError("Unsupported Linux package architecture: " + machine)
+
+
+def appimage_runtime(work, appdir, architecture):
+    if architecture not in ("x86_64", "aarch64"):
+        raise RuntimeError("Unsupported AppImage architecture: " + architecture)
     tool_release = api("AppImage/appimagetool/releases/tags/1.9.1")
     tool = work / "appimagetool.AppImage"
-    tool_asset = asset(tool_release, "appimagetool-x86_64.AppImage", tool)
+    tool_asset = asset(tool_release, "appimagetool-" + architecture + ".AppImage", tool)
     release = api("AppImage/type2-runtime/releases/tags/continuous")
-    runtime = work / "runtime-x86_64"
-    runtime_asset = asset(release, "runtime-x86_64", runtime)
+    runtime = work / ("runtime-" + architecture)
+    runtime_asset = asset(release, "runtime-" + architecture, runtime)
     obj = api("AppImage/type2-runtime/git/ref/tags/continuous")["object"]
     while obj["type"] == "tag":
         obj = api("AppImage/type2-runtime/git/tags/" + obj["sha"])["object"]
@@ -162,6 +174,7 @@ def appimage_runtime(work, appdir):
     license_text = subprocess.check_output([str(runtime), "--appimage-help"], stderr=subprocess.STDOUT)
     (notices / "RUNTIME-LICENSES.txt").write_bytes(license_text)
     write(notices / "BUILD-IDENTITY.json", {
+        "architecture": architecture,
         "runtime": runtime_asset, "runtimeRevision": revision, "runtimeVersion": version,
         "sourceUrl": url, "sourceSha256": digest(archive),
         "appimagetool": tool_asset, "appimagetoolVersion": "1.9.1",
@@ -170,6 +183,7 @@ def appimage_runtime(work, appdir):
 
 
 def linux(dest):
+    label, architecture, debian_architecture = linux_architecture()
     work = ROOT / "work/packages/linux"
     work.mkdir(parents=True, exist_ok=False)
     appdir = work / "LibreToon.AppDir"
@@ -184,9 +198,9 @@ def linux(dest):
     apprun.write_text('#!/bin/sh\nset -eu\nHERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexec "$HERE/usr/lib/libretoon/libretoon" "$@"\n')
     apprun.chmod(0o755)
     # No bundled graphics drivers/glibc or unreviewed shared libraries.
-    tool, runtime = appimage_runtime(work, appdir)
-    stem = "LibreToon-" + VERSION + "-Linux-x64"
-    env = dict(os.environ, ARCH="x86_64", APPIMAGE_EXTRACT_AND_RUN="1", VERSION=VERSION)
+    tool, runtime = appimage_runtime(work, appdir, architecture)
+    stem = "LibreToon-" + VERSION + "-Linux-" + label
+    env = dict(os.environ, ARCH=architecture, APPIMAGE_EXTRACT_AND_RUN="1", VERSION=VERSION)
     run([tool, "--runtime-file", runtime, appdir, dest / (stem + ".AppImage")], env=env)
     (dest / (stem + ".AppImage")).chmod(0o755)
     deb = work / "deb"
@@ -196,7 +210,7 @@ def linux(dest):
     control.mkdir()
     (control / "control").write_text(
         "Package: libretoon\nVersion: " + VERSION + "\nSection: graphics\nPriority: optional\n"
-        "Architecture: amd64\nMaintainer: LibreToon project <noreply@github.com>\n"
+        "Architecture: " + debian_architecture + "\nMaintainer: LibreToon project <noreply@github.com>\n"
         "Depends: curl, coreutils, libasound2 | libasound2t64, libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0\n"
         "Recommends: xdg-desktop-portal, xdg-desktop-portal-gtk\n"
         "Description: LibreToon native 2D animation editor\n Includes application resources; FFmpeg is downloaded separately on request.\n")
@@ -216,7 +230,8 @@ def linux(dest):
     run(["dpkg-deb", "--root-owner-group", "--build", deb, dest / (stem + ".deb")])
     # Wrap the AppImage to preserve its executable bit through Actions artifact download.
     with tarfile.open(dest / (stem + "-AppImage.tar.gz"), "w:gz") as t:
-        t.add(dest / (stem + ".AppImage"), arcname=stem + ".AppImage")
+        t.add(dest / (stem + ".AppImage"), arcname=stem + ".AppImage",
+              filter=lambda entry: entry.replace(mode=0o755, deep=False))
 
 
 if __name__ == "__main__":

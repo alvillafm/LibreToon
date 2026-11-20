@@ -71,7 +71,7 @@ Read the [LibreToon User Manual](https://alvillafm.github.io/LibreToon/) or brow
 
 LibreToon is still experimental. Some workflows may be incomplete or unstable.
 
-See the [0.6.0 release notes](docs/RELEASE_NOTES_0.6.0.md) for changes since 0.5.5.
+See the [0.9.0 release notes](docs/RELEASE_NOTES_0.9.0.md) for changes since 0.8.0.
 
 ## Contributions & Feedback
 

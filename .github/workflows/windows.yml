@@ -100,6 +100,9 @@ jobs:
       - name: Check lightweight package staging
         run: python scripts/packaging/test_native.py
 
+      - name: Check combined download assembly
+        run: python scripts/packaging/test_bundle.py
+
       - name: Test package security gates without external services
         run: python scripts/packaging/test_security.py
 
@@ -140,28 +143,17 @@ jobs:
         shell: pwsh
         run: ./scripts/packaging/windows-security.ps1 -SigningMode $env:LIBRETOON_SIGNING_MODE
 
-      - name: Upload Windows portable package after security checks
-        id: windows-portable
+      - name: Upload Windows portable package and installer after security checks
+        id: windows-packages
         uses: actions/upload-artifact@v4
         with:
-          name: LibreToon-Windows-x64-Portable-${{ inputs.windows_signing == 'azure' && 'signed' || 'unsigned' }}
+          name: LibreToon-Windows-x64-${{ inputs.windows_signing == 'azure' && 'signed' || 'unsigned' }}
           path: |
             dist/*-Portable.zip
-            dist/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 30
-          compression-level: 0
-
-      - name: Upload Windows installer after security checks
-        id: windows-installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: LibreToon-Windows-x64-Installer-${{ inputs.windows_signing == 'azure' && 'signed' || 'unsigned' }}
-          path: |
             dist/*-Setup.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
           compression-level: 0
 
       - name: Upload Windows security diagnostics
@@ -172,16 +164,6 @@ jobs:
           path: work/package-security/windows/
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Windows download summary
-        shell: pwsh
-        env:
-          PORTABLE_URL: ${{ steps.windows-portable.outputs.artifact-url }}
-          INSTALLER_URL: ${{ steps.windows-installer.outputs.artifact-url }}
-        run: |
-          "[Portable ZIP]($env:PORTABLE_URL) | [EXE installer]($env:INSTALLER_URL)" >> $env:GITHUB_STEP_SUMMARY
-          "Signing mode: **$env:LIBRETOON_SIGNING_MODE**. GitHub wraps each artifact in a ZIP. Passing antivirus checks does not guarantee that Chrome/SmartScreen will accept a download." >> $env:GITHUB_STEP_SUMMARY
-
 
   native:
     name: ${{ matrix.label }} packages
@@ -200,6 +182,9 @@ jobs:
           - os: ubuntu-22.04
             platform: linux
             label: Linux-x64
+          - os: ubuntu-22.04-arm
+            platform: linux
+            label: Linux-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
@@ -293,7 +278,7 @@ jobs:
             dist/*.deb
             dist/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
           compression-level: 0
 
       - name: Upload native security diagnostics
@@ -304,3 +289,51 @@ jobs:
           path: work/package-security/native/
           if-no-files-found: warn
           retention-days: 30
+
+  downloads:
+    name: One ZIP with all requested packages
+    needs: [windows, native]
+    if: >-
+      ${{ !cancelled()
+          && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+          && (needs.native.result == 'success' || needs.native.result == 'skipped')
+          && (needs.windows.result == 'success' || needs.native.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check combined download assembly
+        run: python3 scripts/packaging/test_bundle.py
+      - name: Collect verified packages and security reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: LibreToon-*
+          path: work/download-artifacts
+      - name: Assemble the single download
+        id: bundle
+        env:
+          SELECTED_PLATFORM: ${{ inputs.platform }}
+        run: python3 scripts/packaging/bundle.py --platform "$SELECTED_PLATFORM" --source work/download-artifacts --output work/combined-download
+      # Actions creates this ZIP itself. Do not put another aggregate ZIP inside it.
+      - name: Upload combined download
+        id: download
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreToon-${{ steps.bundle.outputs.version }}-Packages
+          path: work/combined-download/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Single download summary
+        env:
+          DOWNLOAD_URL: ${{ steps.download.outputs.artifact-url }}
+          PACKAGE_VERSION: ${{ steps.bundle.outputs.version }}
+          SELECTED_PLATFORM: ${{ inputs.platform }}
+        run: |
+          echo "## LibreToon $PACKAGE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download the single ZIP with all requested packages]($DOWNLOAD_URL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Selection: **$SELECTED_PLATFORM**. Packages are organized by OS and architecture; security reports and SHA-256 checksums are included." >> "$GITHUB_STEP_SUMMARY"
+          echo "Per-platform artifacts are temporary build inputs (1 day). This combined download is kept for 30 days." >> "$GITHUB_STEP_SUMMARY"

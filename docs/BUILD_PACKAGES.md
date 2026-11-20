@@ -6,14 +6,30 @@ No release is created or published automatically. Repository permission is read-
 
 After the maintainer commits/pushes the configuration, open GitHub > Actions >
 LibreToon manual packages > Run workflow. Select all, windows, macos or linux.
-Download the resulting artifacts from the run page. Retention: 30 days.
+When the selected builds finish, use **Download the single ZIP with all requested
+packages** in the run summary. The artifact is named
+`LibreToon-<version>-Packages`; GitHub supplies it as one ZIP. It contains folders
+for each OS/architecture, security reports, and SHA-256 manifests. There is no
+extra aggregate ZIP inside that download. Retention: 30 days.
 
-| Artifact | Packages |
+Selecting `linux` builds both x64 and ARM64. ARM64 is compiled and tested natively
+on `ubuntu-22.04-arm`, not cross-compiled or emulated. It targets 64-bit ARM
+(`aarch64`), not ARM32. Selecting `all` also includes Windows and both macOS variants.
+
+| Folder inside the single download | Packages |
 | --- | --- |
-| LibreToon-Windows-x64 | Portable ZIP, per-user EXE installer |
-| LibreToon-macOS-arm64 | ZIP containing .app, drag-install DMG |
-| LibreToon-macOS-x64 | ZIP and DMG for Intel |
-| LibreToon-Linux-x64 | AppImage, permission-preserving AppImage.tar.gz, DEB |
+| Windows-x64-signed or Windows-x64-unsigned | Portable ZIP, per-user EXE installer |
+| macOS-arm64 | ZIP containing .app, drag-install DMG |
+| macOS-x64 | ZIP and DMG for Intel |
+| Linux-x64 | AppImage, permission-preserving AppImage.tar.gz, DEB |
+| Linux-arm64 | ARM64 AppImage, permission-preserving AppImage.tar.gz, ARM64 DEB |
+| Security | Per-platform scan/signature reports and diagnostics |
+
+Per-platform package artifacts remain as temporary inputs for one day. Security
+diagnostics remain available separately for 30 days, including on failed runs.
+The combined download is produced only when all requested architectures have
+finished successfully and their package hashes match their passing security
+reports. A failed or missing architecture does not silently produce a partial bundle.
 
 Packages include LibreToon, icons, fonts/locales and original application-resource notices.
 The embedded CJK font is not duplicated as a loose file.
@@ -23,7 +39,7 @@ FFmpeg build, toolchain source package, native link-map review or network instal
 Historical FFmpeg source/reproduction scripts and gates remain in the repository, dormant.
 
 Windows targets Windows 10 1809 or later. macOS targets macOS 14+ and is ad-hoc signed,
-not Developer-ID signed or Apple-notarized. Linux targets a normal Ubuntu 22.04+ x64
+not Developer-ID signed or Apple-notarized. Linux targets a normal Ubuntu 22.04+ x64 or ARM64
 desktop (glibc 2.35 baseline); graphics drivers/X11/Wayland remain OS prerequisites.
 DEB declares curl/coreutils for optional downloading; macOS and Windows use OS-supplied
 curl and hash tools. If a downloader is unavailable, manual FFmpeg selection remains usable.
@@ -34,7 +50,9 @@ AppImage runtime/tool source/notices remain distinct from FFmpeg and are retaine
 
 Without a configured external executable, LibreToon asks permission to download and
 configure FFmpeg. Users can instead select an executable or its folder, or postpone.
-SVG export does not require FFmpeg.
+SVG export does not require FFmpeg. Linux ARM64 currently requires selecting a
+separately installed ARM64 FFmpeg; the pinned automatic-download catalogue does
+not contain a Linux ARM64 provider.
 
 With consent, one background worker downloads directly from Imageio's PyPI distribution,
 checks the pinned size and SHA-256, extracts only the executable/notices into a private
@@ -51,6 +69,8 @@ by the installer workflow; no claim is made that old source-access limitations a
 
 No hosted run or push is initiated by editing this configuration. The first hosted
 packages still need installation checks on the target operating systems.
+Local packaging regressions mock the Linux tools for both architectures; they
+do not substitute for running the produced AppImage on an ARM64 Linux desktop.
 
 ## Native packaging and text-test fixes
 
