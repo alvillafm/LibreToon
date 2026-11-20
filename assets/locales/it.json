@@ -1656,5 +1656,9 @@
   "Insert keyframe": "Insert keyframe",
   "Insert blank keyframe": "Insert blank keyframe",
   "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.": "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.",
-  "GPU composed frames": "Fotogrammi composti su GPU"
+  "GPU composed frames": "Fotogrammi composti su GPU",
+  "GPU preview failed. Using the CPU renderer.": "Anteprima GPU non riuscita. Rendering CPU attivo.",
+  "Could not render preview": "Impossibile generare anteprima",
+  "Could not render preview. Change the frame or a render setting to retry.": "Impossibile generare anteprima. Cambia fotogramma o impostazione per riprovare.",
+  "GPU preview did not respond. Using the CPU renderer.": "Anteprima GPU non risponde. Rendering CPU attivo."
 }

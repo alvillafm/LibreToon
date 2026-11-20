@@ -383,8 +383,10 @@ pub struct DepthEditor {
     pub preview: Option<egui::TextureHandle>,
     job: Option<std::sync::mpsc::Receiver<(Vec<usize>, Vec<u8>, [usize; 2])>>,
     requested: Vec<usize>,
+    failed_request: Vec<usize>,
     work: Option<std::sync::Arc<PreviewWork>>,
     gpu: Option<std::sync::Arc<crate::gpu_lens::GpuLens>>,
+    gpu_init: Option<std::sync::mpsc::Receiver<Option<std::sync::Arc<crate::gpu_lens::GpuLens>>>>,
     job_is_prefetch: bool,
     owner: Option<Document>,
     render_doc: Option<Document>,
@@ -410,11 +412,25 @@ pub struct DepthEditor {
     preview_epoch: usize,
     render_cache: std::sync::Arc<std::sync::Mutex<crate::paint::RenderCache>>,
 }
-#[derive(Default)]
 pub(crate) struct PreviewWork {
     canceled: std::sync::atomic::AtomicBool,
     progress: std::sync::atomic::AtomicU8,
     phase: std::sync::atomic::AtomicU8,
+    gpu_failed: std::sync::atomic::AtomicBool,
+    error: std::sync::Mutex<Option<String>>,
+    started: std::time::Instant,
+}
+impl Default for PreviewWork {
+    fn default() -> Self {
+        Self {
+            canceled: Default::default(),
+            progress: Default::default(),
+            phase: Default::default(),
+            gpu_failed: Default::default(),
+            error: Default::default(),
+            started: std::time::Instant::now(),
+        }
+    }
 }
 impl PreviewWork {
     pub(crate) fn canceled(&self) -> bool {
@@ -440,14 +456,57 @@ fn preview_texture(ctx: &egui::Context, size: [usize; 2], pixels: &[u8]) -> egui
     )
 }
 
+// A failed GPU worker used to disconnect its channel, causing the UI to start
+// the same failing request on every repaint, forever displaying zero percent.
+fn render_preview_safely(
+    cache: &mut crate::paint::RenderCache,
+    work: &PreviewWork,
+    draw: impl Fn(&mut crate::paint::RenderCache) -> Vec<u8>,
+) -> Vec<u8> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let gpu = crate::gpu_lens::available_on_worker();
+    let mut result = catch_unwind(AssertUnwindSafe(|| draw(cache)));
+    if result.is_err() && gpu && !work.canceled() {
+        crate::gpu_lens::use_on_worker(None);
+        work.gpu_failed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *cache = Default::default();
+        result = catch_unwind(AssertUnwindSafe(|| draw(cache)));
+    }
+    match result {
+        Ok(pixels) => pixels,
+        Err(payload) => {
+            let error = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "Render worker failed".into());
+            *work.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+            Vec::new()
+        }
+    }
+}
+
 impl DepthEditor {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let gpu_init = cc.wgpu_render_state.as_ref().map(|render| {
+            let adapter = render.adapter.clone();
+            let ctx = cc.egui_ctx.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let gpu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::gpu_lens::GpuLens::from_adapter(&adapter)
+                }))
+                .ok()
+                .flatten()
+                .map(std::sync::Arc::new);
+                let _ = tx.send(gpu);
+                ctx.request_repaint();
+            });
+            rx
+        });
         Self {
-            gpu: cc
-                .wgpu_render_state
-                .as_ref()
-                .and_then(crate::gpu_lens::GpuLens::from_renderer)
-                .map(std::sync::Arc::new),
+            gpu_init,
             ..Self::default()
         }
     }
@@ -466,6 +525,7 @@ impl DepthEditor {
         self.independent_clock = None;
         self.render_cache = Default::default();
         self.requested.clear();
+        self.failed_request.clear();
         self.preview_scope = None;
         self.preview_epoch = self.preview_epoch.wrapping_add(1);
     }
@@ -1047,6 +1107,22 @@ impl Editor {
         )
     }
     pub fn camera_blur_preview(&mut self, painter: &egui::Painter, stage: View) -> bool {
+        if let Some(init) = &self.depth.gpu_init {
+            match init.try_recv() {
+                Ok(gpu) => {
+                    self.depth.gpu = gpu;
+                    self.depth.gpu_init = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.depth.gpu_init = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    painter
+                        .ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+        }
         let use_camera = active(self) && !self.doc.extras.cameras.is_empty();
         let optics =
             camera(&self.doc, self.frame).map(|c| crate::animation::camera_optics(c, self.frame));
@@ -1168,9 +1244,42 @@ impl Editor {
             }
             self.depth.focus = Some((key.clone(), now));
         }
+        // A driver can stall without panicking, while retaining both the GPU
+        // frame mutex and the scene cache. Do not queue every subsequent frame
+        // behind that worker: detach its cache and recover on CPU once.
+        if self.depth.job.is_some()
+            && self.depth.gpu.is_some()
+            && self
+                .depth
+                .work
+                .as_ref()
+                .is_some_and(|work| work.started.elapsed() > std::time::Duration::from_secs(10))
+        {
+            self.depth.cancel_job();
+            self.depth.gpu = None;
+            self.depth.render_cache = Default::default();
+            self.depth.job = None;
+            self.depth.work = None;
+            self.depth.requested.clear();
+            self.depth.job_is_prefetch = false;
+            self.depth.interactive_job = false;
+            self.status = tr("GPU preview did not respond. Using the CPU renderer.").into();
+        }
         if let Some(job) = &self.depth.job {
             match job.try_recv() {
                 Ok((done, pixels, size)) => {
+                    if let Some(work) = self.depth.work.as_ref() {
+                        if work.gpu_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                            self.depth.gpu = None;
+                            self.status = tr("GPU preview failed. Using the CPU renderer.").into();
+                        }
+                        if let Some(error) =
+                            work.error.lock().unwrap_or_else(|e| e.into_inner()).take()
+                        {
+                            self.status = format!("{}: {error}", tr("Could not render preview"));
+                            self.depth.failed_request = done.clone();
+                        }
+                    }
                     self.depth.work = None;
                     self.depth.job_is_prefetch = false;
                     let interactive = std::mem::take(&mut self.depth.interactive_job);
@@ -1223,6 +1332,11 @@ impl Editor {
                     self.depth.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.depth.failed_request = self.depth.requested.clone();
+                    self.status = tr(
+                        "Could not render preview. Change the frame or a render setting to retry.",
+                    )
+                    .into();
                     self.depth.job = None;
                     self.depth.work = None;
                     self.depth.job_is_prefetch = false;
@@ -1264,7 +1378,7 @@ impl Editor {
             && self.depth.shown.get(..3) == key.get(..3)
             && self.depth.shown.get(5..) == key.get(5..);
         let mut next = None;
-        if self.depth.job.is_none() {
+        if self.depth.job.is_none() && self.depth.failed_request != key {
             if self.depth.shown != key && !playback_ready {
                 let mut candidate = key.clone();
                 if adaptive {
@@ -1387,21 +1501,24 @@ impl Editor {
                 let mut cache = render_cache
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let pixels = crate::exporter::raster_preview(
-                    &doc,
-                    frame,
-                    clock,
-                    size[0] as u32,
-                    size[1] as u32,
-                    &render,
-                    &mut cache,
-                    &video,
-                    render_camera,
-                    post,
-                    allow_blur,
-                    !reduced,
-                    Some(&work),
-                );
+                let draw = |cache: &mut crate::paint::RenderCache| {
+                    crate::exporter::raster_preview(
+                        &doc,
+                        frame,
+                        clock,
+                        size[0] as u32,
+                        size[1] as u32,
+                        &render,
+                        cache,
+                        &video,
+                        render_camera,
+                        post,
+                        allow_blur,
+                        !reduced,
+                        Some(&work),
+                    )
+                };
+                let pixels = render_preview_safely(&mut cache, &work, draw);
                 work.report(100);
                 let _ = tx.send((submitted, pixels, size));
                 ctx.request_repaint();
@@ -1493,6 +1610,187 @@ pub fn visible(plane: &LayerDepth, optics: &Optics) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_preview_does_not_restart_forever_at_zero_percent() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = doc();
+        e.studio.stage_only = true;
+        let mut layer = e.doc.layers[0].clone();
+        layer.options.adjustment =
+            Some(vec![crate::post::Effect::new(crate::post::Kind::Hue)].into());
+        e.doc.layers.push(layer);
+        let view = View {
+            center: Pos2::ZERO,
+            stage_center: Pos2::ZERO,
+            scale: 1.,
+            angle: 0.,
+        };
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            e.camera_blur_preview(ui.painter(), view);
+            let (tx, rx) = std::sync::mpsc::channel();
+            drop(tx);
+            e.depth.job = Some(rx);
+            e.depth.prepare = Some((0, 2));
+            e.camera_blur_preview(ui.painter(), view);
+            assert!(e.depth.job.is_none());
+            assert!(!e.status.is_empty());
+            for _ in 0..4 {
+                e.camera_blur_preview(ui.painter(), view);
+                assert!(e.depth.job.is_none());
+            }
+            e.frame = 1;
+            e.camera_blur_preview(ui.painter(), view);
+            assert!(e.depth.job.is_some(), "a different frame can be retried");
+        });
+        output.textures_delta.clear();
+        let work = PreviewWork::default();
+        let pixels = render_preview_safely(&mut Default::default(), &work, |_| {
+            panic!("simulated CPU failure")
+        });
+        assert!(pixels.is_empty());
+        assert_eq!(
+            work.error.lock().unwrap().as_deref(),
+            Some("simulated CPU failure")
+        );
+    }
+    #[test]
+    #[ignore = "GPU and asynchronous viewport integration; optional production project"]
+    fn gpu_live_viewport_finishes_while_the_workspace_repaints() {
+        use crate::gpu_lens::{GpuLens, block_on};
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = std::env::var_os("LIBRETOON_BENCHMARK_PROJECT")
+            .map(|p| crate::documents::read_project(std::path::Path::new(&p)).unwrap())
+            .unwrap_or_else(|| {
+                crate::examples::project(":builtin-orbit-lights")
+                    .unwrap()
+                    .unwrap()
+            });
+        e.depth.gpu = Some(std::sync::Arc::new(GpuLens::new(device, queue)));
+        crate::gpu_lens::use_on_worker(e.depth.gpu.clone());
+        let work = PreviewWork::default();
+        let pixels = render_preview_safely(&mut Default::default(), &work, |_| {
+            assert!(
+                !crate::gpu_lens::available_on_worker(),
+                "simulated GPU validation failure"
+            );
+            vec![42, 84, 126]
+        });
+        assert_eq!(pixels, [42, 84, 126]);
+        assert!(work.gpu_failed.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(work.error.lock().unwrap().is_none());
+        crate::gpu_lens::use_on_worker(None);
+        e.hub.home = false;
+        e.tool = crate::canvas::Tool::Camera;
+        e.studio.stage_only = true;
+        e.studio.prefs.viewport_quality = ViewportQuality::Full;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(20) {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Pos2::ZERO,
+                        Vec2::new(1360., 860.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    e.workspace(ui);
+                    egui::CentralPanel::default().show(ui, |ui| e.canvas_ui(ui));
+                },
+            );
+            output.textures_delta.clear();
+            if e.depth.cached.len() >= 2 {
+                e.depth.cancel_job();
+                let old_cache = e.depth.render_cache.clone();
+                let _held_by_driver = old_cache.lock().unwrap();
+                let work = std::sync::Arc::new(PreviewWork {
+                    started: std::time::Instant::now() - std::time::Duration::from_secs(11),
+                    ..Default::default()
+                });
+                e.depth.work = Some(work.clone());
+                let (_pending, rx) = std::sync::mpsc::channel();
+                e.depth.job = Some(rx);
+                let mut output = ctx.run_ui(Default::default(), |ui| {
+                    e.camera_blur_preview(
+                        ui.painter(),
+                        View {
+                            center: Pos2::ZERO,
+                            stage_center: Pos2::ZERO,
+                            scale: 1.,
+                            angle: 0.,
+                        },
+                    );
+                });
+                output.textures_delta.clear();
+                assert!(work.canceled());
+                assert!(
+                    e.depth.gpu.is_none(),
+                    "a stalled device must not be retried"
+                );
+                assert!(
+                    !std::sync::Arc::ptr_eq(&old_cache, &e.depth.render_cache),
+                    "CPU recovery must not wait behind the stalled cache mutex"
+                );
+                let cpu_work = PreviewWork::default();
+                let pixels = render_preview_safely(
+                    &mut e.depth.render_cache.lock().unwrap(),
+                    &cpu_work,
+                    |cache| crate::exporter::raster(&e.doc, 0, 320, 180, &ctx, cache),
+                );
+                assert_eq!(pixels.len(), 320 * 180 * 3);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "viewport did not finish: epoch {}, shown {:?}, requested {:?}, cached {}, progress {:?}",
+            e.depth.preview_epoch,
+            e.depth.shown,
+            e.depth.requested,
+            e.depth.cached.len(),
+            e.depth.work.as_ref().map(|w| (
+                w.canceled(),
+                w.progress.load(std::sync::atomic::Ordering::Relaxed)
+            ))
+        );
+    }
+    #[test]
+    fn idle_workspace_does_not_invalidate_a_running_preview() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        e.doc = crate::examples::project(":builtin-orbit-lights")
+            .unwrap()
+            .unwrap();
+        e.hub.home = false;
+        for selected in 0..e.doc.layers.len() {
+            e.layer = selected;
+            for _ in 0..3 {
+                let before = e.doc.clone();
+                let a = preview_identity(&before);
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1360., 860.),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        e.workspace(ui);
+                        egui::CentralPanel::default().show(ui, |ui| e.canvas_ui(ui));
+                    },
+                );
+                let b = preview_identity(&e.doc);
+                output.textures_delta.clear();
+                assert_eq!(a, b, "idle layer {selected} changed preview identity");
+            }
+        }
+    }
     fn doc() -> Document {
         let mut d = crate::fresh_document();
         d.width = 96;

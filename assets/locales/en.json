@@ -1656,5 +1656,9 @@
   "Insert keyframe": "Insert keyframe",
   "Insert blank keyframe": "Insert blank keyframe",
   "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.": "Drag with Selection to move the reference. Drag its handles to rotate or scale. Switch to a drawing tool to draw.",
-  "GPU composed frames": "GPU composed frames"
+  "GPU composed frames": "GPU composed frames",
+  "Could not render preview. Change the frame or a render setting to retry.": "Could not render preview. Change the frame or a render setting to retry.",
+  "Could not render preview": "Could not render preview",
+  "GPU preview failed. Using the CPU renderer.": "GPU preview failed. Using the CPU renderer.",
+  "GPU preview did not respond. Using the CPU renderer.": "GPU preview did not respond. Using the CPU renderer."
 }

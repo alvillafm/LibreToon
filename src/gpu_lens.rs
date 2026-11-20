@@ -418,16 +418,27 @@ impl GpuLens {
         self.queue.submit([encoder.finish()]);
         Some(output)
     }
-    pub(crate) fn from_renderer(render: &eframe::egui_wgpu::RenderState) -> Option<Self> {
-        let caps = render.adapter.get_downlevel_capabilities();
-        let limits = render.device.limits();
+    pub(crate) fn from_adapter(adapter: &wgpu::Adapter) -> Option<Self> {
+        let caps = adapter.get_downlevel_capabilities();
+        let limits = adapter.limits();
         (caps.flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
-            && render.adapter.get_info().device_type != wgpu::DeviceType::Cpu
+            && adapter.get_info().device_type != wgpu::DeviceType::Cpu
             && limits.max_compute_invocations_per_workgroup >= 256
             && limits.max_compute_workgroup_size_x >= 16
             && limits.max_compute_workgroup_size_y >= 16
             && limits.max_storage_buffers_per_shader_stage >= 3)
-            .then(|| Self::new(render.device.clone(), render.queue.clone()))
+            .then(|| {
+                // Error scopes and queue synchronization belong to a device,
+                // not to a Rust thread. Egui must never interleave its frame
+                // with the compositor's compute scopes on that same device.
+                let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("LibreToon composition device"),
+                    ..Default::default()
+                }))
+                .ok()?;
+                Some(Self::new(device, queue))
+            })
+            .flatten()
     }
 
     pub(crate) fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -618,6 +629,29 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
             std::task::Poll::Pending => std::thread::park(),
         }
     }
+}
+
+#[test]
+#[ignore = "requires GPU; compositor must not share the UI device"]
+fn gpu_compositor_uses_an_independent_device() {
+    let instance = wgpu::Instance::default();
+    let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (ui_device, _) = block_on(adapter.request_device(&Default::default())).unwrap();
+    let gpu = GpuLens::from_adapter(&adapter).expect("independent compute device");
+    assert_ne!(ui_device, gpu.device);
+    let ui_scope = ui_device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let source =
+        crate::gpu_image::Image::upload(&gpu.device, 64, 32, &[40, 60, 80, 255].repeat(64 * 32));
+    let mut config = vec![0; 16];
+    config[..3].copy_from_slice(&[64, 32, 13]);
+    let result =
+        crate::gpu_image::checked_scope(&gpu.device, || gpu.native_post(&source, &config, None))
+            .unwrap();
+    assert_eq!(
+        result.read(&gpu.device, &gpu.queue).unwrap(),
+        [40, 60, 80, 255].repeat(64 * 32)
+    );
+    assert!(block_on(ui_scope.pop()).is_none());
 }
 
 #[test]
