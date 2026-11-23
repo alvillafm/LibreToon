@@ -36,6 +36,8 @@ Read the [LibreToon Wiki](https://alvillafm.github.io/LibreToon/), follow the [f
 
 ### Drawing & Color
 
+- **Bézier node editing:** Corner, Smooth, Symmetric and Automatic anchors; multi-node selection, alignment and transforms; connect, merge and split paths; exact node insertion and simplification with preview.
+
 - Draw with the **Classic Brush**, **Advanced Vector Brush**, and **Raster Brush**. Edit vector curves with the Pen and Node tools, and use raster brush presets with hardness and opacity controls.
 - Use pressure-sensitive drawing and erasing on compatible tablets, including stylus eraser ends. **Tablet Diagnostics** shows input source, pressure, and tip state.
 - Select fills and strokes independently or together. Use **Vector Trim**, variable stroke widths, clipping masks, symmetry, perspective guides, rulers, grids, and snapping.
@@ -47,6 +49,7 @@ Read the [LibreToon Wiki](https://alvillafm.github.io/LibreToon/), follow the [f
 
 - Animate frame by frame or use **Motion Tweens** with editable easing. Graphic symbols support looping, play once, and single-frame playback.
 - Drag keyframes, resize exposures, copy frames across projects, mark animation ranges, and navigate layers and frames in the **Exposure Sheet**.
+- Motion and shape tweens use continuous timeline bars with diamond keys. Drag a tween's first key to relocate the whole span, or Shift-select internal keys and drag them together.
 - Store reusable clips in **Animation Manager**. Move, trim, stretch, reverse, loop, or ping-pong clips, and organize them into folders.
 - Rig characters with bones, influence weights, and Puppet pins. Reposition anchors, pose on the stage, and save reusable poses for the same rig.
 - Use **manual or automatic Lip Sync** with custom mouth poses. Edit mouth keys directly in the timeline and preview dialogue against its waveform.
@@ -63,6 +66,7 @@ Read the [LibreToon Wiki](https://alvillafm.github.io/LibreToon/), follow the [f
 ### Media, Projects & Export
 
 - Import images, audio, and video, or paste an image from the clipboard. Arrange and trim clips in dedicated tracks, inspect where assets are used, and replace media while keeping compatible placements.
+- Import **SVG artwork as editable vector paths** with a compatibility report, or import an **image sequence** in numeric filename order with configurable exposures, placement and project FPS.
 - Save native projects with configurable autosave, incremental versions, and recovery.
 - Export **MP4, MKV, AVI, MOV, GIF, SVG, PNG sequences, and sprite sheets**. Batch-export scenes or animation tags and save your own presets. Video export uses an external FFmpeg executable.
 - Check for application updates from **Help**.

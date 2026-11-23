@@ -190,6 +190,11 @@ enum Drag {
         convert: bool,
     },
     Node(NodeDrag),
+    NodeMarquee {
+        start: Pos2,
+        end: Pos2,
+        add: bool,
+    },
     Width(WidthDrag),
 }
 pub struct Canvas {
@@ -207,6 +212,7 @@ pub struct Canvas {
     pen: Option<PenDraft>,
     pen_redo: Vec<PenDraft>,
     pub(crate) node_selection: Option<(usize, usize, usize)>,
+    pub(crate) node_selected: Vec<crate::node_edit::Id>,
     cache: crate::paint::RenderCache,
     stage_size: Vec2,
     polygon_selection: Vec<Pos2>,
@@ -229,6 +235,7 @@ impl Default for Canvas {
             pen: None,
             pen_redo: vec![],
             node_selection: None,
+            node_selected: Vec::new(),
             cache: Default::default(),
             stage_size: Vec2::new(960., 540.),
             polygon_selection: vec![],
@@ -250,6 +257,7 @@ impl Canvas {
         self.selected.clear();
         self.partial.clear();
         self.node_selection = None;
+        self.node_selected.clear();
         self.pivot = None;
         self.orientation = 0.;
         self.drag = None;
@@ -1003,21 +1011,14 @@ impl Editor {
         }
         if matches!(tool, Tool::Node | Tool::Pen)
             && !wants_keyboard
-            && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+            && ctx
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         {
-            if let Some((l, m, index)) = state.node_selection.take() {
-                let mut mark = editable_nodes(&self.doc.layers[l].frames[self.frame][m]);
-                self.checkpoint();
-                handled_delete = true;
+            if !state.node_ids().is_empty() {
                 state.drag = None;
-                if mark.nodes.len() <= 2 {
-                    self.doc.layers[l].frames[self.frame].remove(m);
-                    state.clear_selection();
-                } else {
-                    mark.nodes.remove(index);
-                    self.doc.layers[l].frames[self.frame][m] = mark;
-                }
-                self.recover();
+                self.canvas = state;
+                handled_delete = self.delete_nodes();
+                state = std::mem::take(&mut self.canvas);
             }
         }
         if escape {
@@ -1027,7 +1028,16 @@ impl Editor {
                 self.doc.layers[d.id.0].frames[self.frame][d.id.1] = d.original.clone();
             }
             if let Some(Drag::Node(d)) = &canceled {
-                self.doc.layers[d.id.0].frames[self.frame][d.id.1] = d.original.clone();
+                if d.changed {
+                    if let Some(original) = self.undo.last().cloned() {
+                        self.doc = original;
+                    }
+                    if let Some((undo, redo)) = &d.history {
+                        self.undo = undo.clone();
+                        self.redo = redo.clone();
+                    }
+                    self.recover();
+                }
             }
             if let Some(Drag::Transform(d)) = canceled {
                 for ((l, m), original) in d.originals {
@@ -1043,6 +1053,13 @@ impl Editor {
             state.pen_redo.clear();
         }
         if !ctx.egui_wants_keyboard_input() && state.drag.is_none() {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+                && matches!(tool, Tool::Node | Tool::Pen)
+            {
+                self.canvas = state;
+                self.select_all_nodes();
+                state = std::mem::take(&mut self.canvas);
+            }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
                 && matches!(tool, Tool::Select | Tool::Transform | Tool::Object)
             {
@@ -1196,7 +1213,7 @@ impl Editor {
                 && tool == Tool::Select
                 && selected_node_hit(self, &state, world, view)
             {
-                self.start_node_drag(&mut state, world, view, alt);
+                self.start_node_drag(&mut state, world, view, alt, shift);
             } else if tool == Tool::RotateView {
                 let delta = screen - view.center;
                 state.drag = Some(Drag::ViewRotate {
@@ -1210,9 +1227,9 @@ impl Editor {
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
                 if self.feature.pen_edit_only || (alt && state.pen.is_none()) {
-                    self.start_node_drag(&mut state, world, view, alt);
+                    self.start_node_drag(&mut state, world, view, alt, shift);
                 } else if state.pen.is_some()
-                    || !self.grab_selected_node(&mut state, world, view, alt)
+                    || !self.grab_selected_node(&mut state, world, view, alt, shift)
                 {
                     self.begin_pen(&mut state, world, view, alt);
                 }
@@ -1230,7 +1247,7 @@ impl Editor {
             } else if !self.playing && tool == Tool::Width {
                 self.start_width_drag(&mut state, world, view);
             } else if !self.playing && tool == Tool::Node {
-                self.start_node_drag(&mut state, world, view, alt);
+                self.start_node_drag(&mut state, world, view, alt, shift);
             } else if !self.playing
                 && matches!(
                     tool,
@@ -1590,6 +1607,7 @@ impl Editor {
                             if delta.length() > 2. / view.scale {
                                 let handle = crate::vector::pos(original.out_handle) + delta;
                                 pen.mark.nodes[*index].out_handle = crate::vector::xy(handle);
+                                pen.mark.nodes[*index].mode = crate::node_edit::Mode::Corner;
                                 if original.in_handle == original.position
                                     && original.out_handle == original.position
                                 {
@@ -1618,6 +1636,11 @@ impl Editor {
                                 node.position
                             } else {
                                 crate::vector::xy(anchor - delta)
+                            };
+                            node.mode = if alt {
+                                crate::node_edit::Mode::Corner
+                            } else {
+                                crate::node_edit::Mode::Smooth
                             };
                         }
                     }
@@ -1654,27 +1677,59 @@ impl Editor {
                         state.drag = None;
                     }
                 }
+                Some(Drag::NodeMarquee { start, end, add }) => {
+                    *end = pointer.unwrap_or(*end);
+                    if released || !primary_down {
+                        let rect = Rect::from_two_pos(*start, *end);
+                        let add = *add;
+                        if rect.width() > 2. || rect.height() > 2. {
+                            self.select_node_rect(&mut state, rect, add, view);
+                        } else if !add {
+                            state.set_node_ids(Vec::new());
+                        }
+                        state.drag = None;
+                    }
+                }
                 Some(Drag::Node(d)) => {
                     let world = ctx
                         .input(|i| node_contact_position(&i.events, primary_down))
                         .map(|p| self.depth_point(view.world(p), self.layer, d.id.0));
                     if let Some(world) = world.filter(|p| p.is_finite()) {
-                        if (d.handle == 3 && released)
-                            || world.distance(d.start)
-                                > if d.handle == 3 {
-                                    2. / view.scale
-                                } else {
-                                    0.001
-                                }
+                        if d.handle == 3 && released
+                            || world.distance(d.start) > 2. / view.scale
                             || d.changed
                         {
                             if !d.changed {
+                                d.history = Some((self.undo.clone(), self.redo.clone()));
                                 self.checkpoint();
+                                self.materialize_motion(&state.selected);
                                 d.changed = true;
                             }
                             let delta = world - d.start;
-                            let mark =
-                                if d.handle == 3 && delta.length() <= 2. / view.scale && !d.moved {
+                            if d.handle == 0 {
+                                let start = self.depth_point(d.start, d.id.0, self.layer);
+                                let end = self.depth_point(world, d.id.0, self.layer);
+                                for ((l, m), original) in &d.originals {
+                                    let indices = d
+                                        .nodes
+                                        .iter()
+                                        .filter(|&&(a, b, _)| (a, b) == (*l, *m))
+                                        .map(|&(_, _, n)| n)
+                                        .collect();
+                                    let delta = self.depth_point(end, self.layer, *l)
+                                        - self.depth_point(start, self.layer, *l);
+                                    let mut mark =
+                                        crate::node_edit::translate(original, &indices, delta);
+                                    if mark.fill.is_some() && mark.stroke {
+                                        mark.style.linked_outline_fill = true;
+                                    }
+                                    self.doc.layers[*l].frames[self.frame][*m] = mark;
+                                }
+                            } else {
+                                let mut mark = if d.handle == 3
+                                    && delta.length() <= 2. / view.scale
+                                    && !d.moved
+                                {
                                     let mut mark = editable_nodes(&d.original);
                                     let node = &mut mark.nodes[d.index];
                                     *node = crate::document::Node::corner(node.position);
@@ -1689,7 +1744,11 @@ impl Editor {
                                         alt || d.independent,
                                     )
                                 };
-                            self.doc.layers[d.id.0].frames[self.frame][d.id.1] = mark;
+                                if mark.fill.is_some() && mark.stroke {
+                                    mark.style.linked_outline_fill = true;
+                                }
+                                self.doc.layers[d.id.0].frames[self.frame][d.id.1] = mark;
+                            }
                         }
                     }
                     if released || !primary_down {
@@ -2056,6 +2115,14 @@ impl Editor {
         if escape {
             state.polygon_selection.clear();
         }
+        if (tool == Tool::Node || tool == Tool::Pen && self.feature.pen_edit_only)
+            && response.double_clicked()
+            && !self.playing
+        {
+            if let Some(pointer) = pointer {
+                self.insert_node_at(&mut state, view.world(pointer), view.scale);
+            }
+        }
         if tool == Tool::Pen && response.double_clicked() {
             if let Some(mut pen) = state.pen.take() {
                 let n = pen.mark.nodes.len();
@@ -2268,20 +2335,38 @@ impl Editor {
                 paint_width_handles(&painter, &self.doc.layers[l].frames[self.frame][m], view);
             }
         }
-        if matches!(tool, Tool::Node | Tool::Select) || tool == Tool::Pen && state.pen.is_none() {
+        if (matches!(tool, Tool::Node | Tool::Select) || tool == Tool::Pen && state.pen.is_none())
+            && !self.node_preview_active()
+        {
+            let node_ids = state.node_ids();
+            let mut evaluated = std::collections::BTreeMap::new();
             for &(l, m) in &state.selected {
-                let mark = &self.doc.layers[l].frames[self.frame][m];
+                let marks = evaluated
+                    .entry(l)
+                    .or_insert_with(|| crate::animation::marks(&self.doc.layers[l], self.frame));
+                let Some(mark) = marks.get(m) else {
+                    continue;
+                };
+                if !crate::node_edit::supported(mark) {
+                    continue;
+                }
                 if tool == Tool::Select && (!mark.stroke || mark.nodes.is_empty()) {
                     continue;
                 }
                 paint_nodes(
                     &painter,
-                    &self.doc.layers[l].frames[self.frame][m],
-                    view,
+                    mark,
+                    self.camera_depth_view(view, l),
                     state
                         .node_selection
                         .filter(|(a, b, _)| *a == l && *b == m)
                         .map(|(_, _, n)| n),
+                    &node_ids
+                        .iter()
+                        .filter(|&&(a, b, _)| (a, b) == (l, m))
+                        .map(|&(_, _, n)| n)
+                        .collect(),
+                    self.nodes.all_handles || tool == Tool::Select,
                 );
             }
         }
@@ -2295,7 +2380,7 @@ impl Editor {
                 preview.color = crate::themes::accent().to_array();
             }
             paint_mark(&painter, &preview, view, false, false, None);
-            paint_nodes(&painter, &pen.mark, view, None);
+            paint_nodes(&painter, &pen.mark, view, None, &Default::default(), true);
             if state.drag.is_none() && over {
                 if let (Some(last), Some(pointer)) = (pen.mark.nodes.last(), pointer) {
                     let end = view.world(pointer);
@@ -2417,6 +2502,16 @@ impl Editor {
             painter.line_segment(
                 [pivot - Vec2::new(0., 8.), pivot + Vec2::new(0., 8.)],
                 Stroke::new(1., crate::themes::accent()),
+            );
+        }
+        if let Some(Drag::NodeMarquee { start, end, .. }) = &state.drag {
+            let rect = Rect::from_two_pos(*start, *end);
+            painter.rect_filled(rect, 0., crate::themes::accent().gamma_multiply(0.10));
+            painter.rect_stroke(
+                rect,
+                0.,
+                Stroke::new(1., crate::themes::accent()),
+                egui::StrokeKind::Inside,
             );
         }
         if let Some(Drag::Marquee { start, end, .. }) = &state.drag {
@@ -2554,7 +2649,9 @@ impl Editor {
         self.paint_rulers(&ruler_painter, ruler_area, view);
         self.command_helper_ui(ui, area);
         self.sync_selected_style(&state.selected);
+        self.node_simplify_overlays(&painter, view);
         self.canvas = state;
+        self.node_toolbar(ui.ctx(), area);
         self.face_rig_panel(ui.ctx(), area);
         self.character_rig_checks(ui.ctx(), area);
         self.animation_canvas_drop(ui, area, view);
@@ -2940,14 +3037,31 @@ struct NodeDrag {
     changed: bool,
     moved: bool,
     independent: bool,
+    nodes: Vec<crate::node_edit::Id>,
+    originals: Vec<((usize, usize), Mark)>,
+    history: Option<(Vec<crate::Document>, Vec<crate::Document>)>,
 }
 
 impl Canvas {
+    pub(crate) fn node_ids(&self) -> Vec<crate::node_edit::Id> {
+        if self.node_selected.is_empty() {
+            self.node_selection.into_iter().collect()
+        } else {
+            self.node_selected.clone()
+        }
+    }
+    pub(crate) fn set_node_ids(&mut self, mut ids: Vec<crate::node_edit::Id>) {
+        ids.sort_unstable();
+        ids.dedup();
+        self.node_selection = ids.last().copied();
+        self.node_selected = ids;
+    }
     pub fn cancel_drafts(&mut self) {
         self.pen_redo.clear();
         self.pen = None;
         self.drag = None;
         self.node_selection = None;
+        self.node_selected.clear();
     }
     pub(crate) fn can_undo_pen(&self) -> bool {
         self.pen.as_ref().is_some_and(|p| !p.mark.nodes.is_empty())
@@ -3079,18 +3193,85 @@ impl Editor {
         }
         self.status="Pluma: clic crea esquina · arrastrar crea curva · primer nodo cierra · Enter termina · Esc cancela".into();
     }
-    fn grab_selected_node(&self, state: &mut Canvas, world: Pos2, view: View, alt: bool) -> bool {
+    fn make_node_drag(
+        &self,
+        state: &Canvas,
+        id: (usize, usize),
+        index: usize,
+        handle: u8,
+        world: Pos2,
+        alt: bool,
+    ) -> NodeDrag {
+        let nodes = state.node_ids();
+        let paths: std::collections::BTreeSet<_> = nodes
+            .iter()
+            .map(|&(l, m, _)| (l, m))
+            .chain(std::iter::once(id))
+            .collect();
+        let mut evaluated = std::collections::BTreeMap::new();
+        let originals = paths
+            .into_iter()
+            .map(|(l, m)| {
+                let marks = evaluated
+                    .entry(l)
+                    .or_insert_with(|| crate::animation::marks(&self.doc.layers[l], self.frame));
+                ((l, m), marks[m].clone())
+            })
+            .collect::<Vec<_>>();
+        NodeDrag {
+            id,
+            index,
+            handle: if alt && handle == 0 { 3 } else { handle },
+            start: self.depth_point(world, self.layer, id.0),
+            original: originals
+                .iter()
+                .find(|(key, _)| *key == id)
+                .unwrap()
+                .1
+                .clone(),
+            changed: false,
+            moved: false,
+            independent: alt,
+            nodes,
+            originals,
+            history: None,
+        }
+    }
+    fn grab_selected_node(
+        &self,
+        state: &mut Canvas,
+        world: Pos2,
+        view: View,
+        alt: bool,
+        shift: bool,
+    ) -> bool {
         let mut found = None;
         let mut best = 8.;
+        let selected = state.node_ids();
+        let mut evaluated = std::collections::BTreeMap::new();
         for &(l, m) in &state.selected {
-            let mark = editable_nodes(&self.doc.layers[l].frames[self.frame][m]);
+            let marks = evaluated
+                .entry(l)
+                .or_insert_with(|| crate::animation::marks(&self.doc.layers[l], self.frame));
+            if !crate::node_edit::supported(&marks[m]) {
+                continue;
+            }
+            let mark = editable_nodes(&marks[m]);
             for (index, node) in mark.nodes.iter().enumerate() {
                 for (handle, p) in [
                     (1, node.in_handle),
                     (2, node.out_handle),
                     (0, node.position),
                 ] {
-                    if handle != 0 && p == node.position {
+                    if handle != 0
+                        && (p == node.position
+                            || !self.nodes.all_handles
+                                && self.tool != Tool::Select
+                                && !selected.contains(&(l, m, index))
+                            || !mark.closed
+                                && (index == 0 && handle == 1
+                                    || index + 1 == mark.nodes.len() && handle == 2))
+                    {
                         continue;
                     }
                     let distance = view
@@ -3104,26 +3285,40 @@ impl Editor {
             }
         }
         if let Some((id, index, handle)) = found {
-            state.node_selection = Some((id.0, id.1, index));
-            state.drag = Some(Drag::Node(NodeDrag {
-                id,
-                index,
-                handle: if alt && handle == 0 { 3 } else { handle },
-                start: self.depth_point(world, self.layer, id.0),
-                original: self.doc.layers[id.0].frames[self.frame][id.1].clone(),
-                changed: false,
-                moved: false,
-                independent: alt,
-            }));
+            let key = (id.0, id.1, index);
+            let mut nodes = selected;
+            if shift && handle == 0 && nodes.contains(&key) {
+                nodes.retain(|n| *n != key);
+                state.set_node_ids(nodes);
+                return true;
+            }
+            if handle == 0 && !shift && !nodes.contains(&key) {
+                nodes.clear();
+            }
+            if !nodes.contains(&key) {
+                nodes.push(key);
+            }
+            state.set_node_ids(nodes);
+            state.node_selection = Some(key);
+            state.drag = Some(Drag::Node(
+                self.make_node_drag(state, id, index, handle, world, alt),
+            ));
             return true;
         }
         false
     }
-    fn start_node_drag(&mut self, state: &mut Canvas, world: Pos2, view: View, alt: bool) {
-        if self.grab_selected_node(state, world, view, alt) {
+    fn start_node_drag(
+        &mut self,
+        state: &mut Canvas,
+        world: Pos2,
+        view: View,
+        alt: bool,
+        shift: bool,
+    ) {
+        if self.grab_selected_node(state, world, view, alt, shift) {
             return;
         }
-        'layers: for (l, layer) in self
+        for (l, layer) in self
             .doc
             .layers
             .iter()
@@ -3136,36 +3331,67 @@ impl Editor {
                 .enumerate()
                 .rev()
             {
+                if !crate::node_edit::supported(mark) {
+                    continue;
+                }
                 if self.depth_hit(l, mark, world, 6. / view.scale) {
-                    state.clear_selection();
-                    state.selected.push((l, m));
-                    self.layer = l;
-                    let editable = editable_nodes(mark);
-                    if let Some(index) = editable.nodes.iter().position(|node| {
-                        view.screen(self.depth_point(
-                            crate::vector::pos(node.position),
-                            l,
-                            self.layer,
-                        ))
-                        .distance(view.screen(world))
-                            < 8.
-                    }) {
-                        state.node_selection = Some((l, m, index));
-                        state.drag = Some(Drag::Node(NodeDrag {
-                            id: (l, m),
-                            index,
-                            handle: if alt { 3 } else { 0 },
-                            start: self.depth_point(world, self.layer, l),
-                            original: mark.clone(),
-                            changed: false,
-                            moved: false,
-                            independent: alt,
-                        }));
+                    if !shift {
+                        state.clear_selection();
                     }
-                    break 'layers;
+                    if !state.selected.contains(&(l, m)) {
+                        state.selected.push((l, m));
+                    }
+                    if self.grab_selected_node(state, world, view, alt, shift) {
+                        return;
+                    }
+                    return;
                 }
             }
         }
+        let screen = view.screen(world);
+        state.drag = Some(Drag::NodeMarquee {
+            start: screen,
+            end: screen,
+            add: shift,
+        });
+    }
+    fn select_node_rect(&self, state: &mut Canvas, rect: Rect, add: bool, view: View) {
+        let mut nodes = if add { state.node_ids() } else { Vec::new() };
+        let restrict = !state.selected.is_empty();
+        for (l, layer) in self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.visible && !l.options.locked)
+        {
+            for (m, mark) in crate::animation::marks(layer, self.frame)
+                .iter()
+                .enumerate()
+            {
+                if !crate::node_edit::supported(mark)
+                    || restrict && !state.selected.contains(&(l, m))
+                {
+                    continue;
+                }
+                let mark = editable_nodes(mark);
+                for (n, node) in mark.nodes.iter().enumerate() {
+                    if rect.contains(view.screen(self.depth_point(
+                        crate::vector::pos(node.position),
+                        l,
+                        self.layer,
+                    ))) {
+                        nodes.push((l, m, n));
+                    }
+                }
+            }
+        }
+        for &(l, m, _) in &nodes {
+            if !state.selected.contains(&(l, m)) {
+                state.selected.push((l, m));
+            }
+        }
+        state.set_node_ids(nodes);
     }
     fn cut_selection(&mut self, state: &mut Canvas, rect: Rect, add: bool) {
         if rect.width() < 0.001 || rect.height() < 0.001 {
@@ -3294,80 +3520,72 @@ fn node_contact_position(events: &[egui::Event], down: bool) -> Option<Pos2> {
 }
 fn move_node(original: &Mark, index: usize, handle: u8, delta: Vec2, independent: bool) -> Mark {
     let mut mark = editable_nodes(original);
-    let Some(node) = mark.nodes.get_mut(index) else {
-        return mark;
-    };
-    let anchor = crate::vector::pos(node.position);
-    if handle == 0 {
-        node.position = crate::vector::xy(anchor + delta);
-        node.in_handle = crate::vector::xy(crate::vector::pos(node.in_handle) + delta);
-        node.out_handle = crate::vector::xy(crate::vector::pos(node.out_handle) + delta);
-    } else if handle == 3 && node.in_handle == node.position && node.out_handle == node.position {
-        node.in_handle = crate::vector::xy(anchor - delta);
-        node.out_handle = crate::vector::xy(anchor + delta);
-    } else {
-        let (moved, opposite) = if handle == 1 {
-            (&mut node.in_handle, &mut node.out_handle)
-        } else {
-            (&mut node.out_handle, &mut node.in_handle)
-        };
-        let a = crate::vector::pos(*moved) - anchor;
-        let b = crate::vector::pos(*opposite) - anchor;
-        let value = crate::vector::pos(*moved) + delta;
-        *moved = crate::vector::xy(value);
-        // Smooth nodes rotate the opposite tangent without stretching its segment.
-        // Corners and collapsed handles remain independent (Alt always breaks linkage).
-        if !independent
-            && a.length_sq() > 1e-8
-            && b.length_sq() > 1e-8
-            && a.normalized().dot(b.normalized()) < -0.999
-        {
-            let direction = value - anchor;
-            if direction.length_sq() > 1e-8 {
-                *opposite = crate::vector::xy(anchor - direction.normalized() * b.length());
-            }
-        }
-    }
+    crate::node_edit::move_handle(&mut mark, index, handle, delta, independent);
     mark
 }
 fn editable_nodes(mark: &Mark) -> Mark {
-    if !mark.nodes.is_empty() {
-        return mark.clone();
-    }
-    let mut editable = crate::vector::from_cubics(&crate::vector::cubics(mark), mark);
-    editable.holes = mark.holes.clone();
-    editable
+    crate::node_edit::editable(mark)
 }
-fn paint_nodes(p: &egui::Painter, mark: &Mark, view: View, active: Option<usize>) {
-    for (index, node) in editable_nodes(mark).nodes.iter().enumerate() {
+fn paint_nodes(
+    p: &egui::Painter,
+    mark: &Mark,
+    view: View,
+    active: Option<usize>,
+    selected: &std::collections::BTreeSet<usize>,
+    all: bool,
+) {
+    let mark = editable_nodes(mark);
+    for (index, node) in mark.nodes.iter().enumerate() {
         let anchor = view.screen(crate::vector::pos(node.position));
-        for h in [node.in_handle, node.out_handle] {
-            let handle = view.screen(crate::vector::pos(h));
-            if handle.distance(anchor) > 0.5 {
-                p.line_segment([anchor, handle], Stroke::new(1., crate::themes::accent()));
-                p.circle_filled(handle, 3.4, Color32::from_rgb(34, 36, 44));
-                p.circle_stroke(handle, 3.4, Stroke::new(1., crate::themes::accent()));
+        let is_selected = selected.contains(&index) || active == Some(index);
+        if all || is_selected {
+            for (handle, h) in [(1, node.in_handle), (2, node.out_handle)] {
+                if !mark.closed
+                    && (index == 0 && handle == 1 || index + 1 == mark.nodes.len() && handle == 2)
+                {
+                    continue;
+                }
+                let handle = view.screen(crate::vector::pos(h));
+                if handle.distance(anchor) > 0.5 {
+                    p.line_segment([anchor, handle], Stroke::new(1., crate::themes::accent()));
+                    p.circle_filled(handle, 3.4, Color32::from_rgb(34, 36, 44));
+                    p.circle_stroke(handle, 3.4, Stroke::new(1., crate::themes::accent()));
+                }
             }
         }
-        let rect = Rect::from_center_size(
-            anchor,
-            Vec2::splat(if active == Some(index) { 8. } else { 6. }),
-        );
-        p.rect_filled(
-            rect,
-            0.,
-            if active == Some(index) {
-                crate::themes::accent()
-            } else {
-                Color32::from_rgb(35, 38, 44)
-            },
-        );
-        p.rect_stroke(
-            rect,
-            0.,
-            Stroke::new(1., crate::themes::accent()),
-            egui::StrokeKind::Inside,
-        );
+        let size = if is_selected { 4.5 } else { 3. };
+        let fill = if is_selected {
+            crate::themes::accent()
+        } else {
+            Color32::from_gray(34)
+        };
+        let stroke = Stroke::new(1., crate::themes::accent());
+        match node.mode.effective(node) {
+            crate::node_edit::Mode::Corner => {
+                let rect = Rect::from_center_size(anchor, Vec2::splat(size * 2.));
+                p.rect_filled(rect, 0., fill);
+                p.rect_stroke(rect, 0., stroke, egui::StrokeKind::Inside);
+            }
+            crate::node_edit::Mode::Symmetric => {
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        anchor - Vec2::Y * size,
+                        anchor + Vec2::X * size,
+                        anchor + Vec2::Y * size,
+                        anchor - Vec2::X * size,
+                    ],
+                    fill,
+                    stroke,
+                ));
+            }
+            mode => {
+                p.circle_filled(anchor, size, fill);
+                p.circle_stroke(anchor, size, stroke);
+                if mode == crate::node_edit::Mode::Automatic {
+                    p.circle_filled(anchor, 1.3, Color32::WHITE);
+                }
+            }
+        }
     }
 }
 
@@ -3442,6 +3660,73 @@ mod vector_gesture_tests {
                     .all(|m| crate::vector::control_bounds(m).max.y < 0.)
             );
             assert!(e.doc.validate().is_ok());
+        });
+    }
+    #[test]
+    fn shift_selection_and_node_marquee_do_not_edit_until_a_group_drag() {
+        run(|ctx, e| {
+            e.tool = Tool::Node;
+            e.doc.layers[0].frames[0] = vec![Mark {
+                nodes: vec![
+                    crate::document::Node::corner([100., 100.]),
+                    crate::document::Node::corner([200., 100.]),
+                    crate::document::Node::corner([300., 150.]),
+                    crate::document::Node::corner([400., 100.]),
+                ]
+                .into(),
+                ..Default::default()
+            }]
+            .into();
+            e.canvas.selected = vec![(0, 0)];
+            tick(ctx, e, vec![]);
+            let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.));
+            let view = e.canvas.view(area);
+            let original = serde_json::to_value(&e.doc).unwrap();
+            for (p, shift) in [
+                (Pos2::new(100., 100.), false),
+                (Pos2::new(200., 100.), true),
+            ] {
+                let p = view.screen(p);
+                let modifiers = egui::Modifiers {
+                    shift,
+                    ..Default::default()
+                };
+                tick_with_modifiers(
+                    ctx,
+                    e,
+                    vec![egui::Event::PointerMoved(p), button(p, true)],
+                    modifiers,
+                );
+                tick_with_modifiers(ctx, e, vec![button(p, false)], modifiers);
+            }
+            assert_eq!(e.canvas.node_ids().len(), 2);
+            assert_eq!(serde_json::to_value(&e.doc).unwrap(), original);
+            assert!(e.undo.is_empty());
+            let a = view.screen(Pos2::new(100., 100.));
+            let b = view.screen(Pos2::new(130., 140.));
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            tick(ctx, e, vec![button(b, false)]);
+            let mark = &e.doc.layers[0].frames[0][0];
+            assert!(
+                crate::vector::pos(mark.nodes[0].position).distance(Pos2::new(130., 140.)) < 0.01
+            );
+            assert!(
+                crate::vector::pos(mark.nodes[1].position).distance(Pos2::new(230., 140.)) < 0.01
+            );
+            assert_eq!(mark.nodes[2].position, [300., 150.]);
+            assert_eq!(e.undo.len(), 1);
+            e.history(false);
+            assert_eq!(serde_json::to_value(&e.doc).unwrap(), original);
+            e.canvas.selected = vec![(0, 0)];
+            let a = view.screen(Pos2::new(80., 80.));
+            let b = view.screen(Pos2::new(220., 120.));
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            tick(ctx, e, vec![button(b, false)]);
+            assert_eq!(e.canvas.node_ids().len(), 2);
+            assert_eq!(serde_json::to_value(&e.doc).unwrap(), original);
+            assert!(e.undo.is_empty());
         });
     }
     #[test]
@@ -5181,6 +5466,7 @@ mod node_drag_regressions {
     fn smooth_handle_keeps_opposite_length_and_corner_does_not_grow_a_tangent() {
         let mark = Mark {
             nodes: vec![crate::document::Node {
+                mode: Default::default(),
                 position: [100., 100.],
                 in_handle: [95., 100.],
                 out_handle: [130., 100.],

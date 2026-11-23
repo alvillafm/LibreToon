@@ -415,6 +415,7 @@ mod tests {
             nodes: vec![
                 crate::document::Node::corner([10., 10.]),
                 crate::document::Node {
+                    mode: Default::default(),
                     position: [40., 20.],
                     in_handle: [30., 15.],
                     out_handle: [50., 15.],

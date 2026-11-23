@@ -329,6 +329,7 @@ impl Editor {
             }
             self.drawing_options(ui);
             self.tool_options_ui(ui);
+            self.node_properties(ui);
             self.order_properties_ui(ui);
             self.advanced_properties(ui);
             if self.canvas.selected.first().is_some_and(|&(l, m)| {

@@ -148,6 +148,9 @@ pub fn from_cubics(curves: &[Cubic], style: &Mark) -> Mark {
         }
     }
     out.nodes = nodes.into();
+    for node in &mut out.nodes {
+        node.mode = crate::node_edit::Mode::Inferred;
+    }
     out
 }
 /// Schneider-style least-squares fitting with chord parameters and bounded
@@ -569,6 +572,7 @@ pub fn transform(mark: &Mark, mut f: impl FnMut(Pos2) -> Pos2) -> Mark {
         .nodes
         .iter()
         .map(|n| Node {
+            mode: n.mode,
             position: xy(f(pos(n.position))),
             in_handle: xy(f(pos(n.in_handle))),
             out_handle: xy(f(pos(n.out_handle))),

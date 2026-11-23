@@ -77,6 +77,129 @@ fn cell(out: &egui::FullOutput, frame: usize) -> Pos2 {
 }
 
 #[test]
+fn selected_bone_pose_keys_drag_together_through_the_timeline_ui() {
+    let ctx = egui::Context::default();
+    let mut e = editor();
+    e.add_bone(Pos2::new(50., 50.), Pos2::new(150., 50.), None);
+    let id = e.doc.extras.rig.bones[0].id;
+    for frame in [3, 7] {
+        e.doc.extras.rig.set_bone_key(
+            id,
+            crate::rig::BoneKey {
+                frame,
+                angle: frame as f32 * 0.01,
+                ..Default::default()
+            },
+        );
+    }
+    e.feature.frame_selection = Some((0, 3, 7));
+    tick(&ctx, &mut e, vec![], true, false);
+    let out = tick(&ctx, &mut e, vec![], true, false);
+    let label = out
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.job.text.contains("Bone pose") => Some(t.pos),
+            _ => None,
+        })
+        .expect("bone pose row");
+    let a = Pos2::new(label.x + 264. + 3.5 * 22., label.y + 6.);
+    let b = a + Vec2::X * 44.;
+    let undo = e.undo.len();
+    tick(
+        &ctx,
+        &mut e,
+        vec![
+            egui::Event::PointerMoved(a),
+            event(a, true, egui::PointerButton::Primary, false),
+        ],
+        true,
+        false,
+    );
+    tick(
+        &ctx,
+        &mut e,
+        vec![egui::Event::PointerMoved(b)],
+        true,
+        false,
+    );
+    tick(
+        &ctx,
+        &mut e,
+        vec![event(b, false, egui::PointerButton::Primary, false)],
+        true,
+        false,
+    );
+    let keys = &e.doc.extras.rig.bones[0].keys;
+    assert!(keys.iter().any(|k| k.frame == 5) && keys.iter().any(|k| k.frame == 9));
+    assert_eq!(e.undo.len(), undo + 1);
+}
+
+#[test]
+fn first_tween_diamond_drag_relocates_the_complete_span_from_frame_zero() {
+    for shape in [false, true] {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let mark = Mark {
+            points: vec![[100., 100.], [200., 200.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([255, 40, 40, 255]),
+            ..Default::default()
+        };
+        for frame in 0..e.doc.layers[0].frames.len() {
+            e.doc.layers[0].frames[frame] = vec![mark.clone()].into();
+        }
+        e.doc.layers[0].options.keys = (0..e.doc.layers[0].frames.len())
+            .map(|f| f == 0 || f == 5)
+            .collect::<Vec<_>>()
+            .into();
+        e.doc.layers[0].options.tweens = vec![crate::animation::Tween {
+            start: 0,
+            end: 5,
+            shape,
+            curve: Default::default(),
+        }]
+        .into();
+        tick(&ctx, &mut e, vec![], true, false);
+        let out = tick(&ctx, &mut e, vec![], true, false);
+        let a = cell(&out, 0);
+        let b = a + Vec2::X * 220.;
+        tick(
+            &ctx,
+            &mut e,
+            vec![
+                egui::Event::PointerMoved(a),
+                event(a, true, egui::PointerButton::Primary, false),
+            ],
+            true,
+            false,
+        );
+        tick(
+            &ctx,
+            &mut e,
+            vec![egui::Event::PointerMoved(b)],
+            true,
+            false,
+        );
+        tick(
+            &ctx,
+            &mut e,
+            vec![event(b, false, egui::PointerButton::Primary, false)],
+            true,
+            false,
+        );
+        assert_eq!(
+            (
+                e.doc.layers[0].options.tweens[0].start,
+                e.doc.layers[0].options.tweens[0].end
+            ),
+            (10, 15)
+        );
+    }
+}
+
+#[test]
 fn character_tools_float_above_the_view_grid() {
     let ctx = egui::Context::default();
     let mut e = editor();

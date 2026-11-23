@@ -2,6 +2,12 @@
 
 **Result:** a recognizable owl built from a handful of editable shapes. **Start:** a new 1280 × 720 project, 24 fps, with an unlocked vector layer.
 
+![The finished owl, rendered from the downloadable LibreToon project](../assets/images/01-owl.png)
+
+*Your target: a simple silhouette, two face patches, readable eyes and a separate wing. This is an actual project render, not a screenshot of the controls.*
+
+[Download the finished editable project](../assets/projects/01-owl.ltoon). Try the steps yourself first, then open this copy to compare layers and shapes.
+
 ## Build the silhouette
 
 1. Open **Color** and choose **Fill**. Pick a medium brown. Choose **Stroke** and pick a darker brown.
@@ -10,6 +16,26 @@
 4. Draw two lighter ovals inside the body for the face patches.
 5. Add two dark circular eyes and a small orange triangular beak. Use Selection to position the parts.
 6. Draw a wing to one side as another oval. Keep this wing separate so you can rig it in lesson 5.
+
+### Watch the drawing build up
+
+![First stage: body oval and two ear triangles](../assets/images/01-build-0.png)
+
+*1 · Begin with the silhouette. You do not need to draw the whole character in one stroke.*
+
+![Second stage: lighter belly and two face patches](../assets/images/01-build-1.png)
+
+*2 · Add the lighter shapes, then finish with the eyes, beak, feet and separate wing shown above.*
+
+### Find the controls
+
+![Annotated real LibreToon interface showing the owl and the Color panel](../assets/images/workspace-color-guide.svg)
+
+*Headless capture of the real editor. Use the shape tools in the left toolbar, choose Fill or Stroke beside the picker in Color on the right, and use the layer rows below the stage to keep the wing separate. Open the image in a new tab to inspect the labels at full size.*
+
+1. **Ellipse:** build the body, face patches and eyes.
+2. **Color tab:** open the color controls.
+3. **Fill / Stroke:** choose which component the next color changes.
 
 ## Try an edit
 

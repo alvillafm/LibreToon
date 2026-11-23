@@ -256,6 +256,32 @@ impl Editor {
                         file_submenu(ui, Icon::Open, "Importar", |ui| {
                             if button(
                                 ui,
+                                Icon::Film,
+                                "Image sequence…",
+                                "Import ordered images as drawing keyframes",
+                                false,
+                                !self.hub.home,
+                            )
+                            .clicked()
+                            {
+                                self.import_image_sequence();
+                                ui.close();
+                            }
+                            if button(
+                                ui,
+                                Icon::Node,
+                                "SVG vector artwork…",
+                                "Import editable SVG paths",
+                                false,
+                                !self.hub.home,
+                            )
+                            .clicked()
+                            {
+                                self.import_svg(&ctx);
+                                ui.close();
+                            }
+                            if button(
+                                ui,
                                 Icon::Open,
                                 "Adobe Animate (.fla)…",
                                 "Import Adobe Animate project",
@@ -1089,6 +1115,10 @@ impl Editor {
         self.export_ui(&ctx);
         self.notice_ui(&ctx);
         self.symbol_conversion_ui(&ctx);
+        self.svg_import_ui(&ctx);
+        self.image_sequence_ui(&ctx);
+        self.node_simplify_ui(&ctx);
+        self.finish_property_edit(&ctx);
     }
     pub(crate) fn new_document(&mut self) {
         self.playing = false;

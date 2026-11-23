@@ -42,6 +42,7 @@ mod gpu_scene;
 mod gpu_surface;
 mod helper_process;
 mod i18n;
+mod image_sequence;
 mod inspector;
 #[cfg(test)]
 mod interaction_ux_tests;
@@ -50,14 +51,18 @@ mod light;
 mod lip;
 mod loading;
 mod mannequin;
+#[cfg(test)]
+mod manual_visuals;
 mod media;
 mod native_project;
+mod node_edit;
 mod ordering;
 mod paint;
 mod palette;
 mod post;
 mod preset_file;
 mod project_save;
+mod property_edit;
 mod raster;
 mod recovery;
 mod reftool;
@@ -75,9 +80,11 @@ mod studio;
 mod studio_tests;
 #[cfg(test)]
 mod studio_v2_tests;
+mod svg_import;
 mod tablet;
 mod themes;
 mod tools_editor;
+mod tween_edit;
 mod typography;
 mod update_install;
 mod updater;
@@ -159,6 +166,10 @@ struct Editor {
     recovery: PathBuf,
     recovery_writer: recovery::RecoveryWriter,
     project_save: project_save::State,
+    property_edit: Option<property_edit::Edit>,
+    vector_import: Option<svg_import::Dialog>,
+    image_sequence: Option<image_sequence::Dialog>,
+    nodes: node_edit::State,
 }
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -255,6 +266,10 @@ impl Editor {
             recovery,
             recovery_writer: recovery::RecoveryWriter::default(),
             project_save: Default::default(),
+            property_edit: None,
+            vector_import: None,
+            image_sequence: None,
+            nodes: Default::default(),
         };
         editor.initialize_documents(had_recovered);
         i18n::set_locale(editor.studio.prefs.locale());
@@ -263,6 +278,7 @@ impl Editor {
         editor
     }
     fn checkpoint(&mut self) {
+        self.property_edit = None;
         self.hub.dirty();
         self.canvas.clear_selection();
         self.undo.push(self.doc.clone());
@@ -301,6 +317,8 @@ impl Editor {
         }
     }
     fn history(&mut self, redo: bool) {
+        self.property_edit = None;
+        self.animation.tween_drag = None;
         self.finish_raster_stroke();
         self.feature.exposure_drag = None;
         self.folder_groups.clear();

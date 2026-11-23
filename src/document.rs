@@ -38,6 +38,8 @@ fn is_false(v: &bool) -> bool {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default, skip_serializing_if = "crate::node_edit::Mode::inferred")]
+    pub mode: crate::node_edit::Mode,
     pub position: [f32; 2],
     pub in_handle: [f32; 2],
     pub out_handle: [f32; 2],
@@ -45,6 +47,7 @@ pub struct Node {
 impl Node {
     pub fn corner(position: [f32; 2]) -> Self {
         Self {
+            mode: crate::node_edit::Mode::Corner,
             position,
             in_handle: position,
             out_handle: position,

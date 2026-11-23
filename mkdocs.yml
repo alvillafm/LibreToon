@@ -2,6 +2,8 @@ site_name: LibreToon Wiki
 site_description: Learn 2D drawing, animation, character rigging and compositing in LibreToon.
 site_url: https://alvillafm.github.io/LibreToon/
 docs_dir: manual
+exclude_docs: |
+  /assets/README.md
 repo_url: https://github.com/alvillafm/LibreToon
 repo_name: LibreToon
 edit_uri: edit/main/manual/

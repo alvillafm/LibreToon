@@ -13,6 +13,10 @@
 
 Turn on **Command Helper** beside the timeline to see gestures for the current tool. Keyboard bindings can be changed in **File → Program Preferences → Keyboard Shortcuts**; check them if a tutorial shortcut differs from your setup.
 
+![The actual LibreToon workspace with the owl exercise, the left toolbar, the Color inspector and the timeline](assets/images/workspace-color.png)
+
+*The same workspace used in [the owl lesson](learn/01-owl.md), captured headlessly from the real editor. Drawing tools are on the left, the stage is in the middle, Color is on the right, and layers and timing are below.*
+
 ## Create a small project
 
 1. Choose **New Project** on Home.

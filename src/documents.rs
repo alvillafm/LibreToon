@@ -403,6 +403,8 @@ impl Editor {
         self.import_report_open = false;
         self.drawing.scroll_to_tab = true;
         self.style_transaction = false;
+        self.property_edit = None;
+        self.animation.tween_drag = None;
         self.profile_transaction = false;
         self.duration_editing = false;
         self.renaming_layer = None;

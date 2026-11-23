@@ -410,7 +410,6 @@ impl Editor {
                 | Tool::ShadeBrush
                 | Tool::LightBrush
                 | Tool::VectorBrush
-                | Tool::Pen
                 | Tool::Rectangle
                 | Tool::Line
                 | Tool::Ellipse

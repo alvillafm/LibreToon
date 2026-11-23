@@ -327,10 +327,16 @@ impl Editor {
         let center = crate::vector::control_bounds(mark).center();
         // Frame-local marks have no stable correspondence by index.
         let track = mark.style.track;
-        let matrix = self.doc.layers[l].frames[0]
-            .iter()
-            .find(|reference| track != 0 && reference.style.track == track)
-            .map_or([1., 0., 0., 1.], |a| crate::animation::delta(a, mark));
+        let frozen = self.property_reference(("object-transform", self.frame, &ids));
+        let reference = frozen.unwrap_or(&self.doc);
+        let anchor = if track == 0 {
+            frozen.and_then(|doc| doc.layers[l].frames[self.frame].get(m))
+        } else {
+            reference.layers[l].frames[0]
+                .iter()
+                .find(|reference| reference.style.track == track)
+        };
+        let matrix = anchor.map_or([1., 0., 0., 1.], |a| crate::animation::delta(a, mark));
         let sx = Vec2::new(matrix[0], matrix[1]).length().max(0.001);
         let sy = (matrix[0] * matrix[3] - matrix[1] * matrix[2]) / sx;
         let angle = matrix[1].atan2(matrix[0]).to_degrees();
@@ -356,7 +362,7 @@ impl Editor {
                 }
             });
         if edited.iter().any(|&changed| changed) {
-            self.checkpoint();
+            self.begin_property_edit(("object-transform", self.frame, &ids));
             self.autokey_motion(&ids);
             let translation = Vec2::new(values[0] - center.x, values[1] - center.y);
             let scale = Vec2::new(

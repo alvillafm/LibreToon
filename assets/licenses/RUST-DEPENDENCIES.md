@@ -1,5 +1,9 @@
 # Rust dependency license evidence
 
+## SVG import additions · 23 November 2026
+
+svgtypes 0.15.3 and kurbo 0.11.3 were added for SVG path parsing and arc conversion. Both declare MIT OR Apache-2.0. Each cached official registry archive was SHA-256 checked against the current Cargo.lock, its packaged manifest inspected, and its original MIT and Apache license texts copied to SVG-NOTICES.txt. RUST-DEPENDENCIES.json includes their archive URLs, checksums and notice locations. The inventory dated below describes the earlier dependency set.
+
 Updated 2 November 2026. All 452 external packages in Cargo.lock were downloaded from the official crates.io registry, their archive SHA-256 values compared with Cargo.lock, and their packaged Cargo.toml license declarations inspected. **This includes the previously pending 226 packages.** No dependencies were installed and Cargo.lock was not changed.
 
 This verifies artifact identity and declared terms, not authorship of every line or complete legal compliance. No target/feature graph or binary composition was reconstructed; the lockfile includes non-Windows and optional dependencies.

@@ -920,9 +920,7 @@ impl Editor {
             let timing_changed = old_curve != c.animation.curve;
             changed |= timing_changed;
             if changed {
-                if !timing_changed || !self.animation.timing_transaction {
-                    self.checkpoint();
-                }
+                self.begin_property_edit(("camera-properties", c.id, self.frame));
                 self.animation.timing_transaction =
                     timing_changed && self.animation.ease_handle.is_some();
                 let pose_changed = c.center != pose.center

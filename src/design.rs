@@ -83,6 +83,13 @@ pub enum Icon {
     Width,
     Pen,
     Node,
+    NodeCorner,
+    NodeSmooth,
+    NodeSymmetric,
+    NodeAuto,
+    JoinNodes,
+    SplitNodes,
+    Simplify,
     Rectangle,
     Trash,
     Plus,
@@ -893,6 +900,55 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
             p.circle_stroke(pt(3., 16.), 2., s);
             p.circle_stroke(pt(17., 4.), 2., s);
             p.rect_filled(Rect::from_center_size(pt(10., 10.), Vec2::splat(6.)), 0., c);
+        }
+        Icon::NodeCorner => {
+            line((3., 4.), (10., 10.));
+            line((10., 10.), (17., 5.));
+            rect(8., 8., 4., 4.);
+            circle(3., 4., 1.5);
+            circle(17., 5., 1.5);
+        }
+        Icon::NodeSmooth | Icon::NodeSymmetric | Icon::NodeAuto => {
+            let left = if matches!(icon, Icon::NodeSmooth) {
+                3.
+            } else {
+                5.
+            };
+            line((left, 13.), (15., 7.));
+            circle(left, 13., 1.5);
+            circle(15., 7., 1.5);
+            rect(8., 8., 4., 4.);
+            if matches!(icon, Icon::NodeSymmetric) {
+                line((4., 17.), (16., 17.));
+            }
+            if matches!(icon, Icon::NodeAuto) {
+                circle(10., 10., 8.);
+            }
+        }
+        Icon::JoinNodes => {
+            path(&[(2., 16.), (7., 10.), (13., 10.), (18., 4.)]);
+            rect(5., 8., 4., 4.);
+            rect(11., 8., 4., 4.);
+        }
+        Icon::SplitNodes => {
+            line((2., 16.), (7., 10.));
+            line((13., 10.), (18., 4.));
+            rect(5., 8., 4., 4.);
+            rect(11., 8., 4., 4.);
+            line((10., 2.), (10., 6.));
+            line((10., 14.), (10., 18.));
+        }
+        Icon::Simplify => {
+            path(&[
+                (2., 16.),
+                (5., 8.),
+                (8., 12.),
+                (11., 5.),
+                (14., 8.),
+                (18., 3.),
+            ]);
+            circle(2., 16., 1.5);
+            circle(18., 3., 1.5);
         }
         Icon::Rectangle => rect(3., 4., 14., 12.),
         Icon::Trash => {

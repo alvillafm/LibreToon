@@ -6,6 +6,7 @@ on:
       - 'manual/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - 'scripts/docs/check_site.py'
       - '.github/workflows/manual.yml'
 
 permissions:
@@ -27,6 +28,7 @@ jobs:
           cache-dependency-path: requirements-docs.txt
       - run: python -m pip install -r requirements-docs.txt
       - run: python -m mkdocs build --strict
+      - run: python scripts/docs/check_site.py
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name == 'workflow_dispatch'
         with:

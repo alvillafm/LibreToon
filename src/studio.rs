@@ -676,9 +676,16 @@ impl Editor {
                 ("Delete", "Delete selected anchor"),
             ],
             Tool::Node => &[
+                ("Shift + click / drag box", "Select multiple anchors"),
+                ("{cmd} + A", "Select all anchors on selected paths"),
                 ("Alt + click an anchor", "Convert anchor to a corner"),
                 ("Alt + drag", "Edit one handle independently"),
-                ("Delete", "Delete selected anchor"),
+                (
+                    "Double-click a segment",
+                    "Insert anchor without changing the curve",
+                ),
+                ("Delete", "Delete selected anchors"),
+                ("Esc", "Cancel the current drag"),
             ],
             Tool::Zoom => &[("Alt + click", "Reverse zoom direction")],
             Tool::Transform => &[

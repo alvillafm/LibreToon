@@ -2,6 +2,12 @@
 
 **Result:** an owl with a wing that follows a bone. **Start:** a clean static copy of lesson 1. Save as `Owl-05-Rig.ltoon`. Leave lighting off while learning the rig.
 
+![Three rendered poses of the owl's wing moving while the body stays still](../assets/images/wing-wave.gif)
+
+*Three sampled poses, slowed down for comparison. The downloadable project interpolates between its actual bone keys.*
+
+[Download the wing rig](../assets/projects/05-rig.ltoon). It has a Body root, a Wing child, and one rigid binding per symbol. The eyes are separate artwork in this introductory example.
+
 ## Prepare the parts
 
 1. Select the body artwork and convert it to a symbol. Name it `Body` in the conversion dialog.
@@ -9,6 +15,18 @@
 3. Choose **Bones**. Create a short root bone through the torso, then a child bone from the shoulder toward the wing tip.
 4. Select the wing and use **Bind selected symbols** with the wing bone selected. Then use **Bind Rigid to Bone** so the wing moves as a solid piece.
 5. Bind the body to the torso root if it should follow the rig.
+
+![Diagram linking the Body symbol to a torso root and the Wing symbol to a child bone](../assets/images/wing-binding.svg)
+
+*Binding diagram, not a screenshot. The dashed arrow represents the parent relationship; it is not another bone to draw.*
+
+![Annotated real LibreToon interface with the owl's wing bone selected and bone properties visible](../assets/images/workspace-bones-guide.svg)
+
+*Headless editor capture. Select Wing in the bone list to inspect its binding. Pose the child bone to move the wing; rotating the root affects its descendants.*
+
+1. **Wing bone:** the child that drives the wing symbol.
+2. **Selected bone:** verify the name and parent before posing it.
+3. **Rigid binding:** use a single bone for this simple solid wing.
 
 ## Test before animating
 

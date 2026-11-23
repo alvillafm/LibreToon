@@ -2,6 +2,18 @@
 
 **Result:** a cool night background and a warm light on the owl. **Start:** the forest shot, or a static owl with a separate background layer. Save as `Owl-04-Lighting.ltoon`.
 
+### Compare the same frame
+
+![Forest owl before the warm rim light](../assets/images/03-forest.png)
+
+*Before · the scene without the extra light.*
+
+![Forest owl after the warm rim light is applied](../assets/images/04-lighting.png)
+
+*After · the same scene and camera with a warm rim light. Both images are actual LibreToon renders. The light targets the body, wing and eyes; the background keeps its original colors.*
+
+[Download the lighting project](../assets/projects/04-lighting.ltoon). Toggle the Warm rim light layer to compare the result inside the app. This example demonstrates the light; the color-curve exercise below is an additional step for you to try.
+
 ## Add one light at a time
 
 1. Enable the light preview in the stage toolbar.

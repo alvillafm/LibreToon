@@ -1476,6 +1476,7 @@ impl Editor {
                 let mut clear_pose_keys = false;
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.feature.frame_drag = None;
+                    self.animation.tween_drag = None;
                     self.cancel_adjustment_drag();
                 }
                 if let Some(drag) = &mut self.feature.frame_drag { drag.target = None; }
@@ -2010,12 +2011,30 @@ impl Editor {
                                     } else {
                                         crate::studio::LayerColor::Vector
                                     });
+                                    for span in self.doc.layers[l].options.tweens.iter().filter(|span| span.end >= frames.start && span.start < frames.end) {
+                                        let bar=Rect::from_min_max(Pos2::new(r.left()+label_w+span.start as f32*cell,y+3.),
+                                            Pos2::new(r.left()+label_w+(span.end+1) as f32*cell,y+row_h-3.));
+                                        let color=if span.shape { Color32::from_rgb(44,137,103) } else { Color32::from_rgb(119,78,176) };
+                                        painter.rect_filled(bar,4.,crate::themes::color(color));
+                                        painter.line_segment([bar.left_center()+Vec2::X*8.,bar.right_center()-Vec2::X*8.],Stroke::new(1.,color.gamma_multiply(1.5)));
+                                    }
+                                    if let Some(drag)=self.animation.tween_drag.filter(|drag|drag.layer==l) {
+                                        if let Some(pointer)=ui.input(|i|i.pointer.interact_pos()).filter(|p| animation_row.intersect(grid_clip).contains(*p)) {
+                                            let target=((pointer.x-r.left()-label_w)/cell).floor().max(0.) as usize;
+                                            let next=crate::tween_edit::Drag {target,..drag};
+                                            self.animation.tween_drag=Some(next);
+                                            let preview=Rect::from_min_size(Pos2::new(r.left()+label_w+target as f32*cell,y+2.),Vec2::new((drag.end-drag.start+1) as f32*cell,row_h-4.));
+                                            timeline_drop_marker(&painter,preview,self.tween_drop_valid(next));
+                                        }
+                                    }
                                     for f in frames.clone() {
                                         let rect = Rect::from_min_size(
                                             Pos2::new(r.left() + label_w + f as f32 * cell, y),
                                             Vec2::new(cell, row_h),
                                         );
                                         let key = self.doc.layers[l].key(f);
+                                        let tween = self.doc.layers[l].options.tweens.iter().find(|s|s.start==f)
+                                            .or_else(||crate::animation::span(&self.doc.layers[l],f)).map(|s|(s.start,s.end,s.shape));
                                         let color =
                                             if self.doc.layers[l].options.mannequin.is_some() {
                                                 layer_color.gamma_multiply(0.36)
@@ -2030,7 +2049,7 @@ impl Editor {
                                             } else {
                                                 layer_color.gamma_multiply(0.14)
                                             };
-                                        painter.rect_filled(rect, 0., color);
+                                        if tween.is_none() { painter.rect_filled(rect, 0., color); }
                                         let has_mouth_key = self.doc.layers[l].frames[f].iter()
                                             .any(|mark| crate::lip::has_mouth_key(mark, f));
                                         if has_mouth_key {
@@ -2040,7 +2059,7 @@ impl Editor {
                                                 Color32::LIGHT_GREEN, Stroke::NONE
                                             ));
                                         }
-                                        painter.rect_stroke(
+                                        if tween.is_none() { painter.rect_stroke(
                                             rect,
                                             0.,
                                             Stroke::new(
@@ -2048,7 +2067,7 @@ impl Editor {
                                                 crate::themes::color(Color32::from_gray(30)),
                                             ),
                                             egui::StrokeKind::Inside,
-                                        );
+                                        ); }
                                         if self.doc.layers[l].options.mannequin.is_some() {
                                             if f == 0 {
                                                 draw(
@@ -2058,6 +2077,9 @@ impl Editor {
                                                     crate::mannequin::COLOR,
                                                 );
                                             }
+                                        } else if key && tween.is_some() {
+                                            let q=rect.center();
+                                            painter.add(egui::Shape::convex_polygon(vec![q-Vec2::Y*5.,q+Vec2::X*5.,q+Vec2::Y*5.,q-Vec2::X*5.],Color32::WHITE,Stroke::NONE));
                                         } else if key {
                                             if self.doc.layers[l].frames[f].is_empty() {
                                                 painter.circle_stroke(
@@ -2076,7 +2098,7 @@ impl Editor {
                                                     },
                                                 );
                                             }
-                                        } else {
+                                        } else if tween.is_none() {
                                             painter.line_segment(
                                                 [rect.left_center(), rect.right_center()],
                                                 Stroke::new(
@@ -2119,13 +2141,17 @@ impl Editor {
                                             let (mut a, mut b) = self.feature.frame_selection
                                                 .filter(|s| s.0 == l && (s.1.min(s.2)..=s.1.max(s.2)).contains(&f))
                                                 .map_or((f, f), |s| (s.1.min(s.2), s.1.max(s.2)));
-                                            if a == b {
-                                                let exposure=self.doc.layers[l].exposure(f); a=exposure.start; b=exposure.end-1;
-                                            }
                                             self.layer = l; self.frame = f;
-                                            self.feature.frame_drag = Some(crate::features::FrameDrag {
-                                                layer: l, start: a, end: b.min(count - 1), grab: f, target: None,
-                                            });
+                                            if let Some((start,end,_))=tween.filter(|s|s.0==f) {
+                                                self.animation.tween_drag=Some(crate::tween_edit::Drag {layer:l,start,end,target:start});
+                                            } else {
+                                                if a == b && tween.is_none() {
+                                                    let exposure=self.doc.layers[l].exposure(f); a=exposure.start; b=exposure.end-1;
+                                                }
+                                                self.feature.frame_drag = Some(crate::features::FrameDrag {
+                                                    layer: l, start: a, end: b.min(count - 1), grab: f, target: None,
+                                                });
+                                            }
                                             self.feature.frame_selection = Some((l, a, b.min(count - 1)));
                                             self.playing = false;
                                         }
@@ -2365,7 +2391,7 @@ impl Editor {
                                         if self.frame == f {
                                             painter.rect_stroke(response.rect.shrink(1.), 2., Stroke::new(2., color), egui::StrokeKind::Inside);
                                         }
-                                        if response.dragged_by(egui::PointerButton::Primary) && f > 0 {
+                                        if response.dragged_by(egui::PointerButton::Primary) {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                             if let Some(pos) = response.interact_pointer_pos()
                                                 && (pos.y - q.y).abs() < row_h / 2. && pos.x >= r.left() + label_w
@@ -2854,6 +2880,7 @@ impl Editor {
                 self.finish_folder_ui(ui.ctx());
                 if let Some((layer, action)) = layer_menu_action { self.timeline_layer_action(layer, action); }
                 if ui.input(|i| i.pointer.primary_released()) {
+                    if let Some(drag)=self.animation.tween_drag.take() { self.move_entire_tween(drag); }
                     self.cancel_adjustment_drag();
                     if let Some(drag) = self.feature.frame_drag.take() {
                         if let Some(at) = drag.target { self.move_timeline_frames(drag, at); }
@@ -3023,51 +3050,93 @@ impl Editor {
         }
         r.animation.keys = keys.into();
     }
-    fn rig_key_drop_valid(&self, from: usize, to: usize) -> bool {
-        if from == 0 || to == 0 || from == to || to >= self.doc.layers[0].frames.len() {
-            return false;
-        }
-        let rig = &self.doc.extras.rig;
-        let tracks = rig
+    fn selected_rig_frames(&self, from: usize) -> std::collections::BTreeSet<usize> {
+        let range = self
+            .feature
+            .frame_selection
+            .filter(|&(layer, a, b)| layer == self.layer && (a.min(b)..=a.max(b)).contains(&from))
+            .map_or(from..=from, |(_, a, b)| a.min(b)..=a.max(b));
+        self.doc
+            .extras
+            .rig
             .bones
             .iter()
-            .map(|bone| key_slots(bone.keys.iter().map(|key| key.frame), from, to))
+            .flat_map(|bone| bone.keys.iter().map(|key| key.frame))
             .chain(
-                rig.bindings
+                self.doc
+                    .extras
+                    .rig
+                    .bindings
                     .iter()
                     .flat_map(|binding| binding.pins.iter())
-                    .map(|pin| key_slots(pin.keys.iter().map(|key| key.frame), from, to)),
-            );
-        let mut has_source = false;
-        for (source, destination) in tracks {
-            if source && destination {
-                return false;
-            }
-            has_source |= source;
-        }
-        has_source
+                    .flat_map(|pin| pin.keys.iter().map(|key| key.frame)),
+            )
+            .filter(|f| range.contains(f))
+            .collect()
     }
-
+    fn rig_key_drop_valid(&self, from: usize, to: usize) -> bool {
+        if from == to || to >= self.doc.layers[0].frames.len() {
+            return false;
+        }
+        let selected = self.selected_rig_frames(from);
+        if selected.is_empty() {
+            return false;
+        }
+        let delta = to as isize - from as isize;
+        let count = self.doc.layers[0].frames.len();
+        let valid = |frames: Vec<usize>| {
+            frames.iter().filter(|f| selected.contains(f)).all(|f| {
+                f.checked_add_signed(delta).is_some_and(|target| {
+                    target < count && (!frames.contains(&target) || selected.contains(&target))
+                })
+            })
+        };
+        self.doc
+            .extras
+            .rig
+            .bones
+            .iter()
+            .all(|b| valid(b.keys.iter().map(|k| k.frame).collect()))
+            && self
+                .doc
+                .extras
+                .rig
+                .bindings
+                .iter()
+                .flat_map(|b| b.pins.iter())
+                .all(|pin| valid(pin.keys.iter().map(|k| k.frame).collect()))
+    }
     fn move_rig_keys(&mut self, from: usize, to: usize) {
         if !self.rig_key_drop_valid(from, to) {
             return;
         }
+        let selected = self.selected_rig_frames(from);
+        let delta = to as isize - from as isize;
         self.checkpoint();
         let rig = &mut self.doc.extras.rig;
         for bone in &mut rig.bones {
-            if let Some(key) = bone.keys.iter_mut().find(|key| key.frame == from) {
-                key.frame = to;
-                bone.keys.sort_by_key(|key| key.frame);
+            for key in &mut bone.keys {
+                if selected.contains(&key.frame) {
+                    key.frame = key.frame.checked_add_signed(delta).unwrap();
+                }
             }
+            bone.keys.sort_by_key(|key| key.frame);
         }
         for binding in &mut rig.bindings {
             for pin in &mut binding.pins {
-                if let Some(key) = pin.keys.iter_mut().find(|key| key.frame == from) {
-                    key.frame = to;
-                    pin.keys.sort_by_key(|key| key.frame);
+                for key in &mut pin.keys {
+                    if selected.contains(&key.frame) {
+                        key.frame = key.frame.checked_add_signed(delta).unwrap();
+                    }
                 }
+                pin.keys.sort_by_key(|key| key.frame);
             }
         }
+        self.feature.frame_selection = Some((
+            self.layer,
+            selected.first().unwrap().checked_add_signed(delta).unwrap(),
+            selected.last().unwrap().checked_add_signed(delta).unwrap(),
+        ));
         self.frame = to;
         self.playing = false;
         self.recover();
@@ -3235,6 +3304,46 @@ mod special_track_tests {
         features::Camera,
         rig::BoneKey,
     };
+
+    #[test]
+    fn moving_selected_bone_keys_keeps_spacing_and_rejects_collisions_atomically() {
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(
+            egui::Context::default(),
+        ));
+        e.doc = crate::fresh_document();
+        e.set_duration(2.);
+        e.add_bone(Pos2::new(10., 10.), Pos2::new(100., 10.), None);
+        let id = e.doc.extras.rig.bones[0].id;
+        for frame in [3, 7, 15] {
+            e.doc.extras.rig.set_bone_key(
+                id,
+                BoneKey {
+                    frame,
+                    angle: frame as f32 * 0.01,
+                    ..Default::default()
+                },
+            );
+        }
+        e.feature.frame_selection = Some((e.layer, 3, 7));
+        let before = serde_json::to_value(&e.doc).unwrap();
+        let undo = e.undo.len();
+        e.move_rig_keys(3, 11); // The second selected key would collide with 15.
+        assert_eq!(serde_json::to_value(&e.doc).unwrap(), before);
+        assert_eq!(e.undo.len(), undo);
+        e.move_rig_keys(3, 5);
+        let keys = &e.doc.extras.rig.bones[0].keys;
+        assert!(
+            keys.iter()
+                .any(|k| k.frame == 5 && (k.angle - 0.03).abs() < 1e-6)
+        );
+        assert!(
+            keys.iter()
+                .any(|k| k.frame == 9 && (k.angle - 0.07).abs() < 1e-6)
+        );
+        assert_eq!(e.undo.len(), undo + 1);
+        e.history(false);
+        assert_eq!(serde_json::to_value(&e.doc).unwrap(), before);
+    }
 
     #[test]
     fn moving_special_track_keys_preserves_values_and_protects_occupied_frames() {

@@ -247,6 +247,7 @@ pub struct MotionBend {
 }
 #[derive(Default)]
 pub struct State {
+    pub(crate) tween_drag: Option<crate::tween_edit::Drag>,
     pub clock: usize,
     pub(crate) annotation: Option<crate::dialogue::Draft>,
     pub(crate) loop_tag: bool,
@@ -788,6 +789,11 @@ pub(crate) fn morph(a: &Mark, b: &Mark, t: f32) -> Mark {
         .iter()
         .zip(b.nodes.iter())
         .map(|(a, b)| crate::document::Node {
+            mode: if a.mode == b.mode {
+                a.mode
+            } else {
+                crate::node_edit::Mode::Inferred
+            },
             position: point(a.position, b.position),
             in_handle: point(a.in_handle, b.in_handle),
             out_handle: point(a.out_handle, b.out_handle),

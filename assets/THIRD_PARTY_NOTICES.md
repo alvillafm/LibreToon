@@ -6,6 +6,8 @@ This is a partial attribution record, not a compliance certificate.
 
 ## Rust dependencies
 
+SVG import adds svgtypes 0.15.3 and kurbo 0.11.3. Both declare MIT OR Apache-2.0. Their registry archives were verified against Cargo.lock; their original packaged license texts are retained in [licenses/SVG-NOTICES.txt](licenses/SVG-NOTICES.txt) and their records in RUST-DEPENDENCIES.json. The historical inventory below predates these additions.
+
 The ten direct dependencies in Cargo.toml declare MIT or MIT OR Apache-2.0 in their locally available manifests. Transitive dependencies include additional terms.
 
 See [licenses/RUST-DEPENDENCIES.md](licenses/RUST-DEPENDENCIES.md) for package/version declarations and evidence status, and [licenses/RUST-NOTICES.txt](licenses/RUST-NOTICES.txt) for original license and notice texts from checksum-verified registry archives and pinned upstream revisions.

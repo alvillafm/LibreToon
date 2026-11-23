@@ -1248,7 +1248,7 @@
       "supplemental/dispatch-0.2.0/Cargo.toml.orig",
       "supplemental/dispatch-0.2.0/MIT-canonical-template.txt"
     ],
-    "attributionStatus": "Declared MIT and actual manifest author documented; original copyright notice unavailable — not verified upstream notice",
+    "attributionStatus": "Declared MIT and actual manifest author documented; original copyright notice unavailable \u2014 not verified upstream notice",
     "canonicalLicenseEvidence": {
       "url": "https://raw.githubusercontent.com/spdx/license-list-data/31846481de7ea17d92f2f46fad76abe58b2e9bb0/text/MIT.txt",
       "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
@@ -2908,6 +2908,21 @@
       }
     ],
     "archiveUrl": "https://static.crates.io/crates/khronos_api/khronos_api-3.1.0.crate"
+  },
+  {
+    "name": "kurbo",
+    "version": "0.11.3",
+    "checksum": "c62026ae44756f8a599ba21140f350303d4f08dcdcc71b5ad9c9bb8128c13c62",
+    "license": "Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/linebender/kurbo",
+    "noticeFiles": [
+      "kurbo-0.11.3/LICENSE-MIT",
+      "kurbo-0.11.3/LICENSE-APACHE"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected; original packaged notices retained in SVG-NOTICES.txt",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/kurbo/kurbo-0.11.3.crate"
   },
   {
     "name": "kurbo",
@@ -5479,6 +5494,21 @@
     "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected",
     "upstreamNotices": [],
     "archiveUrl": "https://static.crates.io/crates/strict-num/strict-num-0.1.1.crate"
+  },
+  {
+    "name": "svgtypes",
+    "version": "0.15.3",
+    "checksum": "68c7541fff44b35860c1a7a47a7cadf3e4a304c457b58f9870d9706ece028afc",
+    "license": "Apache-2.0 OR MIT",
+    "licenseFile": null,
+    "repository": "https://github.com/linebender/svgtypes",
+    "noticeFiles": [
+      "svgtypes-0.15.3/LICENSE-MIT",
+      "svgtypes-0.15.3/LICENSE-APACHE"
+    ],
+    "verified": "crates.io archive SHA-256 matches Cargo.lock; manifest inspected; original packaged notices retained in SVG-NOTICES.txt",
+    "upstreamNotices": [],
+    "archiveUrl": "https://static.crates.io/crates/svgtypes/svgtypes-0.15.3.crate"
   },
   {
     "name": "syn",

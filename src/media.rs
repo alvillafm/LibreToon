@@ -376,7 +376,7 @@ fn duration(text: &str) -> Option<f64> {
 }
 
 impl Editor {
-    fn read_media(path: &Path, ffmpeg_path: &Path) -> Result<Asset, String> {
+    pub(crate) fn read_media(path: &Path, ffmpeg_path: &Path) -> Result<Asset, String> {
         let name = path
             .file_name()
             .ok_or("Invalid file name")?
@@ -1455,7 +1455,7 @@ impl Editor {
         self.recover();
     }
 
-    fn extend_media_timeline(&mut self, end: usize) {
+    pub(crate) fn extend_media_timeline(&mut self, end: usize) {
         if end <= self.doc.layers[0].frames.len() {
             return;
         }
@@ -3618,6 +3618,9 @@ impl Track {
 }
 
 impl Asset {
+    pub(crate) fn dimensions(&self) -> [u32; 2] {
+        self.size
+    }
     pub(crate) fn icon(&self) -> &'static str {
         match self.kind {
             Kind::Image => "▧",

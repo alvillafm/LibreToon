@@ -392,21 +392,25 @@ pub fn shape(
         let ry = r.height() * 0.5;
         m.nodes = vec![
             Node {
+                mode: Default::default(),
                 position: vector::xy(center + Vec2::new(rx, 0.)),
                 in_handle: vector::xy(center + Vec2::new(rx, -k * ry)),
                 out_handle: vector::xy(center + Vec2::new(rx, k * ry)),
             },
             Node {
+                mode: Default::default(),
                 position: vector::xy(center + Vec2::new(0., ry)),
                 in_handle: vector::xy(center + Vec2::new(k * rx, ry)),
                 out_handle: vector::xy(center + Vec2::new(-k * rx, ry)),
             },
             Node {
+                mode: Default::default(),
                 position: vector::xy(center + Vec2::new(-rx, 0.)),
                 in_handle: vector::xy(center + Vec2::new(-rx, k * ry)),
                 out_handle: vector::xy(center + Vec2::new(-rx, -k * ry)),
             },
             Node {
+                mode: Default::default(),
                 position: vector::xy(center + Vec2::new(0., -ry)),
                 in_handle: vector::xy(center + Vec2::new(-k * rx, -ry)),
                 out_handle: vector::xy(center + Vec2::new(k * rx, -ry)),

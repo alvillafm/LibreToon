@@ -65,12 +65,19 @@ pub struct RigEditor {
     selection_rotation: Option<(u64, usize, f32, Pos2, bool)>,
     turn_slider: Option<(bool, usize, Rect)>,
     drag: Option<Gesture>,
+    grab: Option<Pos2>,
+    gesture_started: bool,
+    grab_offset: Vec2,
+    angle_offset: f32,
 }
 impl RigEditor {
     pub fn cancel_gesture(&mut self) -> bool {
+        let changed = self.gesture_started;
+        self.gesture_started = false;
+        self.grab = None;
         self.drag
             .take()
-            .is_some_and(|g| !matches!(g, Gesture::Create { .. }))
+            .is_some_and(|g| matches!(g, Gesture::Paint { .. }) || changed)
     }
 }
 impl Default for RigEditor {
@@ -93,6 +100,10 @@ impl Default for RigEditor {
             turn_drag: None,
             selection_rotation: None,
             turn_slider: None,
+            grab: None,
+            gesture_started: false,
+            grab_offset: Vec2::ZERO,
+            angle_offset: 0.,
             drag: None,
         }
     }
@@ -946,12 +957,7 @@ impl Editor {
         };
         let world = view.world(screen);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self
-                .rigging
-                .drag
-                .take()
-                .is_some_and(|g| !matches!(g, Gesture::Create { .. }))
-            {
+            if self.rigging.cancel_gesture() {
                 self.history(false);
             }
             self.rigging.paint = false;
@@ -960,6 +966,10 @@ impl Editor {
             && area.contains(screen)
             && ui.ctx().layer_id_at(screen) == Some(ui.layer_id())
         {
+            self.rigging.grab = Some(screen);
+            self.rigging.gesture_started = false;
+            self.rigging.grab_offset = Vec2::ZERO;
+            self.rigging.angle_offset = 0.;
             let poses = self.doc.extras.rig.poses(rig_frame);
             if self.tool == Tool::Bones {
                 if self.rigging.paint && self.rigging.bone.is_some() {
@@ -1005,7 +1015,18 @@ impl Editor {
                         .map(|(id, _)| *id);
                     if let Some(id) = id {
                         self.rigging.bone = Some(id);
-                        self.checkpoint();
+                        let pose = &poses[&id];
+                        if self
+                            .doc
+                            .extras
+                            .rig
+                            .bones
+                            .iter()
+                            .any(|bone| bone.id == id && bone.ik)
+                        {
+                            self.rigging.grab_offset = world - pose.end;
+                        }
+                        self.rigging.angle_offset = (world - pose.start).angle() - pose.angle;
                         self.rigging.drag = if self.rigging.reanchor
                             || ui.input(|i| i.modifiers.shift && !i.modifiers.command)
                         {
@@ -1089,7 +1110,21 @@ impl Editor {
                 if let Some((target, id)) = found {
                     self.rigging.target = Some(target);
                     self.rigging.pin = Some(id);
-                    self.checkpoint();
+                    if let Some(binding) = self
+                        .doc
+                        .extras
+                        .rig
+                        .bindings
+                        .iter()
+                        .find(|b| b.target == target)
+                        && let Some(pin) = binding.pins.iter().find(|p| p.id == id)
+                    {
+                        self.rigging.grab_offset = world
+                            - rig::point(
+                                self.binding_delta(binding),
+                                rig::skin_point(binding, &poses, rig::pin_value(pin, rig_frame)),
+                            );
+                    }
                     self.rigging.drag = Some(
                         if self.rigging.reanchor || ui.input(|i| i.modifiers.shift) {
                             Gesture::ReanchorPin { target, id }
@@ -1105,6 +1140,24 @@ impl Editor {
             }
         }
         if let Some(gesture) = self.rigging.drag.clone() {
+            if !matches!(gesture, Gesture::Create { .. } | Gesture::Paint { .. })
+                && !self.rigging.gesture_started
+            {
+                if self
+                    .rigging
+                    .grab
+                    .is_none_or(|grab| grab.distance(screen) < 3.)
+                {
+                    if !ui.input(|i| i.pointer.primary_down()) {
+                        self.rigging.cancel_gesture();
+                    }
+                    return true;
+                }
+                let selection = self.canvas.selected.clone();
+                self.checkpoint();
+                self.canvas.selected = selection;
+                self.rigging.gesture_started = true;
+            }
             match gesture {
                 Gesture::Create { start, parent, .. } => {
                     self.rigging.drag = Some(Gesture::Create {
@@ -1127,14 +1180,20 @@ impl Editor {
                         return true;
                     };
                     if bone.ik {
-                        self.doc.extras.rig.solve_ik(id, world, rig_frame);
+                        self.doc.extras.rig.solve_ik(
+                            id,
+                            world - self.rigging.grab_offset,
+                            rig_frame,
+                        );
                     } else {
                         let poses = self.doc.extras.rig.poses(rig_frame);
                         if let Some(p) = poses.get(&id) {
                             let mut key = rig::bone_value(&bone, rig_frame);
                             let d = world - p.start;
                             if d.length_sq() > 1e-6 {
-                                key.angle += crate::animation::shortest(d.angle() - p.angle);
+                                key.angle += crate::animation::shortest(
+                                    d.angle() - p.angle - self.rigging.angle_offset,
+                                );
                                 key.frame = rig_frame;
                                 self.doc.extras.rig.set_bone_key(id, key);
                             }
@@ -1197,6 +1256,7 @@ impl Editor {
                     }
                 }
                 Gesture::ReanchorPin { target, id } => {
+                    let world = world - self.rigging.grab_offset;
                     let rig = &self.doc.extras.rig;
                     let poses = rig.poses(rig_frame);
                     if let Some(index) = rig
@@ -1271,6 +1331,7 @@ impl Editor {
                     }
                 }
                 Gesture::Pin { target, id } => {
+                    let world = world - self.rigging.grab_offset;
                     let poses = self.doc.extras.rig.poses(rig_frame);
                     if let Some(b) = self
                         .doc
@@ -1337,6 +1398,8 @@ impl Editor {
                     }
                 } else {
                     self.rigging.drag = None;
+                    self.rigging.gesture_started = false;
+                    self.rigging.grab = None;
                     self.recover();
                 }
             }
@@ -1785,7 +1848,7 @@ impl Editor {
             .add(egui::Slider::new(&mut bone.radius, 1. ..=500.).text(tr("Radio")))
             .changed();
         if changed {
-            self.checkpoint();
+            self.begin_property_edit(("bone-settings", bone.id));
             self.doc.extras.rig.bones[index] = bone.clone();
             self.recover();
         }
@@ -1813,7 +1876,7 @@ impl Editor {
             }
         });
         if rule != before {
-            self.checkpoint();
+            self.begin_property_edit(("bone-limits", bone.id));
             if rule == Default::default() {
                 self.doc.extras.rig.ik_rules.remove(&bone.id);
             } else {
@@ -2080,7 +2143,7 @@ impl Editor {
             }
         });
         if pose_changed {
-            self.checkpoint();
+            self.begin_property_edit(("bone-pose", bone.id, rig_frame));
             value.frame = rig_frame;
             self.doc.extras.rig.set_bone_key(bone.id, value);
             self.recover();
@@ -2219,7 +2282,7 @@ impl Editor {
         let target = binding.target;
         let mut name = pin.name.clone();
         if ui.text_edit_singleline(&mut name).changed() {
-            self.checkpoint();
+            self.begin_property_edit(("pin-name", target, pin.id));
             self.doc.extras.rig.bindings[bi].pins[pi].name = name;
             self.recover();
         }
@@ -2239,7 +2302,7 @@ impl Editor {
             }
         });
         if changed {
-            self.checkpoint();
+            self.begin_property_edit(("pin-position", target, pin.id, rig_frame));
             self.doc.extras.rig.set_pin_key(
                 target,
                 pin.id,

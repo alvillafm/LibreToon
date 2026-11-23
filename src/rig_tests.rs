@@ -558,6 +558,63 @@ fn weight_paint_respects_locked_and_hidden_instances() {
     );
 }
 #[test]
+fn selecting_bones_and_pins_without_dragging_does_not_edit_or_key() {
+    let mut e = setup();
+    e.add_bone(Pos2::new(10., 50.), Pos2::new(100., 50.), None);
+    e.rigging.create = false;
+    e.frame = 5;
+    let ctx = egui::Context::default();
+    let view = crate::canvas::View {
+        center: Pos2::ZERO,
+        stage_center: Pos2::ZERO,
+        angle: 0.,
+        scale: 1.,
+    };
+    let tick = |e: &mut Editor, events| {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(500.))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                e.rig_input(ui, ui.max_rect(), view, &[]);
+            },
+        );
+        out.textures_delta.clear();
+    };
+    let click = |e: &mut Editor, point| {
+        for pressed in [true, false] {
+            tick(
+                e,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+    };
+    e.tool = Tool::Bones;
+    tick(&mut e, vec![]);
+    let before = serde_json::to_value(&e.doc).unwrap();
+    let undo = e.undo.len();
+    click(&mut e, Pos2::new(55., 54.));
+    assert_eq!(serde_json::to_value(&e.doc).unwrap(), before);
+    assert_eq!(e.undo.len(), undo);
+    e.add_puppet_pin(0, 0, Pos2::new(55., 50.));
+    e.tool = Tool::Puppet;
+    let before = serde_json::to_value(&e.doc).unwrap();
+    let undo = e.undo.len();
+    click(&mut e, Pos2::new(58., 52.));
+    assert_eq!(serde_json::to_value(&e.doc).unwrap(), before);
+    assert_eq!(e.undo.len(), undo);
+}
+#[test]
 fn pointer_gestures_create_pose_and_move_puppet_pins() {
     let mut e = setup();
     let ctx = egui::Context::default();
