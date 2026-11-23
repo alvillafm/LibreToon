@@ -373,7 +373,8 @@ pub fn outline(mark: &Mark) -> MultiPolygon<f64> {
 }
 pub fn export_marks(mark: &Mark) -> Vec<Mark> {
     if !mark.stroke
-        || (mark.width_profile.is_empty()
+        || (mark.style.stroke_gradient.is_none()
+            && mark.width_profile.is_empty()
             && mark.style.start_cap == crate::features::Cap::Round
             && mark.style.end_cap == crate::features::Cap::Round)
     {
@@ -383,10 +384,18 @@ pub fn export_marks(mark: &Mark) -> Vec<Mark> {
     if mark.fill.is_some() {
         let mut fill = mark.clone();
         fill.stroke = false;
+        fill.style.stroke_gradient = None;
         fill.width_profile = Default::default();
         output.push(fill);
     }
-    output.extend(vector::polygons_to_marks(outline(mark), mark.color));
+    output.extend(
+        vector::polygons_to_marks(outline(mark), mark.color)
+            .into_iter()
+            .map(|mut shape| {
+                shape.style.gradient = mark.style.stroke_gradient.clone();
+                shape
+            }),
+    );
     output
 }
 /// Preserve the same width distribution when a stroke is cut into a subpath.

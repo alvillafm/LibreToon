@@ -1157,7 +1157,7 @@ pub fn deform_path(mark: &Mark, f: &impl Fn(Pos2) -> Pos2) -> Mark {
                 .collect()
         })
         .collect();
-    if let Some(g) = out.style.gradient.as_mut() {
+    for g in out.style.gradients_mut() {
         g.start = vector::xy(f(vector::pos(g.start)));
         g.end = vector::xy(f(vector::pos(g.end)));
     }

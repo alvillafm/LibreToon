@@ -25,3 +25,9 @@ In Properties, **Connect** joins two compatible open stroke endpoints. **Merge**
 Expand **Align and distribute** or **Transform selected nodes** to align or distribute anchors and apply a numerical translation, rotation or scale. **Simplify** opens a preview with a pixel tolerance and an option to preserve corners. Review the cyan candidate contour, then choose **Apply** or **Cancel**. Higher tolerances can change the silhouette, so inspect important corners before applying.
 
 Anchor types are saved in `.ltoon` projects. Older projects infer their initial handle behavior from the stored geometry.
+
+## Gradient outlines
+
+Select a vector path and open **Properties → Gradient**. Choose **Stroke**, enable **Gradient**, and edit its color stops, opacity, linear/radial type and rotation. Choose **Fill** to edit the fill gradient independently. The same options apply to new paths when a vector drawing tool is active.
+
+With Selection or Transform active, choose the desired Fill/Stroke channel and drag the gradient endpoints on the canvas to reposition it. Applying a solid stroke color replaces the stroke gradient. Native projects preserve both gradients; image/video exports render them, and SVG export converts gradient strokes into filled outline geometry.

@@ -1237,6 +1237,7 @@ fn eye_opening(marks: &[Mark]) -> Option<[Mark; 2]> {
     {
         let mut fill = mark.clone();
         fill.stroke = false;
+        fill.style.stroke_gradient = None;
         let mut outline = mark.clone();
         outline.fill = None;
         outline.style.gradient = None;

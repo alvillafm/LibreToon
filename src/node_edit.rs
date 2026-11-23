@@ -870,6 +870,7 @@ impl Editor {
             let mut fill = marks[m].clone();
             let mut stroke = fill.clone();
             fill.stroke = false;
+            fill.style.stroke_gradient = None;
             fill.style.palette_stroke = None;
             fill.style.track = crate::features::id();
             fill.style.linked_outline_fill = false;

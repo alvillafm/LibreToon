@@ -771,6 +771,11 @@ pub(crate) fn shape_pair_with(
                     (Some(a), Some(b)) => a.radial == b.radial && a.stops.len() == b.stops.len(),
                     _ => false,
                 }
+                && match (&a.style.stroke_gradient, &b.style.stroke_gradient) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.radial == b.radial && a.stops.len() == b.stops.len(),
+                    _ => false,
+                }
         })
 }
 
@@ -824,6 +829,14 @@ pub(crate) fn morph(a: &Mark, b: &Mark, t: f32) -> Mark {
         out.style.palette_stroke = None;
     }
     if let (Some(gradient), Some(b)) = (&mut out.style.gradient, &b.style.gradient) {
+        gradient.start = point(gradient.start, b.start);
+        gradient.end = point(gradient.end, b.end);
+        for (a, b) in gradient.stops.iter_mut().zip(b.stops.iter()) {
+            a.t = mix(a.t, b.t);
+            a.color = color(a.color, b.color);
+        }
+    }
+    if let (Some(gradient), Some(b)) = (&mut out.style.stroke_gradient, &b.style.stroke_gradient) {
         gradient.start = point(gradient.start, b.start);
         gradient.end = point(gradient.end, b.end);
         for (a, b) in gradient.stops.iter_mut().zip(b.stops.iter()) {

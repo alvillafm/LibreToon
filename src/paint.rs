@@ -260,7 +260,15 @@ pub fn draw(
 ) -> bool {
     let thick_primitive =
         mark.stroke && mark.width > 20. && (mark.rectangle || mark.closed && mark.nodes.is_empty());
-    draw_prepared(p, mark, view, ghost, selected, cache, thick_primitive)
+    draw_prepared(
+        p,
+        mark,
+        view,
+        ghost,
+        selected,
+        cache,
+        thick_primitive || mark.style.stroke_gradient.is_some(),
+    )
 }
 
 pub(crate) fn draw_composited(p: &egui::Painter, mark: &Mark, view: View, cache: &mut RenderCache) {
@@ -340,10 +348,37 @@ fn draw_prepared(
     }
     if mark.stroke && !prepared.stroke_mesh.indices.is_empty() {
         let ink = color(mark.color);
-        p.add(egui::Shape::mesh(mesh(&prepared.stroke_mesh, view, ink)));
+        let gradient = mark.style.stroke_gradient.as_ref().filter(|_| !ghost);
+        p.add(egui::Shape::mesh(if let Some(g) = gradient {
+            gradient_mesh(&prepared.stroke_mesh, view, g, selected)
+        } else {
+            mesh(&prepared.stroke_mesh, view, ink)
+        }));
         let feather = p.ctx().pixels_per_point().max(0.1).recip();
         for (ring, hole) in prepared.stroke_rings.iter().zip(&prepared.stroke_holes) {
-            let edge = boundary_fringe(ring, *hole, view, ink, feather);
+            let mut edge = boundary_fringe(
+                ring,
+                *hole,
+                view,
+                if gradient.is_some() {
+                    Color32::WHITE
+                } else {
+                    ink
+                },
+                feather,
+            );
+            if let Some(g) = gradient {
+                for vertex in &mut edge.vertices {
+                    let coverage = vertex.color.a() as f32 / 255.;
+                    let c = g.color(view.world(vertex.pos));
+                    vertex.color = Color32::from_rgba_unmultiplied(
+                        c[0],
+                        c[1],
+                        c[2],
+                        (c[3] as f32 * coverage).round() as u8,
+                    );
+                }
+            }
             if !edge.indices.is_empty() {
                 p.add(egui::Shape::mesh(edge));
             }
@@ -1078,5 +1113,129 @@ mod bucket_edge_regressions {
             }
             assert!(count > 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod stroke_gradient_tests {
+    use super::*;
+    fn gradient(radial: bool) -> crate::features::Gradient {
+        crate::features::Gradient {
+            radial,
+            start: [8., 32.],
+            end: [56., 32.],
+            stops: vec![
+                crate::features::Stop {
+                    t: 0.,
+                    color: [255, 0, 0, 255],
+                },
+                crate::features::Stop {
+                    t: 0.5,
+                    color: [0, 255, 0, 255],
+                },
+                crate::features::Stop {
+                    t: 1.,
+                    color: [0, 0, 255, 128],
+                },
+            ]
+            .into(),
+        }
+    }
+    #[test]
+    fn stroke_gradient_renders_in_viewport_and_export_with_width_profile_and_alpha() {
+        for radial in [false, true] {
+            for variable in [false, true] {
+                let mut mark = Mark {
+                    points: vec![[8., 32.], [56., 32.]].into(),
+                    width: 12.,
+                    color: [0; 4],
+                    ..Default::default()
+                };
+                mark.style.stroke_gradient = Some(gradient(radial));
+                if variable {
+                    mark.width_profile = crate::width::Preset::Tapered.stops();
+                }
+                let mut doc = crate::Document::default();
+                doc.width = 64;
+                doc.height = 64;
+                doc.layers[0].frames[0] = vec![mark.clone()].into();
+                let pixels = crate::exporter::raster(
+                    &doc,
+                    0,
+                    64,
+                    64,
+                    &egui::Context::default(),
+                    &mut Default::default(),
+                );
+                let mid = &pixels[(32 * 64 + 32) * 3..(32 * 64 + 32) * 3 + 3];
+                assert!(
+                    mid[1] > 180 && mid[0] < 90 && mid[2] < 90,
+                    "center={mid:?}, radial={radial}, variable={variable}"
+                );
+                if !variable {
+                    let right = &pixels[(32 * 64 + 54) * 3..(32 * 64 + 54) * 3 + 3];
+                    assert!(right[2] > 190 && right[0] > 60, "alpha={right:?}");
+                }
+                let ctx = egui::Context::default();
+                let mut cache = RenderCache::default();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::Vec2::splat(64.),
+                        )),
+                        ..Default::default()
+                    },
+                    |_| {
+                        let painter = ctx.layer_painter(egui::LayerId::background());
+                        assert!(draw(
+                            &painter,
+                            &mark,
+                            View {
+                                center: Pos2::ZERO,
+                                stage_center: Pos2::ZERO,
+                                angle: 0.,
+                                scale: 1.
+                            },
+                            false,
+                            false,
+                            Some(&mut cache)
+                        ));
+                    },
+                );
+                let shapes = std::mem::take(&mut output.shapes);
+                output.textures_delta.clear();
+                let primitives = ctx.tessellate(shapes, 1.);
+                assert!(primitives.iter().any(|p| {
+                    match &p.primitive {
+                        egui::epaint::Primitive::Mesh(m) => m
+                            .vertices
+                            .iter()
+                            .any(|v| v.color.g() > 180 && v.color.r() < 90),
+                        _ => false,
+                    }
+                }));
+            }
+        }
+    }
+    #[test]
+    fn changing_gradient_and_width_reuses_only_compatible_geometry() {
+        let mut mark = Mark {
+            points: vec![[10., 10.], [90., 10.]].into(),
+            width: 4.,
+            ..Default::default()
+        };
+        let mut cache = RenderCache::default();
+        cache.get(&mark, 1., false);
+        mark.style.stroke_gradient = Some(gradient(false));
+        let a = cache.get(&mark, 1., true);
+        assert!(!a.stroke_mesh.indices.is_empty());
+        let builds = cache.builds;
+        mark.style.stroke_gradient.as_mut().unwrap().stops[0].color = [123, 45, 67, 255];
+        cache.get(&mark, 1., true);
+        assert_eq!(cache.builds, builds);
+        mark.width = 20.;
+        let b = cache.get(&mark, 1., true);
+        assert_ne!(a.stroke_mesh.vertices, b.stroke_mesh.vertices);
     }
 }

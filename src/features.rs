@@ -164,11 +164,34 @@ pub struct MarkStyle {
     pub text: Option<Box<crate::typography::TextSpec>>,
     pub track: u64,
     pub gradient: Option<Gradient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_gradient: Option<Gradient>,
     pub shade: u8,
     pub light: u8,
     pub start_cap: Cap,
     pub end_cap: Cap,
     pub instance: Option<Instance>,
+}
+impl MarkStyle {
+    pub(crate) fn gradients_mut(&mut self) -> impl Iterator<Item = &mut Gradient> {
+        self.gradient
+            .iter_mut()
+            .chain(self.stroke_gradient.iter_mut())
+    }
+    pub(crate) fn channel_gradient(&self, fill: bool) -> Option<&Gradient> {
+        if fill {
+            self.gradient.as_ref()
+        } else {
+            self.stroke_gradient.as_ref()
+        }
+    }
+    pub(crate) fn channel_gradient_mut(&mut self, fill: bool) -> &mut Option<Gradient> {
+        if fill {
+            &mut self.gradient
+        } else {
+            &mut self.stroke_gradient
+        }
+    }
 }
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum ObjectFolderMode {
@@ -425,6 +448,8 @@ pub struct FeatureState {
     pub toon_levels: u8,
     pub gradient_on: bool,
     pub gradient: Gradient,
+    pub stroke_gradient_on: bool,
+    pub stroke_gradient: Gradient,
     pub start_cap: Cap,
     pub end_cap: Cap,
     pub library: bool,
@@ -454,6 +479,8 @@ impl Default for FeatureState {
             toon_levels: 1,
             gradient_on: false,
             gradient: Default::default(),
+            stroke_gradient_on: false,
+            stroke_gradient: Default::default(),
             start_cap: Cap::Round,
             end_cap: Cap::Round,
             library: false,
@@ -715,7 +742,14 @@ pub fn ink(marks: &[Mark]) -> geo::MultiPolygon<f64> {
                 geo::MultiPolygon(vec![crate::vector::polygon(mark)])
             });
         }
-        if mark.stroke && mark.color[3] > 0 {
+        if mark.stroke
+            && (mark.color[3] > 0
+                || mark
+                    .style
+                    .stroke_gradient
+                    .as_ref()
+                    .is_some_and(|g| g.stops.iter().any(|s| s.color[3] > 0)))
+        {
             pieces.push(crate::width::outline(mark));
         }
     }
@@ -851,7 +885,7 @@ fn resolve_internal(
                     if let Some(c) = part.fill.as_mut() {
                         c[3] = (c[3] as f32 * alpha).round() as u8;
                     }
-                    if let Some(g) = part.style.gradient.as_mut() {
+                    for g in part.style.gradients_mut() {
                         for s in &mut g.stops {
                             s.color[3] = (s.color[3] as f32 * alpha).round() as u8;
                         }
@@ -967,7 +1001,10 @@ pub fn baked(doc: &Document) -> Document {
                 && l.options.mask_id.is_none()
                 && l.options.masked_by.is_none()
                 && l.frames.iter().flatten().all(|m| {
-                    !m.style.guide && m.style.gradient.is_none() && m.style.instance.is_none()
+                    !m.style.guide
+                        && m.style.gradient.is_none()
+                        && m.style.stroke_gradient.is_none()
+                        && m.style.instance.is_none()
                 })
         })
     {
@@ -981,7 +1018,16 @@ pub fn baked(doc: &Document) -> Document {
     result.layers[0].frames = Vec::with_capacity(count).into();
     for f in 0..count {
         let mut frame = vec![];
-        for (_, _, mark) in crate::animation::resolve_movie(doc, f, true) {
+        for mark in crate::animation::resolve_movie(doc, f, true)
+            .into_iter()
+            .flat_map(|(_, _, mark)| {
+                if mark.style.stroke_gradient.is_some() {
+                    crate::width::export_marks(&mark)
+                } else {
+                    vec![mark]
+                }
+            })
+        {
             if let Some(g) = &mark.style.gradient {
                 let bounds = crate::vector::control_bounds(&mark);
                 let source = if mark.style.text.is_some() {
@@ -1101,7 +1147,9 @@ pub fn validate(doc: &Document) -> Result<(), String> {
             .filter(|f| checked.insert(f.identity()))
             .flatten()
         {
-            if m.style.gradient.as_ref().is_some_and(|g| !g.valid()) {
+            if m.style.gradient.as_ref().is_some_and(|g| !g.valid())
+                || m.style.stroke_gradient.as_ref().is_some_and(|g| !g.valid())
+            {
                 return Err("Invalid gradient".into());
             }
             if let Some(i) = &m.style.instance {
@@ -1308,6 +1356,11 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
                         .chain(mark.holes.iter().flat_map(|h| h.iter().flatten()))
                         .any(|v| !v.is_finite() || v.abs() > 1e7)
                     || mark.style.gradient.as_ref().is_some_and(|g| !g.valid())
+                    || mark
+                        .style
+                        .stroke_gradient
+                        .as_ref()
+                        .is_some_and(|g| !g.valid())
                 {
                     return Err("Invalid symbol or scene geometry".into());
                 }
@@ -1540,7 +1593,7 @@ pub fn apply_color(m: &mut Mark, c: [f32; 8]) {
     if let Some(f) = m.fill.as_mut() {
         convert(f);
     }
-    if let Some(g) = m.style.gradient.as_mut() {
+    for g in m.style.gradients_mut() {
         for s in &mut g.stops {
             convert(&mut s.color);
         }

@@ -24,6 +24,14 @@ impl Editor {
                     .gradient
                     .fit(crate::vector::control_bounds(mark));
             }
+            self.feature.stroke_gradient_on = mark.style.stroke_gradient.is_some();
+            if let Some(g) = &mark.style.stroke_gradient {
+                self.feature.stroke_gradient = g.clone();
+            } else {
+                self.feature
+                    .stroke_gradient
+                    .fit(crate::vector::control_bounds(mark));
+            }
             self.feature.start_cap = mark.style.start_cap;
             self.feature.end_cap = mark.style.end_cap;
             self.fill_enabled = mark.fill.is_some();
@@ -68,6 +76,8 @@ impl Editor {
             if stroke && mark.stroke {
                 mark.color = self.color.to_array();
                 mark.style.palette_stroke = None;
+                mark.style.stroke_gradient = None;
+                self.feature.stroke_gradient_on = false;
             }
             if width && mark.stroke {
                 mark.width = self.width;

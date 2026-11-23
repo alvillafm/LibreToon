@@ -63,6 +63,7 @@ fn recolor(
                         if let Some(new) = new
                             && mark.stroke
                             && mark.color == old
+                            && mark.style.stroke_gradient.is_none()
                         {
                             mark.color = new;
                         } else {
@@ -159,7 +160,9 @@ impl Editor {
             .and_then(|color| self.track_vector_color(color));
         mark.style.palette_stroke = mark
             .stroke
-            .then(|| self.track_vector_color(mark.color))
+            .then_some(mark.color)
+            .filter(|_| mark.style.stroke_gradient.is_none())
+            .map(|color| self.track_vector_color(color))
             .flatten();
     }
 

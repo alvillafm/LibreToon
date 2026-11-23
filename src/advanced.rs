@@ -60,6 +60,11 @@ impl Editor {
                 g.fit(bounds);
                 m.style.gradient = Some(g);
             }
+            if m.stroke && self.feature.stroke_gradient_on {
+                let mut g = self.feature.stroke_gradient.clone();
+                g.fit(bounds);
+                m.style.stroke_gradient = Some(g);
+            }
             self.link_drawn_colors(m);
         }
         marks
@@ -538,29 +543,113 @@ impl Editor {
         }
         true
     }
+    pub(crate) fn apply_channel_gradient(&mut self, fill: bool, gradient: Option<Gradient>) {
+        if gradient.as_ref().is_some_and(|g| !g.valid()) {
+            return;
+        }
+        let ids = self
+            .canvas
+            .selected
+            .iter()
+            .copied()
+            .filter(|&(l, m)| {
+                let layer = &self.doc.layers[l];
+                !layer.options.locked
+                    && layer.frames[self.frame].get(m).is_some_and(|mark| {
+                        if fill {
+                            mark.fill.is_some()
+                        } else {
+                            mark.stroke
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        let mut state = std::mem::take(&mut self.canvas);
+        self.canvas.selected = state.selected.clone();
+        self.begin_property_edit(("vector-gradient", fill));
+        self.materialize_fragments(&mut state);
+        self.canvas = state;
+        let ids = self
+            .canvas
+            .selected
+            .iter()
+            .copied()
+            .filter(|&(l, m)| {
+                !self.doc.layers[l].options.locked
+                    && self.doc.layers[l].frames[self.frame]
+                        .get(m)
+                        .is_some_and(|mark| {
+                            crate::node_edit::supported(mark)
+                                && if fill {
+                                    mark.fill.is_some()
+                                } else {
+                                    mark.stroke
+                                }
+                        })
+            })
+            .collect::<Vec<_>>();
+        self.materialize_motion(&ids);
+        for &(l, m) in &ids {
+            let mark = &mut self.doc.layers[l].frames[self.frame][m];
+            *mark.style.channel_gradient_mut(fill) = gradient.clone();
+            if gradient.is_some() {
+                if fill {
+                    mark.style.palette_fill = None;
+                } else {
+                    mark.style.palette_stroke = None;
+                }
+            }
+        }
+        self.canvas.selected = ids;
+        self.recover();
+    }
     pub fn gradient_ui(&mut self, ui: &mut egui::Ui) {
-        design::category(ui, "RELLENO Y DEGRADADO");
+        design::category(ui, "GRADIENT");
+        ui.horizontal(|ui| {
+            for (fill, icon, label) in [(true, Icon::Bucket, "Fill"), (false, Icon::Line, "Stroke")]
+            {
+                if design::button(ui, icon, label, label, self.active_fill == fill, true).clicked()
+                {
+                    self.active_fill = fill;
+                }
+            }
+        });
+        let fill = self.active_fill;
+        if !fill {
+            std::mem::swap(
+                &mut self.feature.gradient_on,
+                &mut self.feature.stroke_gradient_on,
+            );
+            std::mem::swap(
+                &mut self.feature.gradient,
+                &mut self.feature.stroke_gradient,
+            );
+        }
         let mut changed = ui
             .checkbox(&mut self.feature.gradient_on, tr("Degradado"))
             .changed();
         if self.feature.gradient_on {
             changed |= self.visual_gradient_ui(ui);
         }
-        if changed && !self.canvas.selected.is_empty() {
-            let ids = self.canvas.selected.clone();
-            self.checkpoint();
-            for &(l, m) in &ids {
-                let mark = &mut self.doc.layers[l].frames[self.frame][m];
-                if mark.fill.is_some() {
-                    mark.style.gradient = if self.feature.gradient_on {
-                        Some(self.feature.gradient.clone())
-                    } else {
-                        None
-                    };
-                }
-            }
-            self.canvas.selected = ids;
-            self.recover();
+        let gradient = self
+            .feature
+            .gradient_on
+            .then(|| self.feature.gradient.clone());
+        if !fill {
+            std::mem::swap(
+                &mut self.feature.gradient_on,
+                &mut self.feature.stroke_gradient_on,
+            );
+            std::mem::swap(
+                &mut self.feature.gradient,
+                &mut self.feature.stroke_gradient,
+            );
+        }
+        if changed {
+            self.apply_channel_gradient(fill, gradient);
         }
     }
     pub fn advanced_properties(&mut self, ui: &mut egui::Ui) {
@@ -676,9 +765,16 @@ impl Editor {
             .iter()
             .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].fill.is_some());
         if fill
+            || self
+                .canvas
+                .selected
+                .iter()
+                .any(|&(l, m)| self.doc.layers[l].frames[self.frame][m].stroke)
             || matches!(
                 self.tool,
                 Tool::Bucket
+                    | Tool::VectorBrush
+                    | Tool::Line
                     | Tool::Brush
                     | Tool::FillBrush
                     | Tool::Rectangle
@@ -1620,6 +1716,62 @@ mod tests {
         eprintln!(
             "Toon shading intersecting 200 rectangular fills: {:?} per stroke (20 iterations)",
             start.elapsed() / 20
+        );
+    }
+}
+
+#[cfg(test)]
+mod stroke_gradient_tests {
+    use super::*;
+    #[test]
+    fn independent_gradients_survive_transforms_native_svg_fla_and_single_undo() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        e.doc = crate::fresh_document();
+        let mut mark = Mark {
+            points: vec![[10., 10.], [100., 100.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([255; 4]),
+            width: 12.,
+            ..Default::default()
+        };
+        mark.style.gradient = Some(Gradient::default());
+        e.doc.layers[0].frames[0] = vec![mark.clone()].into();
+        e.canvas.selected = vec![(0, 0)];
+        let mut gradient = Gradient::default();
+        gradient.start = [10., 10.];
+        gradient.end = [100., 100.];
+        e.apply_channel_gradient(false, Some(gradient.clone()));
+        e.apply_channel_gradient(false, Some(gradient.clone()));
+        assert_eq!(e.undo.len(), 1);
+        let changed = e.doc.layers[0].frames[0][0].clone();
+        assert_eq!(changed.style.gradient, mark.style.gradient);
+        let moved = crate::vector::transform(&changed, |p| p + Vec2::new(20., 30.));
+        assert_eq!(
+            moved.style.stroke_gradient.as_ref().unwrap().start,
+            [30., 40.]
+        );
+        let bytes = crate::native_project::encode(&e.doc).unwrap();
+        let restored = crate::native_project::decode_if_native(&bytes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.layers[0].frames[0][0].style.stroke_gradient,
+            Some(gradient.clone())
+        );
+        let svg = e.doc.svg(0);
+        assert!(svg.matches("linearGradient").count() >= 4);
+        let fla = crate::fla::decode(&crate::fla::encode(&e.doc).unwrap()).unwrap();
+        assert_eq!(
+            fla.layers[0].frames[0][0].style.stroke_gradient,
+            Some(gradient)
+        );
+        e.history(false);
+        assert_eq!(e.doc.layers[0].frames[0][0].style.stroke_gradient, None);
+        assert_eq!(
+            e.doc.layers[0].frames[0][0].style.gradient,
+            mark.style.gradient
         );
     }
 }

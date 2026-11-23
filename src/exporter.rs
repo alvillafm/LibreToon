@@ -2585,6 +2585,7 @@ pub(crate) fn art_meshes(
                         guide.color = encode(guide.color[3]);
                         guide.fill = guide.fill.map(|fill| encode(fill[3]));
                         guide.style.gradient = None;
+                        guide.style.stroke_gradient = None;
                         crate::paint::draw_composited(&painter, &guide, view, cache);
                     }
                     continue;

@@ -285,7 +285,7 @@ impl Importer<'_> {
                 if let Some(fill) = m.fill.as_mut() {
                     convert(fill)?;
                 }
-                if let Some(g) = m.style.gradient.as_mut() {
+                for g in m.style.gradients_mut() {
                     for stop in &mut g.stops {
                         convert(&mut stop.color)?;
                     }
@@ -390,7 +390,7 @@ impl Importer<'_> {
                         .unwrap_or(([0, 0, 0, 255], None));
                     strokes.insert(
                         s.a("index").unwrap_or("1").to_owned(),
-                        (style.n("weight", 1.)?.clamp(0.01, 100.), fill.0),
+                        (style.n("weight", 1.)?.clamp(0.01, 100.), fill.0, fill.1),
                     );
                 }
             }
@@ -415,9 +415,10 @@ impl Importer<'_> {
                         .collect();
                     self.account(points.len())?;
                     let stroke = e.a("strokeStyle").unwrap_or("0");
-                    if let Some((width, color)) = strokes.get(stroke) {
+                    if let Some((width, color, gradient)) = strokes.get(stroke) {
                         m.width = *width;
                         m.color = *color;
+                        m.style.stroke_gradient = gradient.clone();
                         out.push(m);
                     }
                     let left = e.a("fillStyle0").unwrap_or("0");

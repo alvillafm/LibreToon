@@ -216,6 +216,7 @@ impl Editor {
                 preview.color = [255, 85, 90, 255];
                 preview.fill = None;
                 preview.style.gradient = None;
+                preview.style.stroke_gradient = None;
                 preview.width += 2. / view.scale.abs().max(0.001);
                 crate::canvas::paint_mark(painter, &preview, view, false, false, None);
             }

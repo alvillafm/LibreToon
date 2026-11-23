@@ -100,7 +100,7 @@ impl Editor {
         let gradient = ids
             .first()
             .and_then(|&(l, m)| self.doc.layers[l].frames[self.frame].get(m))
-            .and_then(|m| m.style.gradient.clone());
+            .and_then(|m| m.style.channel_gradient(self.active_fill).cloned());
         if ui.input(|i| i.pointer.primary_pressed())
             && area.contains(screen)
             && ui.ctx().layer_id_at(screen) == Some(ui.layer_id())
@@ -200,7 +200,7 @@ impl Editor {
                 for &(l, m) in ids {
                     if let Some(g) = self.doc.layers[l].frames[self.frame][m]
                         .style
-                        .gradient
+                        .channel_gradient_mut(self.active_fill)
                         .as_mut()
                     {
                         if i == 0 {
@@ -208,7 +208,11 @@ impl Editor {
                         } else {
                             g.end = crate::vector::xy(view.world(screen));
                         }
-                        self.feature.gradient = g.clone();
+                        if self.active_fill {
+                            self.feature.gradient = g.clone();
+                        } else {
+                            self.feature.stroke_gradient = g.clone();
+                        }
                     }
                 }
             }
@@ -304,7 +308,7 @@ impl Editor {
         if let Some(&(l, m)) = ids.first() {
             if let Some(g) = crate::animation::marks(&self.doc.layers[l], self.frame)
                 .get(m)
-                .and_then(|m| m.style.gradient.as_ref())
+                .and_then(|m| m.style.channel_gradient(self.active_fill))
             {
                 let a = view.screen(crate::vector::pos(g.start));
                 let b = view.screen(crate::vector::pos(g.end));
@@ -398,6 +402,10 @@ impl Editor {
             if let Some(g) = &source.style.gradient {
                 self.feature.gradient = g.clone();
             }
+            self.feature.stroke_gradient_on = source.style.stroke_gradient.is_some();
+            if let Some(g) = &source.style.stroke_gradient {
+                self.feature.stroke_gradient = g.clone();
+            }
             if !ids.is_empty() {
                 self.checkpoint();
                 self.materialize_motion(ids);
@@ -406,13 +414,21 @@ impl Editor {
                         continue;
                     }
                     let target = &mut self.doc.layers[l].frames[self.frame][m];
-                    if target.fill.is_none() {
+                    let fill = self.active_fill;
+                    if fill && target.fill.is_none() || !fill && !target.stroke {
                         continue;
                     }
-                    target.fill = source.fill;
-                    target.style.gradient = source.style.gradient.clone();
+                    if fill {
+                        target.fill = source.fill;
+                        target.style.palette_fill = None;
+                    } else {
+                        target.color = source.color;
+                        target.style.palette_stroke = None;
+                    }
+                    *target.style.channel_gradient_mut(fill) =
+                        source.style.channel_gradient(fill).cloned();
                     let b = crate::vector::control_bounds(target);
-                    if let Some(g) = target.style.gradient.as_mut() {
+                    if let Some(g) = target.style.channel_gradient_mut(fill).as_mut() {
                         let a = crate::vector::control_bounds(&source);
                         let map = |p: [f32; 2]| {
                             crate::vector::xy(

@@ -1016,7 +1016,7 @@ impl Editor {
             } else {
                 style.shade += 1;
             }
-            if let Some(g) = style.gradient.as_mut() {
+            for g in style.gradients_mut() {
                 for stop in &mut g.stops {
                     stop.color = tone(
                         stop.color,

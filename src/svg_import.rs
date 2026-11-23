@@ -750,17 +750,29 @@ pub(crate) fn parse(xml: &str) -> Result<Imported, String> {
                                 &mut result.warnings,
                             )
                         };
-                        let stroke = color(
+                        let stroke_gradient = self::gradient(
                             &style.stroke,
+                            &gradients,
+                            bounds,
                             style.opacity * style.stroke_opacity,
                             &mut result.warnings,
                         );
+                        let stroke = if stroke_gradient.is_some() {
+                            Some([255; 4])
+                        } else {
+                            color(
+                                &style.stroke,
+                                style.opacity * style.stroke_opacity,
+                                &mut result.warnings,
+                            )
+                        };
                         for mark in &mut marks {
                             mark.fill = fill;
                             mark.stroke = stroke.is_some() && style.width > 0.;
                             mark.color = stroke.unwrap_or([0; 4]);
                             mark.width = style.width.clamp(0.01, 100.);
                             mark.style.gradient = gradient.clone();
+                            mark.style.stroke_gradient = stroke_gradient.clone();
                             mark.style.start_cap = style.cap;
                             mark.style.end_cap = style.cap;
                         }
@@ -1042,5 +1054,20 @@ mod tests {
         assert_eq!(e.undo.len(), 1);
         e.history(false);
         assert_eq!(serde_json::to_value(&e.doc).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod stroke_gradient_tests {
+    #[test]
+    fn svg_stroke_gradients_stay_editable_and_keep_opacity() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><path d="M10 20L110 20" fill="none" stroke="url(#g)" stroke-opacity="0.5" stroke-width="10"/></svg>"##;
+        let result = super::parse(svg).unwrap();
+        let mark = &result.marks[0];
+        assert!(mark.stroke && mark.fill.is_none() && !mark.nodes.is_empty());
+        let g = mark.style.stroke_gradient.as_ref().unwrap();
+        assert_eq!(g.start, [10., 20.]);
+        assert_eq!(g.end, [110., 20.]);
+        assert!((g.stops[0].color[3] as i32 - 127).abs() <= 1);
     }
 }

@@ -274,6 +274,7 @@ impl Editor {
         } else {
             self.color = color;
             self.stroke_enabled = true;
+            self.feature.stroke_gradient_on = false;
         }
         self.active_fill = fill;
     }

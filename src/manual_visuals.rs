@@ -333,6 +333,11 @@ fn screenshot(doc: Document, frame: usize, tool: crate::canvas::Tool, color: boo
         e.canvas
             .set_node_ids(vec![(e.layer, 0, 0), (e.layer, 0, 1)]);
     }
+    if tool == crate::canvas::Tool::Line {
+        e.canvas.selected = vec![(e.layer, 0)];
+        e.sync_selected_style(&[(e.layer, 0)]);
+        e.active_fill = false;
+    }
     e.status.clear();
     crate::i18n::set_locale(crate::i18n::Language::English);
     crate::themes::ensure(&ctx, crate::themes::Theme::Studio);
@@ -492,4 +497,30 @@ fn node_editor_visual_qa() {
     assert!(Path::new(&local).ends_with("manual-sandbox"));
     let output = Path::new("target/qa/node-editor.png");
     screenshot(owl(2), 0, crate::canvas::Tool::Node, false, output);
+}
+
+#[test]
+#[ignore = "headless stroke gradient visual QA; use isolated LOCALAPPDATA"]
+fn stroke_gradient_visual_qa() {
+    let local = std::env::var("LOCALAPPDATA").unwrap();
+    assert!(Path::new(&local).ends_with("manual-sandbox"));
+    let mut mark = ellipse([640., 360.], [300., 200.], [242, 235, 220, 255]);
+    mark.width = 32.;
+    let mut gradient = crate::features::Gradient::default();
+    gradient.start = [340., 360.];
+    gradient.end = [940., 360.];
+    gradient.stops[0].color = [246, 65, 93, 255];
+    gradient.stops[1].color = [53, 106, 247, 255];
+    mark.style.stroke_gradient = Some(gradient);
+    let mut doc = Document::default();
+    doc.width = 1280;
+    doc.height = 720;
+    doc.layers = vec![layer("Gradient outline", vec![mark], 24)].into();
+    screenshot(
+        doc,
+        0,
+        crate::canvas::Tool::Line,
+        false,
+        Path::new("target/qa/stroke-gradient.png"),
+    );
 }

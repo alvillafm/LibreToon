@@ -517,6 +517,7 @@ fn tint(mark: &mut crate::Mark, color: Color32) {
         mark.fill = Some(color);
     }
     mark.style.gradient = None;
+    mark.style.stroke_gradient = None;
 }
 
 #[cfg(test)]
