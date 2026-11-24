@@ -1135,7 +1135,7 @@ impl Editor {
                         self.frame -= 1;
                         self.playing = false;
                     }
-                    if button(
+                    let play_button = button(
                         ui,
                         if self.playing {
                             Icon::Pause
@@ -1146,9 +1146,10 @@ impl Editor {
                         "Reproducir",
                         self.playing,
                         true,
-                    )
-                    .clicked()
-                    {
+                    );
+                    #[cfg(test)]
+                    ui.data_mut(|data| data.insert_temp(egui::Id::unique("test-timeline-play"), play_button.rect));
+                    if play_button.clicked() {
                         self.toggle_timeline_play();
                     }
                     if button(

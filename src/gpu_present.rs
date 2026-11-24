@@ -41,6 +41,9 @@ struct Frame {
 struct State {
     gpu: Arc<crate::gpu_lens::GpuLens>,
     format: wgpu::TextureFormat,
+    // art_meshes runs egui passes. Never give it the live editor context:
+    // doing so replaces input, viewport geometry and widget state per layer.
+    render_ctx: egui::Context,
     graph: crate::gpu_scene::Cache,
     pipeline: Option<wgpu::RenderPipeline>,
     bind: Option<wgpu::BindGroup>,
@@ -128,6 +131,7 @@ impl Presenter {
                     render.queue.clone(),
                 )),
                 format: render.target_format,
+                render_ctx: egui::Context::default(),
                 graph: Default::default(),
                 pipeline: None,
                 bind: None,
@@ -442,13 +446,14 @@ impl Draw {
             let camera =
                 crate::depth::camera(&request.doc, request.frame).filter(|_| request.camera);
             let mut geometry = prepared.geometry.lock().unwrap_or_else(|e| e.into_inner());
+            let render_ctx = state.render_ctx.clone();
             let image = crate::gpu_scene::render_resident(
                 &gpu,
                 &request.doc,
                 request.frame,
                 request.size[0],
                 request.size[1],
-                &self.ctx,
+                &render_ctx,
                 &mut geometry,
                 &mut state.graph,
                 &prepared.world,
@@ -577,6 +582,7 @@ mod tests {
                 let state = Arc::new(Mutex::new(State {
                     gpu: gpu.clone(),
                     format,
+                    render_ctx: egui::Context::default(),
                     graph: Default::default(),
                     pipeline: None,
                     bind: None,

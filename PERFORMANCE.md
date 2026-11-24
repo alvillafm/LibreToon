@@ -4,6 +4,8 @@ Actualización del 24 de noviembre: caché de caras/barreras del bote por geomet
 
 Ampliación del 24 de noviembre: los cuadros residentes GPU no afectados también sobreviven a ediciones locales. Los cambios de cámara se comparan con su estado evaluado por fotograma; FPS y escena forman parte de la identidad. Símbolos y rig todavía invalidan conservadoramente. Los canales de aceleración independientes usan metadatos COW asignados solo al activarlos; los documentos anteriores no crean cinco curvas por clave. La evaluación reutiliza el tiempo compartido cuando no hay override.
 
+Corrección de reproducción (24 de noviembre): la presentación GPU usa un contexto egui exclusivo para teselar las capas. El contexto de entrada/layout de la ventana se reserva para la interfaz; no se ejecutan pases de escena sobre él. La regresión reprodujo el avance indebido de 2 a 4 pases de interfaz durante un solo callback antes de corregirlo. Tras aislarlo, la integración con DBGT-Rebuild-v2 conserva dimensiones, tiempo de entrada y contador de pases, y permite Play/Pausa por eventos de ratón. Las 18 comparaciones de presentación conservan diferencia cero respecto a la referencia GPU. No es una nueva medición de FPS.
+
 El estado de aplicación de los 45 puntos está en `docs/AUDIT_IMPLEMENTATION.md`. Los apartados antiguos de este documento son mediciones históricas y no describen por sí solos la aplicación actual.
 
 - El guardado nativo grande y su apertura utilizan ZIP64 por bloques; ya no hay techo agregado de 256 MiB. Se mantienen las comprobaciones estructurales y por recurso individual.

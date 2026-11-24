@@ -58,10 +58,12 @@ fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
+    let events = std::cell::RefCell::new(Vec::<egui::Event>::new());
     let tick = |editor: &mut crate::Editor| {
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360., 860.))),
+                events: events.take(),
                 ..Default::default()
             },
             |ui| {
@@ -78,6 +80,9 @@ fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
             }
         }
         let mut encoder = device.create_command_encoder(&Default::default());
+        let ui_frame = ctx.cumulative_frame_nr();
+        let ui_rect = ctx.content_rect();
+        let ui_time = ctx.input(|input| input.time);
         let mut commands =
             renderer.update_buffers(&device, &queue, &mut encoder, &primitives, &screen);
         {
@@ -104,10 +109,26 @@ fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
             renderer.free_texture(id);
         }
         output.textures_delta.clear();
+        assert_eq!(
+            ctx.cumulative_frame_nr(),
+            ui_frame,
+            "GPU composition must not run a pass on the editor context"
+        );
+        assert_eq!(
+            ctx.content_rect(),
+            ui_rect,
+            "GPU layer dimensions must not replace the editor viewport"
+        );
+        assert_eq!(
+            ctx.input(|input| input.time),
+            ui_time,
+            "offscreen rendering must preserve editor input"
+        );
     };
     let readbacks = crate::gpu_image::READBACKS.load(std::sync::atomic::Ordering::Relaxed);
     let second = 18.min(editor.doc.layers[0].frames.len() - 1);
-    for frame in [0, second, 0] {
+    let third = 38.min(editor.doc.layers[0].frames.len() - 1);
+    for frame in [0, second, third, 0] {
         editor.frame = frame;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
@@ -135,7 +156,10 @@ fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
     }
     assert_eq!(
         editor.depth.presenter.as_ref().unwrap().stats().1,
-        if second == 0 { 1 } else { 2 },
+        [0, second, third]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         "returning to a resident frame reuses its image"
     );
     assert_eq!(
@@ -202,6 +226,40 @@ fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
             readbacks
         );
     }
+    let click_play = |editor: &mut crate::Editor| {
+        let rect = ctx
+            .data(|data| data.get_temp::<Rect>(egui::Id::unique("test-timeline-play")))
+            .expect("play button");
+        let point = rect.center();
+        for pressed in [true, false] {
+            *events.borrow_mut() = vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            tick(editor);
+        }
+    };
+    click_play(&mut editor);
+    assert!(
+        editor.playing,
+        "Play must still respond after uncached GPU composition"
+    );
+    let count = editor.doc.layers[0].frames.len();
+    for _ in 0..count.min(60) {
+        editor.advance_animation(1);
+        tick(&mut editor);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    click_play(&mut editor);
+    assert!(
+        !editor.playing,
+        "Pause must respond after playback, without resetting the UI context"
+    );
     if editor.doc.layers[0].frames.len() > 5 {
         editor.frame = 0;
         tick(&mut editor);
