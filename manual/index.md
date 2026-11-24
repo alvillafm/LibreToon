@@ -1,6 +1,6 @@
 # Welcome to the LibreToon Wiki
 
-Learn to draw, animate and rig characters in **LibreToon**. This manual follows the **0.9.0** interface; experimental features and platform differences may affect the steps.
+Learn to draw, animate and rig characters in **LibreToon**. This manual follows the **1.0.0** interface; experimental features and platform differences may affect the steps.
 
 ## New to animation?
 

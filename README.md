@@ -75,7 +75,7 @@ Read the [LibreToon Wiki](https://alvillafm.github.io/LibreToon/), follow the [f
 
 LibreToon is still experimental. Some workflows may be incomplete or unstable.
 
-See the [0.9.0 release notes](docs/RELEASE_NOTES_0.9.0.md) for changes since 0.8.0.
+See the [1.0.0 release notes](docs/RELEASE_NOTES_1.0.0.md) for changes since 0.9.0.
 
 For the current development tree, see the [capability and compatibility matrix](docs/CAPABILITIES.md) and the [audit implementation status](docs/AUDIT_IMPLEMENTATION.md). These development changes are not a published release.
 
