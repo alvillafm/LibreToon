@@ -52,16 +52,22 @@ pub fn smooth(raw: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
     }
     let original = points.clone();
     let radius = (1. + amount * 4.).round() as usize;
-    for i in 1..points.len() - 1 {
+    let interior_end = points.len() - 1;
+    for (i, point) in points.iter_mut().enumerate().take(interior_end).skip(1) {
         let mut sum = Vec2::ZERO;
         let mut weight = 0.;
-        for j in i.saturating_sub(radius)..=(i + radius).min(points.len() - 1) {
+        for (j, sample) in original
+            .iter()
+            .enumerate()
+            .take((i + radius).min(interior_end) + 1)
+            .skip(i.saturating_sub(radius))
+        {
             let w = (radius + 1 - i.abs_diff(j)) as f32;
-            sum += original[j].to_vec2() * w;
+            sum += sample.to_vec2() * w;
             weight += w;
         }
         let target = Pos2::ZERO + sum / weight;
-        points[i] = original[i].lerp(target, amount);
+        *point = original[i].lerp(target, amount);
     }
     let mut out = vec![[points[0].x, points[0].y]];
     for i in 0..points.len() - 1 {
@@ -195,19 +201,25 @@ impl StrokeSmoother {
             old_stable.saturating_sub(radius + 1)
         };
         self.filtered.resize(self.sampled.len(), Pos2::ZERO);
-        for i in changed..self.sampled.len() {
+        for (i, filtered) in self.filtered.iter_mut().enumerate().skip(changed) {
             #[cfg(test)]
             {
                 self.filtered_work += 1;
             }
-            self.filtered[i] = if i == 0 || i + 1 == self.sampled.len() {
+            *filtered = if i == 0 || i + 1 == self.sampled.len() {
                 self.sampled[i]
             } else {
                 let mut sum = Vec2::ZERO;
                 let mut weight = 0.;
-                for j in i.saturating_sub(radius)..=(i + radius).min(self.sampled.len() - 1) {
+                for (j, sample) in self
+                    .sampled
+                    .iter()
+                    .enumerate()
+                    .take((i + radius).min(self.sampled.len() - 1) + 1)
+                    .skip(i.saturating_sub(radius))
+                {
                     let w = (radius + 1 - i.abs_diff(j)) as f32;
-                    sum += self.sampled[j].to_vec2() * w;
+                    sum += sample.to_vec2() * w;
                     weight += w;
                 }
                 self.sampled[i].lerp(Pos2::ZERO + sum / weight, self.amount)

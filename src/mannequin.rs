@@ -91,7 +91,7 @@ impl Mannequin {
         ];
         let mut points = [[0.; 3]; 16];
         let mut frames = [IDENTITY3; 16];
-        for i in 0..16 {
+        for (i, &length) in lengths.iter().enumerate() {
             let (sa, ca) = self.angles[i].sin_cos();
             let (sd, cd) = self.depth_angles[i].sin_cos();
             let (st, ct) = self.twists[i].sin_cos();
@@ -106,10 +106,7 @@ impl Mannequin {
             };
             frames[i] = local.map(|v| basis(parent, v));
             if i > 0 {
-                points[i] = add(
-                    points[PARENTS[i]],
-                    mul(frames[i][0], lengths[i] * self.unit),
-                );
+                points[i] = add(points[PARENTS[i]], mul(frames[i][0], length * self.unit));
             }
             let incoming = frames[i];
             frames[i] = IDENTITY3.map(|v| basis(incoming, rotate3(v, self.joint_rotation[i])));
@@ -132,8 +129,8 @@ impl Mannequin {
         let (points, _) = self.skeleton3d();
         let points = points.map(|p| self.project(p));
         let mut angles = [self.angles[0] + self.rotation[2]; 16];
-        for i in 1..16 {
-            angles[i] = (points[i] - points[PARENTS[i]]).angle();
+        for (i, angle) in angles.iter_mut().enumerate().skip(1) {
+            *angle = (points[i] - points[PARENTS[i]]).angle();
         }
         (points, angles)
     }
@@ -615,8 +612,8 @@ pub struct GizmoGeometry {
 }
 impl GizmoGeometry {
     fn hit(&self, p: Pos2) -> Option<(usize, usize)> {
-        for axis in 0..3 {
-            if p.distance(self.rings[axis][8]) < 11. {
+        for (axis, ring) in self.rings.iter().enumerate() {
+            if p.distance(ring[8]) < 11. {
                 return Some((axis, 8));
             }
         }
@@ -845,7 +842,7 @@ impl Editor {
             Color32::from_rgb(70, 195, 105),
             Color32::from_rgb(75, 145, 255),
         ];
-        for axis in 0..3 {
+        for (axis, (ring, color)) in geometry.rings.iter().zip(colors).enumerate() {
             let active = drag.is_some_and(|d| d.axis == axis);
             let width = if active {
                 3.5
@@ -855,15 +852,12 @@ impl Editor {
                 2.
             };
             p.add(egui::Shape::line(
-                geometry.rings[axis].to_vec(),
+                ring.to_vec(),
                 Stroke::new(width + 2., Color32::from_black_alpha(150)),
             ));
-            p.add(egui::Shape::line(
-                geometry.rings[axis].to_vec(),
-                Stroke::new(width, colors[axis]),
-            ));
-            let badge = geometry.rings[axis][8];
-            p.circle_filled(badge, 9., colors[axis]);
+            p.add(egui::Shape::line(ring.to_vec(), Stroke::new(width, color)));
+            let badge = ring[8];
+            p.circle_filled(badge, 9., color);
             p.text(
                 badge,
                 egui::Align2::CENTER_CENTER,
@@ -983,9 +977,9 @@ mod gizmo_tests {
             tick(&ctx, &mut e, view, vec![button(q, false)]);
             let after = e.doc.layers[e.layer].options.mannequin.as_ref().unwrap();
             assert!(after.joint_rotation[4][axis].abs() > 0.05);
-            for other in 0..3 {
+            for (other, angle) in after.joint_rotation[4].iter().enumerate() {
                 if other != axis {
-                    assert_eq!(after.joint_rotation[4][other], 0.);
+                    assert_eq!(*angle, 0.);
                 }
             }
             let posed = after.skeleton3d().0;
@@ -993,9 +987,8 @@ mod gizmo_tests {
                 dot(sub(points[4], posed[4]), sub(points[4], posed[4])) < 1e-5,
                 "pivot moved"
             );
-            for i in 1..16 {
-                let length =
-                    |p: [V3; 16]| dot(sub(p[i], p[PARENTS[i]]), sub(p[i], p[PARENTS[i]])).sqrt();
+            for (i, &parent) in PARENTS.iter().enumerate().skip(1) {
+                let length = |p: [V3; 16]| dot(sub(p[i], p[parent]), sub(p[i], p[parent])).sqrt();
                 assert!((length(points) - length(posed)).abs() < 0.001);
             }
             e.history(false);
