@@ -2,6 +2,7 @@
 """Package already-built Linux/macOS payloads; no application compilation here."""
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -12,8 +13,11 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
+import time
 import tomllib
 import urllib.request
+import urllib.error
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,13 +30,44 @@ def write(path,value):
     Path(path).write_text(json.dumps(value,indent=2)+"\n")
 
 
-def download(url,path,sha):
-    path=Path(path)
-    if not path.exists():
-        with urllib.request.urlopen(url,timeout=120) as response,path.open("wb") as target:
-            shutil.copyfileobj(response,target)
-    if digest(path)!=sha:
-        raise RuntimeError("Packaging tool checksum mismatch: "+str(path))
+def network_retry(operation, label):
+    """Retry transient transport failures, never integrity or local filesystem errors."""
+    for attempt in range(1, 5):
+        try:
+            return operation()
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            if attempt == 4:
+                raise RuntimeError(f"{label} failed after {attempt} attempts: {error}") from error
+            delay = min(2 ** attempt, 8)
+            print(f"{label}: transient network failure ({error}); retry {attempt + 1}/4 in {delay}s", file=sys.stderr, flush=True)
+            time.sleep(delay)
+
+
+def download(url, path, sha):
+    path = Path(path)
+    if sha is not None and path.is_file() and digest(path) == sha:
+        return
+
+    def attempt():
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".part", delete=False) as target:
+                temporary = Path(target.name)
+                with urllib.request.urlopen(url, timeout=120) as response:
+                    shutil.copyfileobj(response, target)
+                    length = getattr(response, "headers", {}).get("Content-Length")
+                    if length is not None and target.tell() != int(length):
+                        raise http.client.IncompleteRead(b"", int(length))
+            if sha is not None and digest(temporary) != sha:
+                raise RuntimeError("Packaging tool checksum mismatch: " + str(path))
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    network_retry(attempt, "Download " + url)
 
 
 def check_system_imports(binary):
@@ -122,8 +157,10 @@ def api(path):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "LibreToon-packaging"}
     if os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
-    with urllib.request.urlopen(urllib.request.Request("https://api.github.com/repos/" + path, headers=headers), timeout=120) as r:
-        return json.load(r)
+    def request():
+        with urllib.request.urlopen(urllib.request.Request("https://api.github.com/repos/" + path, headers=headers), timeout=120) as r:
+            return json.load(r)
+    return network_retry(request, "GitHub API " + path)
 
 
 def asset(release, name, destination):
@@ -165,8 +202,7 @@ def appimage_runtime(work, appdir, architecture):
     notices.mkdir(parents=True)
     archive = notices / ("type2-runtime-" + revision + ".tar.gz")
     url = "https://codeload.github.com/AppImage/type2-runtime/tar.gz/" + revision
-    with urllib.request.urlopen(url, timeout=120) as r, archive.open("wb") as f:
-        shutil.copyfileobj(r, f)
+    download(url, archive, None)
     with tarfile.open(archive) as t:
         license_member = next(m for m in t.getmembers() if m.name.endswith("/LICENSE"))
         (notices / "LICENSE").write_bytes(t.extractfile(license_member).read())

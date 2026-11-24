@@ -1,5 +1,6 @@
 """Execute Linux package staging with mocked packaging tools; no network or builds."""
 import ast
+import hashlib
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -147,6 +149,88 @@ class NativePackages(unittest.TestCase):
                 self.assertEqual([call.args[1] for call in assets.call_args_list],["appimagetool-"+architecture+".AppImage","runtime-"+architecture])
                 record=work/"AppDir/usr/lib/libretoon/corresponding-source/appimage-runtime/BUILD-IDENTITY.json"
                 self.assertEqual(json.loads(record.read_text())["architecture"],architecture)
+
+
+class NetworkDownloads(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tool.AppImage"
+        self.data = b"verified tool fixture"
+        self.sha = hashlib.sha256(self.data).hexdigest()
+        self.sleep = patch.object(packaging.time, "sleep").start()
+        self.addCleanup(patch.stopall)
+
+    def test_timeout_retries_and_replaces_stale_cache_only_after_verification(self):
+        self.path.write_bytes(b"stale partial download")
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=[TimeoutError("read timed out"), io.BytesIO(self.data)]) as opening:
+            packaging.download("https://example.test/tool", self.path, self.sha)
+        self.assertEqual(opening.call_count, 2)
+        self.sleep.assert_called_once_with(2)
+        self.assertEqual(self.path.read_bytes(), self.data)
+        self.assertEqual(list(self.path.parent.glob("*.part")), [])
+
+    def test_interrupted_body_is_discarded_before_retry(self):
+        class Interrupted(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise TimeoutError("body interrupted")
+                return super().read(3)
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=[Interrupted(self.data), io.BytesIO(self.data)]):
+            packaging.download("https://example.test/tool", self.path, self.sha)
+        self.assertEqual(self.path.read_bytes(), self.data)
+        self.assertEqual(list(self.path.parent.glob("*.part")), [])
+
+    def test_declared_truncated_body_is_retried_before_checksum_validation(self):
+        class Truncated(io.BytesIO):
+            headers = {"Content-Length": "500"}
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=[Truncated(b"short"), io.BytesIO(self.data)]) as opening:
+            packaging.download("https://example.test/tool", self.path, self.sha)
+        self.assertEqual(opening.call_count, 2)
+        self.assertEqual(self.path.read_bytes(), self.data)
+
+    def test_local_publication_error_is_not_retried(self):
+        with patch.object(packaging.urllib.request, "urlopen", return_value=io.BytesIO(self.data)) as opening, \
+             patch.object(Path, "replace", side_effect=PermissionError("disk permission")):
+            with self.assertRaises(PermissionError):
+                packaging.download("https://example.test/tool", self.path, self.sha)
+        opening.assert_called_once()
+        self.sleep.assert_not_called()
+        self.assertEqual(list(self.path.parent.iterdir()), [])
+
+    def test_exhausted_retries_leave_no_partial_final_file(self):
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=TimeoutError("offline")) as opening:
+            with self.assertRaisesRegex(RuntimeError, "after 4 attempts"):
+                packaging.download("https://example.test/tool", self.path, self.sha)
+        self.assertEqual(opening.call_count, 4)
+        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [2, 4, 8])
+        self.assertEqual(list(self.path.parent.iterdir()), [])
+
+    def test_checksum_failure_is_not_retried_and_does_not_replace_existing_file(self):
+        self.path.write_bytes(b"old cache")
+        with patch.object(packaging.urllib.request, "urlopen", return_value=io.BytesIO(b"wrong contents")) as opening:
+            with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+                packaging.download("https://example.test/tool", self.path, self.sha)
+        opening.assert_called_once()
+        self.sleep.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), b"old cache")
+        self.assertEqual(list(self.path.parent.glob("*.part")), [])
+
+    def test_verified_cache_does_not_download_again(self):
+        self.path.write_bytes(self.data)
+        with patch.object(packaging.urllib.request, "urlopen") as opening:
+            packaging.download("https://example.test/tool", self.path, self.sha)
+        opening.assert_not_called()
+
+    def test_api_retries_transient_http_but_not_missing_release(self):
+        transient = urllib.error.HTTPError("https://api.github.com", 503, "unavailable", {}, None)
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=[transient, io.BytesIO(b'{"assets":[]}' )]):
+            self.assertEqual(packaging.api("example/repo/releases/1"), {"assets": []})
+        missing = urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None)
+        with patch.object(packaging.urllib.request, "urlopen", side_effect=missing) as opening:
+            with self.assertRaises(urllib.error.HTTPError):
+                packaging.api("example/repo/releases/1")
+        opening.assert_called_once()
 
 
 if __name__=="__main__":
