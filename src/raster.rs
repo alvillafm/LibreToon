@@ -78,6 +78,9 @@ impl Preset {
             spacing,
             pressure_size: true,
             pressure_opacity: false,
+            alpha_lock: false,
+            pressure_curve: Default::default(),
+            tip: None,
             smudge: 0.7,
             eraser_size: 25.,
             texture: Texture::Preset,
@@ -164,7 +167,7 @@ impl Texture {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Brush {
     pub preset: Preset,
@@ -175,13 +178,91 @@ pub struct Brush {
     spacing: f32,
     pressure_size: bool,
     pressure_opacity: bool,
+    alpha_lock: bool,
+    pressure_curve: crate::pressure::Curve,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tip: Option<Tip>,
     smudge: f32,
     eraser_size: f32,
     texture: Texture,
     texture_strength: f32,
 }
 const MAX_PRESETS: usize = 64;
-const PRESET_FILE_LIMIT: usize = 64 * 1024;
+const PRESET_FILE_LIMIT: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct Tip {
+    size: [u16; 2],
+    mask: crate::shared::SharedVec<u8>,
+}
+#[derive(Clone)]
+struct TipJob {
+    brush: Brush,
+    result: std::sync::Arc<std::sync::Mutex<Option<Result<Tip, String>>>>,
+}
+impl Tip {
+    fn valid(&self) -> bool {
+        self.size.iter().all(|&s| s > 0 && s <= 128)
+            && self.mask.len() == self.size[0] as usize * self.size[1] as usize
+    }
+    fn sample(&self, x: f32, y: f32) -> f32 {
+        let max_side = self.size[0].max(self.size[1]) as f32;
+        let x = x * max_side / self.size[0].max(1) as f32;
+        let y = y * max_side / self.size[1].max(1) as f32;
+        if !self.valid() || x.abs() > 1. || y.abs() > 1. {
+            return 0.;
+        }
+        let x = ((x + 1.) * 0.5 * (self.size[0] - 1) as f32).clamp(0., (self.size[0] - 1) as f32);
+        let y = ((y + 1.) * 0.5 * (self.size[1] - 1) as f32).clamp(0., (self.size[1] - 1) as f32);
+        let at = |x: usize, y: usize| self.mask[y * self.size[0] as usize + x] as f32 / 255.;
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = (
+            (x0 + 1).min(self.size[0] as usize - 1),
+            (y0 + 1).min(self.size[1] as usize - 1),
+        );
+        let a = egui::lerp(at(x0, y0)..=at(x1, y0), x - x.floor());
+        let b = egui::lerp(at(x0, y1)..=at(x1, y1), x - x.floor());
+        egui::lerp(a..=b, y - y.floor())
+    }
+    fn load(path: &std::path::Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        if file.metadata().map_err(|e| e.to_string())?.len() > 8 * 1024 * 1024 {
+            return Err(tr("Brush tip source exceeds 8 MiB").into());
+        }
+        let mut reader = image::ImageReader::new(std::io::BufReader::new(file))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(4096);
+        limits.max_image_height = Some(4096);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let pixels = reader
+            .decode()
+            .map_err(|e| e.to_string())?
+            .thumbnail(128, 128)
+            .into_rgba8();
+        let transparent = pixels.pixels().any(|p| p[3] < 255);
+        let mask: Vec<_> = pixels
+            .pixels()
+            .map(|p| {
+                if transparent {
+                    p[3]
+                } else {
+                    255 - ((u32::from(p[0]) * 54 + u32::from(p[1]) * 183 + u32::from(p[2]) * 19)
+                        / 256) as u8
+                }
+            })
+            .collect();
+        if mask.iter().all(|&p| p == 0) {
+            return Err(tr("Brush tip contains no ink").into());
+        }
+        Ok(Self {
+            size: [pixels.width() as u16, pixels.height() as u16],
+            mask: mask.into(),
+        })
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NamedBrush {
@@ -199,13 +280,13 @@ fn read_brush_presets(path: &std::path::Path) -> Result<Vec<NamedBrush>, String>
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() > PRESET_FILE_LIMIT {
-        return Err("Brush preset file exceeds 64 KiB".into());
+        return Err("Brush preset file exceeds 8 MiB".into());
     }
     let presets: Vec<NamedBrush> =
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     if presets.len() > MAX_PRESETS
         || presets.iter().any(|preset| {
-            let b = preset.brush;
+            let b = &preset.brush;
             preset.name.trim().is_empty()
                 || preset.name.chars().count() > 48
                 || !(1. ..=256.).contains(&b.size)
@@ -215,6 +296,8 @@ fn read_brush_presets(path: &std::path::Path) -> Result<Vec<NamedBrush>, String>
                 || !(0.01..=1.).contains(&b.flow)
                 || !(0.03..=0.75).contains(&b.spacing)
                 || !(0. ..=1.).contains(&b.smudge)
+                || b.tip.as_ref().is_some_and(|tip| !tip.valid())
+                || !b.pressure_curve.valid()
                 || !(0. ..=1.).contains(&b.texture_strength)
         })
     {
@@ -229,7 +312,7 @@ impl Default for Brush {
     }
 }
 impl Brush {
-    fn diameter(self, eraser: bool) -> f32 {
+    fn diameter(&self, eraser: bool) -> f32 {
         let size = if eraser { self.eraser_size } else { self.size };
         if size.is_finite() {
             size.clamp(1., 256.)
@@ -238,12 +321,12 @@ impl Brush {
         }
     }
 }
-fn brush_preview(ui: &mut egui::Ui, brush: Brush, color: [u8; 4]) {
+fn brush_preview(ui: &mut egui::Ui, brush: &Brush, color: [u8; 4]) {
     let id = egui::Id::unique("current-raster-brush-preview");
     let cached = ui
         .ctx()
         .data(|data| data.get_temp::<(Brush, [u8; 4], egui::TextureHandle)>(id))
-        .filter(|(previous, previous_color, _)| *previous == brush && *previous_color == color);
+        .filter(|(previous, previous_color, _)| previous == brush && *previous_color == color);
     let texture = cached.map_or_else(
         || {
             let (w, h) = (224usize, 48usize);
@@ -256,6 +339,7 @@ fn brush_preview(ui: &mut egui::Ui, brush: Brush, color: [u8; 4]) {
             while x <= (w - 7) as f32 {
                 let t = (x - 7.) / (w - 14) as f32;
                 let pressure = (std::f32::consts::PI * t).sin().max(0.08);
+                let pressure = brush.pressure_curve.sample(pressure);
                 let radius = size * 0.5 * if brush.pressure_size { pressure } else { 1. };
                 let y = h as f32 * 0.5 + (t * std::f32::consts::TAU).sin() * 6.;
                 let reach = radius * 1.2 + 1.;
@@ -265,11 +349,11 @@ fn brush_preview(ui: &mut egui::Ui, brush: Brush, color: [u8; 4]) {
                     for px in
                         ((x - reach).floor().max(0.) as usize)..((x + reach).ceil() as usize).min(w)
                     {
-                        let falloff = brush.preset.falloff(
-                            (px as f32 + 0.5 - x) / radius,
-                            (py as f32 + 0.5 - y) / radius,
-                            unit(brush.hardness),
-                            radius,
+                        let dx = (px as f32 + 0.5 - x) / radius;
+                        let dy = (py as f32 + 0.5 - y) / radius;
+                        let falloff = brush.tip.as_ref().map_or_else(
+                            || brush.preset.falloff(dx, dy, unit(brush.hardness), radius),
+                            |tip| tip.sample(dx, dy),
                         );
                         let tip = falloff
                             * egui::lerp(
@@ -295,7 +379,7 @@ fn brush_preview(ui: &mut egui::Ui, brush: Brush, color: [u8; 4]) {
                 ui.ctx()
                     .load_texture("current-brush-preview", image, egui::TextureOptions::LINEAR);
             ui.ctx()
-                .data_mut(|data| data.insert_temp(id, (brush, color, texture.clone())));
+                .data_mut(|data| data.insert_temp(id, (brush.clone(), color, texture.clone())));
             texture
         },
         |(_, _, texture)| texture,
@@ -511,6 +595,7 @@ impl Stroke {
         pressure: f32,
         changed: &mut BTreeSet<Cell>,
     ) {
+        let pressure = self.brush.pressure_curve.sample(pressure);
         let size = self.brush.diameter(self.eraser);
         let radius = (size
             * 0.5
@@ -571,7 +656,7 @@ impl Stroke {
                             && tile_cell(crate::vector::pos(*mark.points.first()?)) == cell)
                             .then_some((index, mark.style.media_image?))
                     });
-                    if self.eraser && source.is_none() {
+                    if (self.eraser || self.brush.alpha_lock) && source.is_none() {
                         continue;
                     }
                     if self.tiles.len() >= MAX_TILES_PER_STROKE
@@ -603,11 +688,11 @@ impl Stroke {
                 let y1 = (oy + SIDE).min(bounds.bottom().ceil() as i32);
                 for py in y0..y1 {
                     for px in x0..x1 {
-                        let falloff = brush.falloff(
-                            (px as f32 + 0.5 - point.x) / radius,
-                            (py as f32 + 0.5 - point.y) / radius,
-                            hardness,
-                            radius,
+                        let dx = (px as f32 + 0.5 - point.x) / radius;
+                        let dy = (py as f32 + 0.5 - point.y) / radius;
+                        let falloff = self.brush.tip.as_ref().map_or_else(
+                            || brush.falloff(dx, dy, hardness, radius),
+                            |tip| tip.sample(dx, dy),
                         );
                         if falloff <= 0. {
                             continue;
@@ -619,7 +704,11 @@ impl Stroke {
                         };
                         let index = ((py - oy) * SIDE + px - ox) as usize;
                         let i = index * 4;
-                        let value = if smudge {
+                        let old_alpha = tile.original[i + 3];
+                        if self.brush.alpha_lock && !self.eraser && old_alpha == 0 {
+                            continue;
+                        }
+                        let mut value = if smudge {
                             blend(
                                 tile.rgba[i..i + 4].try_into().unwrap(),
                                 source,
@@ -635,6 +724,9 @@ impl Stroke {
                                 self.eraser,
                             )
                         };
+                        if self.brush.alpha_lock && !self.eraser {
+                            value[3] = old_alpha;
+                        }
                         if tile.rgba[i..i + 4] != value {
                             tile.rgba[i..i + 4].copy_from_slice(&value);
                             changed.insert(cell);
@@ -773,6 +865,30 @@ impl Editor {
                     self.raster_presets(ui);
                 });
         }
+        let tip_job_id = egui::Id::unique("brush-tip-import");
+        let mut tip_changed = false;
+        if let Some(job) = ui.ctx().data(|data| data.get_temp::<TipJob>(tip_job_id)) {
+            let result = job.result.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(result) = result {
+                ui.ctx().data_mut(|data| data.remove::<TipJob>(tip_job_id));
+                match result {
+                    Ok(tip) if self.studio.prefs.raster_brush == job.brush => {
+                        self.studio.prefs.raster_brush.tip = Some(tip);
+                        tip_changed = true;
+                    }
+                    Ok(_) => {
+                        self.status =
+                            tr("Brush changed while loading. Import the tip again for this preset.")
+                                .into()
+                    }
+                    Err(error) => self.status = error,
+                }
+            } else {
+                ui.spinner();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(60));
+            }
+        }
         let settings = &mut self.studio.prefs.raster_brush;
         let size = if eraser {
             &mut settings.eraser_size
@@ -780,14 +896,15 @@ impl Editor {
             &mut settings.size
         };
         use crate::design::Icon;
-        let mut changed = setting_row(ui, Icon::Width, |ui| {
-            ui.add(
-                egui::Slider::new(size, 1. ..=256.)
-                    .text(tr("Diameter"))
-                    .suffix(" px"),
-            )
-            .changed()
-        });
+        let mut changed = tip_changed
+            | setting_row(ui, Icon::Width, |ui| {
+                ui.add(
+                    egui::Slider::new(size, 1. ..=256.)
+                        .text(tr("Diameter"))
+                        .suffix(" px"),
+                )
+                .changed()
+            });
         for (icon, label, value, range) in [
             (Icon::Focus, "Hardness", &mut settings.hardness, 0. ..=1.),
             (Icon::Eye, "Brush opacity", &mut settings.opacity, 0. ..=1.),
@@ -855,6 +972,15 @@ impl Editor {
                 .changed()
             });
         }
+        if !eraser {
+            changed |= setting_row(ui, Icon::Lock, |ui| {
+                ui.checkbox(&mut settings.alpha_lock, tr("Lock alpha"))
+                    .on_hover_text(tr(
+                        "Paint only existing pixels and preserve their transparency",
+                    ))
+                    .changed()
+            });
+        }
         changed |= setting_row(ui, Icon::Pressure, |ui| {
             ui.checkbox(&mut settings.pressure_size, tr("Pressure controls size"))
                 .changed()
@@ -866,10 +992,60 @@ impl Editor {
             )
             .changed()
         });
+        changed |= settings.pressure_curve.ui(ui);
+        if !eraser {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !ui.ctx()
+                            .data(|d| d.get_temp::<TipJob>(tip_job_id).is_some()),
+                        egui::Button::new(tr("Import brush tip…")),
+                    )
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PNG / JPEG", &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
+                        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                tip_job_id,
+                                TipJob {
+                                    brush: settings.clone(),
+                                    result: result.clone(),
+                                },
+                            )
+                        });
+                        let output = result.clone();
+                        let ctx = ui.ctx().clone();
+                        if !crate::geometry_jobs::spawn(move || {
+                            *output.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(Tip::load(&path));
+                            ctx.request_repaint();
+                        }) {
+                            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(tr(
+                                "Geometry queue is full. Finish or cancel another operation.",
+                            )
+                            .into()));
+                        }
+                    }
+                }
+                if ui
+                    .add_enabled(settings.tip.is_some(), egui::Button::new(tr("Reset tip")))
+                    .clicked()
+                {
+                    settings.tip = None;
+                    changed = true;
+                }
+            });
+            ui.small(tr("Transparent PNG uses alpha; an opaque image uses black as ink. Tips are limited to 128 × 128 pixels."));
+        }
+
         if !eraser {
             brush_preview(
                 ui,
-                self.studio.prefs.raster_brush,
+                &self.studio.prefs.raster_brush,
                 self.fill_color.to_srgba_unmultiplied(),
             );
             self.custom_raster_presets(ui);
@@ -919,7 +1095,7 @@ impl Editor {
                 {
                     let preset = NamedBrush {
                         name: name.to_owned(),
-                        brush: self.studio.prefs.raster_brush,
+                        brush: self.studio.prefs.raster_brush.clone(),
                     };
                     if let Some(index) = existing {
                         presets[index] = preset;
@@ -974,7 +1150,7 @@ impl Editor {
             let eraser_size = self.studio.prefs.raster_brush.eraser_size;
             self.studio.prefs.raster_brush = Brush {
                 eraser_size,
-                ..preset.brush
+                ..preset.brush.clone()
             };
             changed = true;
         }
@@ -1170,7 +1346,7 @@ impl Editor {
         {
             let mask_brush = layer.options.light_mask && tool == Tool::Brush;
             let eraser = tool == Tool::Eraser || mask_brush && subtract;
-            let mut brush = self.studio.prefs.raster_brush;
+            let mut brush = self.studio.prefs.raster_brush.clone();
             if mask_brush && subtract {
                 brush.eraser_size = brush.size;
             }
@@ -1285,7 +1461,7 @@ pub(crate) fn badge(ui: &egui::Ui, rect: Rect, text: &str) {
     );
 }
 
-pub(crate) fn cursor(painter: &egui::Painter, pos: Pos2, view: View, brush: Brush, erase: bool) {
+pub(crate) fn cursor(painter: &egui::Painter, pos: Pos2, view: View, brush: &Brush, erase: bool) {
     let radius = (brush.diameter(erase) * view.scale.abs() * 0.5).max(1.);
     painter.circle_stroke(pos, radius, egui::Stroke::new(3., Color32::BLACK));
     painter.circle_stroke(pos, radius, egui::Stroke::new(1., Color32::WHITE));
@@ -1464,6 +1640,102 @@ mod tests {
         assert!(editor.doc.extras.media.assets.is_empty());
         editor.history(true);
         assert_eq!(pixels(&editor.doc), visible);
+    }
+
+    #[test]
+    fn custom_tip_roundtrips_in_presets_and_keeps_its_aspect_ratio() {
+        let tip = Tip {
+            size: [4, 2],
+            mask: vec![255; 8].into(),
+        };
+        assert_eq!(tip.sample(0., 0.), 1.);
+        assert_eq!(
+            tip.sample(0., 0.75),
+            0.,
+            "wide tip is not stretched into a square"
+        );
+        let brush = Brush {
+            tip: Some(tip),
+            ..Brush::default()
+        };
+        let path = std::env::temp_dir().join(format!("custom-tip-{}.json", crate::features::id()));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&vec![NamedBrush {
+                name: "Wide tip".into(),
+                brush: brush.clone(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        let restored = read_brush_presets(&path).unwrap();
+        assert!(restored[0].brush == brush);
+        std::fs::remove_file(path).unwrap();
+        let bad = Tip {
+            size: [129, 1],
+            mask: vec![255; 129].into(),
+        };
+        assert!(!bad.valid());
+        assert_eq!(bad.sample(0., 0.), 0.);
+    }
+
+    #[test]
+    fn alpha_lock_preserves_transparency_and_never_allocates_empty_tiles() {
+        let doc = crate::fresh_document();
+        let start = Pos2::new(24.5, 24.5);
+        let mut stroke = Stroke {
+            layer: 0,
+            frame: 0,
+            last: start,
+            distance: 0.,
+            pressure: None,
+            pending: vec![start],
+            wait_for_pressure_until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            brush: Brush {
+                size: 20.,
+                spacing: 0.05,
+                pressure_size: true,
+                pressure_opacity: true,
+                ..Brush::default()
+            },
+            eraser: false,
+            color: [255, 0, 0, 255],
+            tiles: BTreeMap::new(),
+            started: false,
+            bytes: 0,
+            carried: None,
+            next_dab: std::time::Instant::now(),
+            limit_reached: false,
+        };
+        stroke.brush.alpha_lock = true;
+        stroke.brush.pressure_size = false;
+        stroke.brush.pressure_opacity = false;
+        let mut changed = BTreeSet::new();
+        stroke.dab(&doc, start, 1., &mut changed);
+        assert!(stroke.tiles.is_empty());
+        let mut original = vec![0; BYTES];
+        let i = (24 * SIDE as usize + 24) * 4;
+        original[i..i + 4].copy_from_slice(&[0, 0, 255, 93]);
+        stroke.tiles.insert(
+            (0, 0),
+            Tile {
+                rgba: original.clone(),
+                original: original.clone(),
+                coverage: vec![0.; BYTES / 4],
+                id: None,
+                source: None,
+            },
+        );
+        for _ in 0..4 {
+            stroke.dab(&doc, start, 1., &mut changed);
+        }
+        let rgba = &stroke.tiles[&(0, 0)].rgba;
+        assert_eq!(rgba[i + 3], 93);
+        assert!(rgba[i] > 0, "color changed within existing alpha");
+        for (a, b) in rgba.chunks_exact(4).zip(original.chunks_exact(4)) {
+            assert_eq!(a[3], b[3]);
+        }
+        assert_eq!(rgba[i + 4..i + 8], [0; 4]);
     }
 
     #[test]

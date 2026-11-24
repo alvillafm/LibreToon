@@ -66,6 +66,8 @@ impl Editor {
             },
         );
         let mut selected = None;
+        let mut clipboard = None;
+        let mut arrange = None;
         let mut choose = None;
         let mut remove = None;
         let label = |index: usize, mark: &crate::Mark| {
@@ -136,11 +138,37 @@ impl Editor {
                                 }
                             }
                             let (icon, name) = label(index, mark);
-                            if button(ui, icon, &name, "", selection.contains(&index), editable)
-                                .clicked()
-                            {
-                                selected = Some(index);
+                            let response =
+                                button(ui, icon, &name, "", selection.contains(&index), editable);
+                            if response.clicked() {
+                                selected = Some((index, false));
                             }
+                            if response.secondary_clicked() && !selection.contains(&index) {
+                                selected = Some((index, true));
+                            }
+                            response.context_menu(|ui| {
+                                for (icon, name) in [
+                                    (Icon::Copy, "Copiar"),
+                                    (Icon::Cut, "Cortar"),
+                                    (Icon::Paste, "Pegar"),
+                                ] {
+                                    if button(
+                                        ui,
+                                        icon,
+                                        name,
+                                        name,
+                                        false,
+                                        editable && !self.playing,
+                                    )
+                                    .clicked()
+                                    {
+                                        clipboard = Some(icon);
+                                        ui.close();
+                                    }
+                                }
+                                ui.separator();
+                                arrange = crate::ordering::menu(ui, editable && !self.playing);
+                            });
                         } else if let Some(folder) = folder {
                             if button(ui, Icon::Trash, "", "Delete object folder", false, editable)
                                 .clicked()
@@ -153,8 +181,22 @@ impl Editor {
                 });
             }
         });
-        if let Some(index) = selected {
-            if ui.input(|input| input.modifiers.command) {
+        if let Some((index, context)) = selected {
+            if !context && ui.input(|input| input.modifiers.shift) {
+                let visible: Vec<_> = rows.iter().filter_map(|row| row.1).collect();
+                let anchor = selection.last().copied().unwrap_or(index);
+                let range = object_selection_range(&visible, anchor, index);
+                if !ui.input(|input| input.modifiers.command) {
+                    self.canvas.clear_selection();
+                }
+                for mark in range {
+                    let id = (self.layer, mark);
+                    if !self.canvas.selected.contains(&id) {
+                        self.canvas.selected.push(id);
+                    }
+                }
+                self.canvas.pivot = None;
+            } else if !context && ui.input(|input| input.modifiers.command) {
                 let id = (self.layer, index);
                 if self.canvas.selected.contains(&id) {
                     self.canvas.selected.retain(|&item| item != id);
@@ -167,6 +209,17 @@ impl Editor {
                 self.canvas.selected.push((self.layer, index));
             }
             self.frame_clipboard.focus = false;
+        }
+        match clipboard {
+            Some(Icon::Copy) => self.copy_canvas_to_clipboard(ui.ctx(), false),
+            Some(Icon::Cut) => self.copy_canvas_to_clipboard(ui.ctx(), true),
+            Some(Icon::Paste) => self.paste_canvas_clipboard(),
+            _ => {}
+        }
+        if let Some(action) = arrange {
+            let mut state = std::mem::take(&mut self.canvas);
+            self.arrange_selection(&mut state, action);
+            self.canvas = state;
         }
         if create.is_some() || choose.is_some() || remove.is_some() {
             let selected = self.canvas.selected.clone();
@@ -381,6 +434,19 @@ impl Editor {
                         .clicked()
                         {
                             self.open_document_settings();
+                            ui.close();
+                        }
+                        if button(
+                            ui,
+                            Icon::DocumentSettings,
+                            "Project storage…",
+                            "Inspect resources, duplicates and unused files",
+                            false,
+                            !self.hub.home,
+                        )
+                        .clicked()
+                        {
+                            self.open_storage();
                             ui.close();
                         }
                         if button(
@@ -801,7 +867,7 @@ impl Editor {
         egui::Panel::right("properties")
             .default_size(370.)
             .min_size(245.)
-            .max_size(650.)
+            .max_size((ui.available_width() * 0.5).clamp(245., 650.))
             .resizable(true)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -1109,7 +1175,8 @@ impl Editor {
         self.document_settings_ui(&ctx);
         self.preferences_ui(&ctx);
         self.command_search_ui(&ctx);
-        self.animation_graph_ui(&ctx);
+        self.animation_graph_ui(&ctx, ui.available_rect_before_wrap());
+        self.shape_diagnostic_ui(&ctx);
         self.scenes_ui(&ctx);
         self.frame_picker_ui(&ctx);
         self.export_ui(&ctx);
@@ -1118,6 +1185,7 @@ impl Editor {
         self.svg_import_ui(&ctx);
         self.image_sequence_ui(&ctx);
         self.node_simplify_ui(&ctx);
+        self.geometry_conversion_ui(&ctx);
         self.finish_property_edit(&ctx);
     }
     pub(crate) fn new_document(&mut self) {
@@ -1232,5 +1300,26 @@ mod shortcut_regressions {
         );
         output.textures_delta.clear();
         assert!(editor.tool == crate::canvas::Tool::Width);
+    }
+}
+
+// Follow the displayed order, including folder children, rather than raw mark indices.
+fn object_selection_range(visible: &[usize], anchor: usize, target: usize) -> Vec<usize> {
+    let Some(a) = visible.iter().position(|&id| id == anchor) else {
+        return vec![target];
+    };
+    let Some(b) = visible.iter().position(|&id| id == target) else {
+        return vec![target];
+    };
+    visible[a.min(b)..=a.max(b)].to_vec()
+}
+#[cfg(test)]
+mod object_selection_tests {
+    #[test]
+    fn ranges_follow_folder_display_order_in_both_directions() {
+        let rows = [8, 2, 5, 7, 0];
+        assert_eq!(super::object_selection_range(&rows, 2, 7), vec![2, 5, 7]);
+        assert_eq!(super::object_selection_range(&rows, 7, 2), vec![2, 5, 7]);
+        assert_eq!(super::object_selection_range(&rows, 99, 5), vec![5]);
     }
 }

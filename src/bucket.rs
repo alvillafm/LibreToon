@@ -46,9 +46,27 @@ fn line(points: impl IntoIterator<Item = Pos2>) -> LineString<f64> {
     )
 }
 pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec<Mark>, String> {
+    fill_solution(marks, click, gap, color).map(|(marks, _)| marks)
+}
+pub(crate) fn fill_preview(
+    marks: &[Mark],
+    click: Pos2,
+    gap: Gap,
+    color: [u8; 4],
+) -> Result<(Vec<Mark>, Vec<[Pos2; 2]>), String> {
+    let (shapes, level) = fill_solution(marks, click, gap, color)?;
+    let bridges = cached_faces(marks, level)?.bridges.clone();
+    Ok((shapes, bridges))
+}
+fn fill_solution(
+    marks: &[Mark],
+    click: Pos2,
+    gap: Gap,
+    color: [u8; 4],
+) -> Result<(Vec<Mark>, Gap), String> {
     let exact = fill_at_level(marks, click, Gap::None, color);
     if gap == Gap::None {
-        return exact;
+        return exact.map(|marks| (marks, Gap::None));
     }
     if let Ok(original) = exact {
         // A bounded region can still leak into a tiny neighbouring tip.
@@ -61,35 +79,153 @@ pub fn fill(marks: &[Mark], click: Pos2, gap: Gap, color: [u8; 4]) -> Result<Vec
             let area = before.unsigned_area();
             let overlap = before.intersection(&after).unsigned_area();
             if overlap >= area * 0.95 && after.unsigned_area() - overlap <= area * 0.005 {
-                return Ok(closed);
+                return Ok((closed, gap));
             }
         }
-        return Ok(original);
+        return Ok((original, Gap::None));
     }
     let mut result = exact;
+    let mut used = Gap::None;
     for level in Gap::ALL
         .into_iter()
         .skip(1)
         .take_while(|level| level.distance() <= gap.distance())
     {
+        used = level;
         result = fill_at_level(marks, click, level, color);
         if result.is_ok() {
             break;
         }
     }
-    result
+    result.map(|marks| (marks, used))
 }
 
+struct Faces {
+    bridges: Vec<[Pos2; 2]>,
+    real_ink: MultiPolygon<f64>,
+    ink: MultiPolygon<f64>,
+    silhouettes: Vec<Polygon<f64>>,
+    outer: Polygon<f64>,
+    guard: Rect,
+    free: MultiPolygon<f64>,
+}
+struct CachedFaces {
+    source: Vec<Mark>,
+    gap: Gap,
+    faces: std::sync::Arc<Faces>,
+}
+thread_local! {
+    static FACE_CACHE: std::cell::RefCell<Vec<CachedFaces>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn source_geometry(marks: &[Mark]) -> Vec<Mark> {
+    marks
+        .iter()
+        .filter(|m| {
+            !m.bucket
+                && !m.style.guide
+                && m.style.media_image.is_none()
+                && m.style.instance.is_none()
+                && (m.stroke || m.fill.is_some_and(|c| c[3] > 0))
+        })
+        .map(|m| {
+            let mut geometry = Mark {
+                points: m.points.clone(),
+                nodes: m.nodes.clone(),
+                holes: m.holes.clone(),
+                width_profile: m.width_profile.clone(),
+                width: m.width,
+                rectangle: m.rectangle,
+                closed: m.closed,
+                stroke: m.stroke,
+                fill: m.fill.map(|_| [255; 4]),
+                ..Default::default()
+            };
+            geometry.style.start_cap = m.style.start_cap;
+            geometry.style.end_cap = m.style.end_cap;
+            geometry
+        })
+        .collect()
+}
+fn cached_faces(marks: &[Mark], gap: Gap) -> Result<std::sync::Arc<Faces>, String> {
+    let source = source_geometry(marks);
+    if let Some(found) = FACE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let index = cache
+            .iter()
+            .position(|entry| entry.gap == gap && entry.source == source)?;
+        let entry = cache.remove(index);
+        let faces = entry.faces.clone();
+        cache.push(entry);
+        Some(faces)
+    }) {
+        return Ok(found);
+    }
+    let faces = std::sync::Arc::new(build_faces(&source, gap)?);
+    use geo::CoordsIter;
+    // Four gap levels, at most ~2 MiB of coordinates per entry. Oversized
+    // drawings still work, but are not retained by this optimization.
+    let source_points: usize = source
+        .iter()
+        .map(|m| {
+            m.points.len() + m.nodes.len() * 3 + m.holes.iter().map(|h| h.len()).sum::<usize>()
+        })
+        .sum();
+    let coordinates = faces.real_ink.coords_count()
+        + faces.ink.coords_count()
+        + faces.free.coords_count()
+        + faces
+            .silhouettes
+            .iter()
+            .map(|p| p.coords_count())
+            .sum::<usize>();
+    if source.len() <= 2048 && source_points <= 65536 && coordinates <= 65536 {
+        FACE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 4 {
+                cache.remove(0);
+            }
+            cache.push(CachedFaces {
+                source,
+                gap,
+                faces: faces.clone(),
+            });
+        });
+    }
+    Ok(faces)
+}
 fn fill_at_level(
     marks: &[Mark],
     click: Pos2,
     gap: Gap,
     color: [u8; 4],
 ) -> Result<Vec<Mark>, String> {
+    let faces = cached_faces(marks, gap)?;
+    let region = match face_at(&faces.free, faces.guard, click) {
+        Ok(region) => region,
+        Err(error) if gap != Gap::None && !faces.silhouettes.is_empty() => {
+            let radius = f64::from(gap.distance()) / 2.;
+            let silhouettes = geo::algorithm::bool_ops::unary_union(&faces.silhouettes);
+            let closed = silhouettes
+                .buffer_with_style(BufferStyle::new(radius).line_join(LineJoin::Miter(2.)))
+                .buffer_with_style(BufferStyle::new(-radius).line_join(LineJoin::Miter(2.)));
+            bounded_face(&faces.outer, &faces.ink.union(&closed), faces.guard, click)
+                .map_err(|_| error)?
+        }
+        Err(error) => return Err(error),
+    };
+    let face = MultiPolygon(vec![region]);
+    let underpaint = face.buffer(0.35).intersection(&faces.real_ink);
+    let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
+    for shape in &mut shapes {
+        shape.bucket = true;
+    }
+    Ok(shapes)
+}
+fn build_faces(marks: &[Mark], gap: Gap) -> Result<Faces, String> {
     let mut paths: Vec<(Vec<Pos2>, f32, bool)> = vec![];
     let mut obstacles: Vec<MultiPolygon<f64>> = vec![];
     let mut silhouettes = Vec::new();
-    let mut bounds = Rect::from_min_max(click, click);
+    let mut bounds = Rect::NOTHING;
     for mark in marks.iter().filter(|m| {
         !m.bucket
             && !m.style.guide
@@ -144,8 +280,19 @@ fn fill_at_level(
     }
     let real_ink = geo::algorithm::bool_ops::unary_union(&obstacles);
     let mut bridges = Vec::new();
+    let mut bridge_segments = Vec::new();
     if gap != Gap::None {
         let threshold = gap.distance();
+        let segments: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .flat_map(|(owner, (p, _, _))| {
+                p.windows(2)
+                    .enumerate()
+                    .map(move |(i, p)| ((owner, i), Rect::from_two_pos(p[0], p[1])))
+            })
+            .collect();
+        let index = crate::spatial::Index::new(segments.iter().map(|(_, r)| *r));
         for (owner, (path, thickness, closed)) in paths.iter().enumerate() {
             if *closed || path.first() == path.last() {
                 continue;
@@ -160,8 +307,13 @@ fn fill_at_level(
                 let outward = (endpoint - adjacent).normalized();
                 let mut nearest: Option<(Pos2, f32)> = None;
                 let mut joined = false;
-                'neighbors: for (other, (other_path, _, _)) in paths.iter().enumerate() {
-                    for (segment, pair) in other_path.windows(2).enumerate() {
+                'neighbors: for candidate in index.query(Rect::from_center_size(
+                    endpoint,
+                    eframe::egui::Vec2::splat(threshold * 2. + 0.16),
+                )) {
+                    let (other, segment) = segments[candidate].0;
+                    let pair = &paths[other].0[segment..segment + 2];
+                    {
                         if other == owner {
                             let distance_along = if at_end {
                                 total - lengths[(segment + 1).min(lengths.len() - 1)]
@@ -191,6 +343,7 @@ fn fill_at_level(
                     }
                 }
                 if !joined && let Some((target, _)) = nearest {
+                    bridge_segments.push([endpoint, target]);
                     bridges.push(
                         line([endpoint, target]).buffer_with_style(
                             BufferStyle::new(f64::from(*thickness).min(1.) / 2.)
@@ -218,29 +371,16 @@ fn fill_at_level(
     } else {
         real_ink.union(&geo::algorithm::bool_ops::unary_union(&bridges))
     };
-    let region = match bounded_face(&outer, &ink, guard, click) {
-        Ok(region) => region,
-        Err(error) if gap != Gap::None && !silhouettes.is_empty() => {
-            // Filled brush paths have no centerline endpoints. Close their silhouettes
-            // separately so a filled mark cannot round the corners of every stroke.
-            let radius = f64::from(gap.distance()) / 2.;
-            let silhouettes = geo::algorithm::bool_ops::unary_union(&silhouettes);
-            let closed = silhouettes
-                .buffer_with_style(BufferStyle::new(radius).line_join(LineJoin::Miter(2.)))
-                .buffer_with_style(BufferStyle::new(-radius).line_join(LineJoin::Miter(2.)));
-            let closed_ink = ink.union(&closed);
-            bounded_face(&outer, &closed_ink, guard, click).map_err(|_| error)?
-        }
-        Err(error) => return Err(error),
-    };
-    // Overlap real ink to cover antialiasing seams. Virtual bridges stay flat.
-    let face = MultiPolygon(vec![region]);
-    let underpaint = face.buffer(0.35).intersection(&real_ink);
-    let mut shapes = vector::polygons_to_marks(face.union(&underpaint), color);
-    for shape in &mut shapes {
-        shape.bucket = true;
-    }
-    Ok(shapes)
+    let free = outer.difference(&ink);
+    Ok(Faces {
+        bridges: bridge_segments,
+        real_ink,
+        ink,
+        silhouettes,
+        outer,
+        guard,
+        free,
+    })
 }
 
 pub(crate) fn covered_bucket_fills(marks: &[Mark], replacement: &[Mark]) -> Vec<usize> {
@@ -268,11 +408,15 @@ fn bounded_face(
     click: Pos2,
 ) -> Result<Polygon<f64>, String> {
     let free = outer.difference(ink);
+    face_at(&free, guard, click)
+}
+fn face_at(free: &MultiPolygon<f64>, guard: Rect, click: Pos2) -> Result<Polygon<f64>, String> {
     let point = geo::Point::new(click.x as f64, click.y as f64);
     let region = free
         .0
-        .into_iter()
+        .iter()
         .find(|p| p.contains(&point))
+        .cloned()
         .ok_or("Haz clic dentro de una zona, fuera del contorno")?;
     let rect = region.bounding_rect().ok_or("Zona de relleno vacía")?;
     if (rect.min().x - guard.left() as f64).abs() < 0.1
@@ -288,6 +432,52 @@ fn bounded_face(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_reports_bridges_without_changing_ink_or_fill_geometry() {
+        let marks = vec![contour(8.)];
+        let before = serde_json::to_vec(&marks).unwrap();
+        let (preview, bridges) =
+            fill_preview(&marks, Pos2::new(50., 50.), Gap::Medium, [200, 40, 60, 255]).unwrap();
+        assert!(!bridges.is_empty());
+        let applied = fill(&marks, Pos2::new(50., 50.), Gap::Medium, [200, 40, 60, 255]).unwrap();
+        assert!(preview == applied);
+        assert_eq!(serde_json::to_vec(&marks).unwrap(), before);
+        let closed = vec![contour(0.)];
+        assert!(
+            fill_preview(&closed, Pos2::new(50., 50.), Gap::None, [255; 4])
+                .unwrap()
+                .1
+                .is_empty()
+        );
+    }
+    #[test]
+    fn face_cache_reuses_color_changes_and_invalidates_geometry() {
+        FACE_CACHE.with(|cache| cache.borrow_mut().clear());
+        let mut mark = contour(0.);
+        let first = cached_faces(&[mark.clone()], Gap::None).unwrap();
+        mark.color = [240, 40, 10, 255];
+        let recolored = cached_faces(&[mark.clone()], Gap::None).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &recolored));
+        let fills = fill(
+            &[mark.clone()],
+            Pos2::new(20., 20.),
+            Gap::None,
+            [10, 20, 30, 255],
+        )
+        .unwrap();
+        let mut with_fill = vec![mark.clone()];
+        with_fill.extend(fills);
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            &cached_faces(&with_fill, Gap::None).unwrap()
+        ));
+        mark.points[1] = [120., 0.];
+        assert!(!std::sync::Arc::ptr_eq(
+            &first,
+            &cached_faces(&[mark], Gap::None).unwrap()
+        ));
+        FACE_CACHE.with(|cache| assert!(cache.borrow().len() <= 4));
+    }
     fn contour(gap: f32) -> Mark {
         Mark {
             points: vec![[0., 0.], [100., 0.], [100., 100.], [0., 100.], [0., gap]].into(),

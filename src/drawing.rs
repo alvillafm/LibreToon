@@ -5,6 +5,9 @@ pub struct Drawing {
     pub radius: f32,
     pub pressure: bool,
     pub vector_pressure: bool,
+    pub sample_style: bool,
+    pub pressure_curve: crate::pressure::Curve,
+    pub stabilization: f32,
     stroke_pressure: bool,
     pub opacity: f32,
     pub hardness: f32,
@@ -25,6 +28,9 @@ impl Default for Drawing {
             radius: 0.,
             pressure: true,
             vector_pressure: false,
+            sample_style: false,
+            pressure_curve: Default::default(),
+            stabilization: 0.,
             stroke_pressure: true,
             opacity: 1.,
             hardness: 0.3,
@@ -68,7 +74,7 @@ impl Drawing {
         let force = if !self.stroke_pressure {
             1.
         } else if let Some(sample) = self.pen.force() {
-            let force = sample.clamp(0.02, 1.);
+            let force = self.pressure_curve.sample(sample).clamp(0.02, 1.);
             if !self.pressure_seen {
                 // A driver can report pen contact before its first pressure packet.
                 for (_, pending) in &mut self.samples {
@@ -317,6 +323,20 @@ impl Editor {
             } else {
                 crate::i18n::tr("Presión de lápiz desactivada")
             });
+            let key = egui::Id::unique("vector-pressure-preferences-dirty");
+            if self.studio.prefs.vector_pressure_curve.ui(ui) {
+                ui.ctx().data_mut(|d| d.insert_temp(key, true));
+            }
+            if !ui.input(|i| i.pointer.any_down())
+                && ui
+                    .ctx()
+                    .data_mut(|d| d.remove_temp::<bool>(key))
+                    .unwrap_or(false)
+            {
+                if let Err(error) = self.studio.save() {
+                    self.status = error;
+                }
+            }
             ui.small(if !*pressure {
                 crate::i18n::tr("Constant stroke width")
             } else if self.drawing.pen.detected() {

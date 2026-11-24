@@ -1040,11 +1040,17 @@ impl Editor {
                 }
             }
         }
+        let timeline_min = if ui.available_height() < 400. {
+            90.
+        } else {
+            150.
+        };
+        let timeline_max = (ui.available_height() - 180.).clamp(timeline_min, 700.);
         if self.in_character_symbol() {
             let timeline = egui::Panel::bottom("character-view-timeline")
                 .default_size(240.)
-                .min_size(150.)
-                .max_size(700.)
+                .min_size(timeline_min)
+                .max_size(timeline_max)
                 .resizable(true)
                 .show(ui, |ui| self.character_timeline(ui));
             let canvas = ui.available_rect_before_wrap();
@@ -1053,8 +1059,8 @@ impl Editor {
         }
         let timeline = egui::Panel::bottom("timeline")
             .default_size(300.)
-            .min_size(150.)
-            .max_size(700.)
+            .min_size(timeline_min)
+            .max_size(timeline_max)
             .resizable(true)
             .show(ui, |ui| {
                 let viewport_id = ui.scope_id().with("timeline-viewport");

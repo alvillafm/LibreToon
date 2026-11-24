@@ -81,9 +81,6 @@ fn read(
         let asset =
             Editor::read_media(&file, &ffmpeg).map_err(|e| format!("{}: {e}", file.display()))?;
         bytes = bytes.saturating_add(asset.data.len());
-        if bytes > 256 * 1024 * 1024 {
-            return Err("Image sequence exceeds the 256 MiB media budget".into());
-        }
         assets.push(asset);
         progress.store(index + 1, MemoryOrder::Relaxed);
     }
@@ -297,9 +294,7 @@ impl Editor {
             .chain(assets.iter())
             .try_fold(0usize, |n, a| n.checked_add(a.data.len()))
             .ok_or("Media budget exceeded")?;
-        if total > 256 * 1024 * 1024 {
-            return Err("Media library exceeds 256 MiB".into());
-        }
+        let _ = total; // Checked arithmetic; no aggregate project-size ceiling.
         self.finish_pending_pen();
         self.checkpoint();
         self.extend_media_timeline(end);

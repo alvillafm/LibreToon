@@ -578,6 +578,12 @@ pub(crate) fn parse(xml: &str) -> Result<Imported, String> {
     if xml.contains("<!DOCTYPE") || xml.contains("<!ENTITY") {
         return Err("SVG document types and entities are unsupported".into());
     }
+    let expanded = if xml.contains("<use") || xml.contains(":use") {
+        Some(crate::svg_use::expand(xml)?)
+    } else {
+        None
+    };
+    let xml = expanded.as_ref().map_or(xml, |(xml, _)| xml.as_str());
     let gradients = gradients(xml)?;
     let mut stack = vec![Context {
         matrix: rig::IDENTITY,
@@ -586,7 +592,11 @@ pub(crate) fn parse(xml: &str) -> Result<Imported, String> {
     }];
     let mut result = Imported {
         marks: vec![],
-        warnings: BTreeSet::new(),
+        warnings: expanded
+            .as_ref()
+            .map_or_else(BTreeSet::new, |(_, warnings)| {
+                warnings.iter().cloned().collect()
+            }),
     };
     let mut count = 0;
     let mut geometry = 0usize;
@@ -850,7 +860,7 @@ impl Editor {
             .to_string();
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
+        crate::geometry_jobs::spawn(move || {
             use std::io::Read;
             let result = (|| {
                 let mut bytes = String::new();

@@ -424,8 +424,10 @@ pub(crate) fn stroke_hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
     {
         return false;
     }
-    let points = vertices(m);
-    let (lengths, total) = crate::width::lengths(&points);
+    let geometry = crate::picking::geometry(m);
+    let points = &geometry.points;
+    let lengths = &geometry.lengths;
+    let total = geometry.total;
     points.first().is_some_and(|q| {
         q.distance(p) <= tolerance + m.width * crate::width::sample(&m.width_profile, 0.) * 0.5
     }) || points.windows(2).enumerate().any(|(i, w)| {
@@ -442,7 +444,8 @@ pub(crate) fn stroke_hit(m: &Mark, p: Pos2, tolerance: f32) -> bool {
     })
 }
 pub(crate) fn axis_distance(m: &Mark, p: Pos2) -> f32 {
-    vertices(m)
+    crate::picking::geometry(m)
+        .points
         .windows(2)
         .map(|w| distance_to_segment(p, w[0], w[1]))
         .fold(f32::INFINITY, f32::min)
@@ -544,7 +547,7 @@ impl Editor {
     }
 
     pub fn canvas_ui(&mut self, ui: &mut egui::Ui) {
-        self.bucket_range_ui(ui.ctx());
+        self.bucket_range_ui(ui.ctx(), ui.available_rect_before_wrap());
         let tool = if self.drawing.pen.eraser() {
             Tool::Eraser
         } else {
@@ -1176,7 +1179,11 @@ impl Editor {
                 state.selected = self.canvas.selected.clone();
             } else if !self.playing && tool == Tool::Eyedropper {
                 if !self.raster_active() || !self.pick_raster_color(world) {
-                    self.sample_apply_at(&state.selected, world, 3. / view.scale);
+                    if self.drawing.sample_style {
+                        self.sample_apply_at(&state.selected, world, 3. / view.scale);
+                    } else {
+                        self.sample_at(world, 3. / view.scale, Some(self.active_fill));
+                    }
                 }
             } else if !self.playing && tool == Tool::Wand {
                 self.wand_select(&mut state, world, shift);
@@ -1239,7 +1246,22 @@ impl Editor {
                 && !self.doc.layers[self.layer].options.locked
                 && self.doc.layers[self.layer].options.mannequin.is_none()
             {
-                if self.feature.bucket_range_armed || self.feature.bucket_next {
+                let marks = &self.doc.layers[self.layer].frames[self.frame];
+                let complex = marks.len() > 50
+                    || marks
+                        .iter()
+                        .map(|m| {
+                            m.points.len()
+                                + m.nodes.len() * 3
+                                + m.holes.iter().map(|h| h.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
+                        > 2000;
+                if self.feature.bucket_range_armed
+                    || self.feature.bucket_next
+                    || self.feature.bucket_preview
+                    || complex
+                {
                     self.start_bucket_range(&ctx, world, shift);
                 } else {
                     self.bucket_at(&mut state, world, shift);
@@ -1286,6 +1308,7 @@ impl Editor {
                 } else {
                     world
                 };
+                self.drawing.pressure_curve = self.studio.prefs.vector_pressure_curve;
                 self.drawing.start(world, tool);
                 self.draft = Some(Mark {
                     points: vec![[world.x, world.y]].into(),
@@ -1848,12 +1871,41 @@ impl Editor {
                                 }
                                 samples
                             });
-                            for screen in samples {
-                                let p = crate::vector::xy(view.world(screen));
+                            let count = samples.len();
+                            for (index, screen) in samples.into_iter().enumerate() {
+                                let raw = view.world(screen);
+                                let tip = if (released || !primary_down) && index + 1 == count {
+                                    raw
+                                } else {
+                                    crate::brush::stabilize(
+                                        smoother.last(),
+                                        raw,
+                                        self.drawing.stabilization,
+                                    )
+                                };
+                                let p = crate::vector::xy(tip);
                                 if smoother.last().distance(crate::vector::pos(p)) > 0.08 {
                                     smoother.push(p, &mut m.points);
                                     self.drawing.sample(crate::vector::pos(p));
                                 }
+                            }
+                            if self.drawing.stabilization > 0. && primary_down {
+                                let tip = view.screen(smoother.last());
+                                let pointer = view.screen(world);
+                                painter.line_segment(
+                                    [tip, pointer],
+                                    egui::Stroke::new(1., egui::Color32::from_rgb(70, 160, 240)),
+                                );
+                                painter.circle_stroke(
+                                    tip,
+                                    4.,
+                                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                                );
+                                painter.circle_stroke(
+                                    tip,
+                                    5.,
+                                    egui::Stroke::new(1., egui::Color32::BLACK),
+                                );
                             }
                         }
                     }
@@ -2572,7 +2624,7 @@ impl Editor {
                 &painter,
                 pos,
                 view,
-                self.studio.prefs.raster_brush,
+                &self.studio.prefs.raster_brush,
                 tool == Tool::Eraser,
             );
         }
@@ -2650,6 +2702,8 @@ impl Editor {
         self.command_helper_ui(ui, area);
         self.sync_selected_style(&state.selected);
         self.node_simplify_overlays(&painter, view);
+        self.geometry_conversion_overlay(&painter, view);
+        self.bucket_preview_overlay(&painter, view);
         self.canvas = state;
         self.node_toolbar(ui.ctx(), area);
         self.face_rig_panel(ui.ctx(), area);
@@ -4034,6 +4088,7 @@ impl Editor {
             self.gap,
             self.fill_color.to_array(),
             self.bucket_outline_mode(layer),
+            false,
         ) {
             Ok(edit) => {
                 self.checkpoint();
@@ -4074,6 +4129,7 @@ impl Editor {
                 color,
                 replaced,
                 linked,
+                ..
             } => {
                 let link = (!gradient_on)
                     .then(|| self.track_vector_color(color))
@@ -4094,6 +4150,7 @@ impl Editor {
                 shapes,
                 replaced,
                 outline,
+                ..
             } => {
                 let mut shapes = shapes;
                 let bounds = shapes.iter().fold(Rect::NOTHING, |bounds, mark| {
@@ -4133,15 +4190,75 @@ impl Editor {
         }
     }
 
-    fn start_bucket_range(&mut self, ctx: &egui::Context, world: Pos2, recalculate: bool) {
+    fn bucket_preview_overlay(&self, painter: &egui::Painter, view: View) {
+        let Some(batch) = &self.feature.bucket_range else {
+            return;
+        };
+        if !batch.confirm
+            || batch.recovery != self.recovery
+            || batch.snapshot.identity() != self.doc.layers.identity()
+        {
+            return;
+        }
+        let Some(edit) = batch
+            .result
+            .as_ref()
+            .and_then(|edits| edits.iter().find(|(frame, _)| *frame == self.frame))
+            .and_then(|(_, edit)| edit.as_ref().ok())
+        else {
+            return;
+        };
+        let (shapes, bridges): (&[Mark], &[[Pos2; 2]]) = match edit {
+            BucketEdit::Replace {
+                shapes, bridges, ..
+            } => (shapes, bridges),
+            BucketEdit::Recolor {
+                preview: Some(mark),
+                ..
+            } => (std::slice::from_ref(mark.as_ref()), &[]),
+            _ => return,
+        };
+        let local = self.camera_depth_view(view, batch.layer);
+        let mut cache = batch.preview_cache.borrow_mut();
+        let mut bounds = Rect::NOTHING;
+        for mark in shapes {
+            bounds = bounds.union(crate::vector::control_bounds(mark));
+            let mut candidate = mark.clone();
+            candidate.fill = None;
+            candidate.stroke = true;
+            candidate.closed = true;
+            candidate.width_profile = Default::default();
+            candidate.style.gradient = None;
+            candidate.style.stroke_gradient = None;
+            candidate.width = 1.5 / local.scale.max(0.001);
+            candidate.color = [65, 220, 205, 255];
+            crate::paint::draw(painter, &candidate, local, false, false, Some(&mut cache));
+        }
+        for &[a, b] in bridges {
+            if bounds.expand(1.).intersects(Rect::from_two_pos(a, b)) {
+                painter.line_segment(
+                    [local.screen(a), local.screen(b)],
+                    egui::Stroke::new(2., Color32::from_rgb(245, 170, 50)),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn start_bucket_range(
+        &mut self,
+        ctx: &egui::Context,
+        world: Pos2,
+        recalculate: bool,
+    ) {
         if self.feature.bucket_range.is_some() || !self.fill_enabled {
             return;
         }
-        let confirm = std::mem::take(&mut self.feature.bucket_range_armed);
+        let selected_range = std::mem::take(&mut self.feature.bucket_range_armed);
+        let confirm = selected_range || self.feature.bucket_preview;
         let layer = self.layer;
         let snapshot = self.doc.layers.clone();
         let source = &snapshot[layer];
-        let frames: Vec<_> = if confirm {
+        let frames: Vec<_> = if selected_range {
             let Some((_, a, b)) = self
                 .feature
                 .frame_selection
@@ -4153,10 +4270,12 @@ impl Editor {
                 .filter(|frame| source.key(*frame))
                 .take(33)
                 .collect()
-        } else {
+        } else if self.feature.bucket_next {
             following_bucket_keys(source, self.frame, self.feature.bucket_next_count)
+        } else {
+            vec![self.frame]
         };
-        if confirm && frames.len() > 32 {
+        if selected_range && frames.len() > 32 {
             self.status = crate::i18n::tr("Select a range with at most 32 keyframes.").into();
             return;
         }
@@ -4167,95 +4286,197 @@ impl Editor {
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_snapshot = snapshot.clone();
         let current_pose =
-            (!confirm && !source.key(self.frame) && self.studio.prefs.auto_key_paint)
+            (!selected_range && !source.key(self.frame) && self.studio.prefs.auto_key_paint)
                 .then(|| (self.frame, crate::animation::marks(source, self.frame)));
         let color = self.fill_color.to_array();
         let gap = self.gap;
         let outline = self.bucket_outline_mode(layer);
         let ctx = ctx.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.feature.bucket_range = Some(BucketRange {
+            preview_cache: Default::default(),
+            recovery: self.recovery.clone(),
+            total: frames.len(),
+            cancel: cancel.clone(),
+            progress: progress.clone(),
             layer,
             snapshot,
             confirm,
+            paint_current: !selected_range,
             start_frame: self.frame,
             result: None,
             pending: rx,
             gradient_on: self.feature.gradient_on,
             gradient: self.feature.gradient.clone(),
         });
-        std::thread::spawn(move || {
-            let edits = frames
-                .into_iter()
-                .map(|frame| {
-                    let marks = current_pose
-                        .as_ref()
-                        .filter(|(current, _)| *current == frame)
-                        .map_or(&worker_snapshot[layer].frames[frame], |(_, marks)| marks);
-                    (
-                        frame,
-                        bucket_edit(marks, world, recalculate, gap, color, outline),
-                    )
-                })
-                .collect();
+        crate::geometry_jobs::spawn(move || {
+            let mut edits = Vec::new();
+            for (index, frame) in frames.into_iter().enumerate() {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let marks = current_pose
+                    .as_ref()
+                    .filter(|(current, _)| *current == frame)
+                    .map_or(&worker_snapshot[layer].frames[frame], |(_, marks)| marks);
+                edits.push((
+                    frame,
+                    bucket_edit(marks, world, recalculate, gap, color, outline, confirm),
+                ));
+                progress.store(index + 1, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            }
             let _ = tx.send(edits);
             ctx.request_repaint();
         });
     }
 
-    fn bucket_range_ui(&mut self, ctx: &egui::Context) {
+    fn bucket_range_ui(&mut self, ctx: &egui::Context, canvas: Rect) {
+        if self.feature.bucket_report_open {
+            egui::Window::new(crate::i18n::tr("Last fill report"))
+                .open(&mut self.feature.bucket_report_open)
+                .default_width(420.)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(260.)
+                        .show(ui, |ui| {
+                            egui::Grid::new("last-fill-report")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for (frame, error) in &self.feature.bucket_report {
+                                        ui.label(format!("{:03}", frame + 1));
+                                        ui.label(crate::i18n::tr(
+                                            error.as_deref().unwrap_or("Fill ready"),
+                                        ));
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+        }
         let Some(mut batch) = self.feature.bucket_range.take() else {
             return;
         };
-        if batch.snapshot.identity() != self.doc.layers.identity() {
+        if batch.recovery != self.recovery
+            || batch.snapshot.identity() != self.doc.layers.identity()
+        {
             return;
         }
         if batch.result.is_none() {
             match batch.pending.try_recv() {
                 Ok(result) => batch.result = Some(result),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status=crate::i18n::tr("Geometry operation interrupted or queue full. Try again after another operation finishes.").into();
+                    return;
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
         let mut open = true;
         let mut apply = !batch.confirm && batch.result.is_some();
-        if batch.confirm {
-            egui::Window::new(crate::i18n::tr("Fill selected keyframes"))
-                .id(egui::Id::unique("bucket-range-preview"))
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    if let Some(edits) = &batch.result {
-                        egui::ScrollArea::vertical()
-                            .max_height(260.)
-                            .show(ui, |ui| {
-                                for (frame, edit) in edits {
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("{:03}", frame + 1));
-                                        if let Err(error) = edit {
-                                            ui.label(crate::i18n::tr(error));
-                                        } else {
-                                            ui.label(crate::i18n::tr("Fill ready"));
-                                        }
-                                    });
+        if batch.confirm || batch.result.is_none() {
+            egui::Window::new(crate::i18n::tr(if batch.total == 1 {
+                "Fill preview"
+            } else {
+                "Fill selected keyframes"
+            }))
+            .id(egui::Id::unique("bucket-range-preview"))
+            .open(&mut open)
+            .default_pos(canvas.right_top() + Vec2::new(-320., 12.))
+            .default_width(300.)
+            .default_height(160.)
+            .constrain_to(canvas)
+            .max_width((canvas.width() - 16.).max(120.))
+            .max_height((canvas.height() - 32.).max(48.))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("bucket-preview-body")
+                    .auto_shrink([false, true])
+                    .max_height((canvas.height() - 64.).max(32.))
+                    .show(ui, |ui| {
+                        if let Some(edits) = &batch.result {
+                            ui.colored_label(
+                                Color32::from_rgb(65, 220, 205),
+                                crate::i18n::tr("Cyan = candidate boundary"),
+                            );
+                            ui.colored_label(
+                                Color32::from_rgb(245, 170, 50),
+                                crate::i18n::tr("Orange = temporary gap bridges"),
+                            );
+                            egui::ScrollArea::vertical()
+                                .max_height(260.)
+                                .show(ui, |ui| {
+                                    for (frame, edit) in edits {
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    *frame == self.frame,
+                                                    format!("{:03}", frame + 1),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.frame = *frame;
+                                            }
+                                            if let Err(error) = edit {
+                                                ui.label(crate::i18n::tr(error));
+                                            } else {
+                                                ui.label(crate::i18n::tr("Fill ready"));
+                                            }
+                                        });
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                if crate::design::button(
+                                    ui,
+                                    Icon::Bucket,
+                                    "Apply fills",
+                                    "Apply fills",
+                                    false,
+                                    edits.iter().any(|(_, edit)| edit.is_ok()),
+                                )
+                                .clicked()
+                                {
+                                    apply = true;
+                                }
+                                if crate::design::button(
+                                    ui,
+                                    Icon::Close,
+                                    "Cancel",
+                                    "Cancel",
+                                    false,
+                                    true,
+                                )
+                                .clicked()
+                                {
+                                    batch
+                                        .cancel
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
                             });
-                        if crate::design::button(
-                            ui,
-                            Icon::Bucket,
-                            "Apply fills",
-                            "Apply fills",
-                            false,
-                            edits.iter().any(|(_, edit)| edit.is_ok()),
-                        )
-                        .clicked()
-                        {
-                            apply = true;
+                        } else {
+                            let progress = batch.progress.load(std::sync::atomic::Ordering::Relaxed)
+                                as f32
+                                / batch.total.max(1) as f32;
+                            ui.add(egui::ProgressBar::new(progress).show_percentage());
+                            if ui.button(crate::i18n::tr("Cancel")).clicked() {
+                                batch
+                                    .cancel
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            ctx.request_repaint_after(std::time::Duration::from_millis(80));
                         }
-                    } else {
-                        ui.spinner();
-                    }
-                });
+                    });
+            });
         }
-        if apply && let Some(edits) = batch.result {
+        if !open || batch.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        if apply && let Some(edits) = batch.result.take() {
+            self.feature.bucket_report = edits
+                .iter()
+                .map(|(frame, result)| (*frame, result.as_ref().err().cloned()))
+                .collect();
             let count = edits.iter().filter(|(_, edit)| edit.is_ok()).count();
             if count == 0 {
                 self.status = edits
@@ -4266,9 +4487,10 @@ impl Editor {
             }
             let total = edits.len();
             self.checkpoint();
+            self.canvas.clear_selection();
             for (frame, edit) in edits {
                 if let Ok(edit) = edit {
-                    if !batch.confirm && frame == batch.start_frame {
+                    if batch.paint_current && frame == batch.start_frame {
                         self.prepare_paint_key(batch.layer, frame);
                     }
                     self.apply_bucket_edit(
@@ -4315,6 +4537,7 @@ enum OutlineFill {
 
 enum BucketEdit {
     Recolor {
+        preview: Option<Box<Mark>>,
         index: usize,
         color: [u8; 4],
         replaced: Vec<usize>,
@@ -4324,20 +4547,34 @@ enum BucketEdit {
         shapes: Vec<Mark>,
         replaced: Vec<usize>,
         outline: Option<usize>,
+        bridges: Vec<[Pos2; 2]>,
     },
 }
 
 type BucketEdits = Vec<(usize, Result<BucketEdit, String>)>;
 
 pub(crate) struct BucketRange {
+    preview_cache: std::cell::RefCell<crate::paint::RenderCache>,
+    recovery: std::path::PathBuf,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
     layer: usize,
     confirm: bool,
+    paint_current: bool,
     start_frame: usize,
     snapshot: crate::shared::SharedVec<crate::document::Layer>,
     gradient_on: bool,
     gradient: crate::features::Gradient,
     pending: std::sync::mpsc::Receiver<BucketEdits>,
     result: Option<BucketEdits>,
+}
+
+impl Drop for BucketRange {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn bucket_edit(
@@ -4347,6 +4584,7 @@ fn bucket_edit(
     gap: crate::bucket::Gap,
     color: [u8; 4],
     outline_mode: OutlineFill,
+    preview: bool,
 ) -> Result<BucketEdit, String> {
     if outline_mode != OutlineFill::Off {
         let Some(index) = marks.iter().rposition(|mark| {
@@ -4403,6 +4641,7 @@ fn bucket_edit(
             }
         }
         return Ok(BucketEdit::Recolor {
+            preview: preview.then(|| Box::new(marks[index].clone())),
             index,
             color,
             replaced,
@@ -4422,22 +4661,30 @@ fn bucket_edit(
         && (!recalculate || marks[index].style.linked_outline_fill)
     {
         return Ok(BucketEdit::Recolor {
+            preview: preview.then(|| Box::new(marks[index].clone())),
             index,
             color,
             replaced: Vec::new(),
             linked: false,
         });
     }
-    let shapes = if let Some(index) = existing.filter(|&index| !marks[index].bucket) {
+    let fill = |marks: &[Mark]| {
+        if preview {
+            crate::bucket::fill_preview(marks, world, gap, color)
+        } else {
+            crate::bucket::fill(marks, world, gap, color).map(|shapes| (shapes, Vec::new()))
+        }
+    };
+    let (shapes, bridges) = if let Some(index) = existing.filter(|&index| !marks[index].bucket) {
         let mut contours = marks.to_vec();
         if contours[index].stroke {
             contours[index].fill = None;
         } else {
             contours.remove(index);
         }
-        crate::bucket::fill(&contours, world, gap, color)?
+        fill(&contours)?
     } else {
-        crate::bucket::fill(marks, world, gap, color)?
+        fill(marks)?
     };
     let mut replaced = crate::bucket::covered_bucket_fills(marks, &shapes);
     let outline = existing.filter(|&index| marks[index].stroke);
@@ -4452,6 +4699,7 @@ fn bucket_edit(
         shapes,
         replaced,
         outline,
+        bridges,
     })
 }
 
@@ -4565,6 +4813,84 @@ mod styling_gesture_tests {
         assert_eq!(following_bucket_keys(layer, 1, 2), vec![1, 3, 7]);
         assert_eq!(following_bucket_keys(layer, 3, 2), vec![3, 7, 9]);
         assert_eq!(following_bucket_keys(layer, 9, 2), vec![9]);
+    }
+
+    #[test]
+    fn background_single_fill_only_edits_current_frame_and_is_one_undo() {
+        run(|ctx, e| {
+            let mark = Mark {
+                points: vec![[100., 100.], [500., 400.]].into(),
+                rectangle: true,
+                closed: true,
+                width: 3.,
+                ..Default::default()
+            };
+            e.doc.layers[0].init_keys();
+            e.doc.layers[0].frames[0] = vec![mark.clone()].into();
+            e.doc.layers[0].frames[1] = vec![mark].into();
+            e.doc.layers[0].options.keys[0] = true;
+            e.doc.layers[0].options.keys[1] = true;
+            e.fill_enabled = true;
+            e.feature.bucket_next = false;
+            e.feature.bucket_range_armed = false;
+            let before = e.doc.layers.clone();
+            let serialized = serde_json::to_value(&e.doc.layers).unwrap();
+            e.start_bucket_range(ctx, Pos2::new(300., 250.), false);
+            assert_eq!(
+                serde_json::to_value(&e.doc.layers).unwrap(),
+                serialized,
+                "queueing must not edit the document"
+            );
+            assert_eq!(e.feature.bucket_range.as_ref().unwrap().total, 1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while e.feature.bucket_range.is_some() && std::time::Instant::now() < deadline {
+                tick(ctx, e, vec![]);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(e.feature.bucket_range.is_none());
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            assert!(e.doc.layers[0].frames[1] == before[0].frames[1]);
+            e.history(false);
+            assert_eq!(serde_json::to_value(&e.doc.layers).unwrap(), serialized);
+        });
+    }
+
+    #[test]
+    fn bucket_preview_does_not_edit_or_add_history_until_confirmed() {
+        run(|ctx, e| {
+            e.doc.layers[0].frames[0] = vec![Mark {
+                points: vec![[100., 100.], [500., 400.]].into(),
+                rectangle: true,
+                closed: true,
+                ..Default::default()
+            }]
+            .into();
+            e.fill_enabled = true;
+            e.feature.bucket_preview = true;
+            let before = serde_json::to_vec(&e.doc).unwrap();
+            let history = e.undo.len();
+            e.start_bucket_range(ctx, Pos2::new(300., 250.), false);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                tick(ctx, e, vec![]);
+                if e.feature
+                    .bucket_range
+                    .as_ref()
+                    .is_some_and(|batch| batch.result.is_some())
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(e.feature.bucket_range.as_ref().unwrap().confirm);
+            assert_eq!(serde_json::to_vec(&e.doc).unwrap(), before);
+            assert_eq!(e.undo.len(), history);
+            e.feature.bucket_range = None;
+            tick(ctx, e, vec![]);
+            assert_eq!(serde_json::to_vec(&e.doc).unwrap(), before);
+            assert_eq!(e.undo.len(), history);
+        });
     }
 
     #[test]

@@ -760,6 +760,15 @@ impl Light {
         }
     }
 
+    pub(crate) fn same_at(&self, other: &Self, frame: usize) -> bool {
+        if self.at(frame) != other.at(frame) {
+            return false;
+        }
+        let mut copy = self.clone();
+        copy.base = other.base;
+        copy.keys = other.keys.clone();
+        copy == *other
+    }
     fn at(&self, frame: usize) -> Settings {
         let after = self.keys.partition_point(|key| key.0 <= frame);
         let (a, start) = after
@@ -2099,7 +2108,7 @@ impl Editor {
             || new_floor.is_some()
             || new_caster.is_some()
         {
-            self.checkpoint();
+            self.begin_property_edit(("light-receivers", light_index, self.frame));
             if let Some(index) = new_receiver {
                 let id = self.doc.layers[index]
                     .options
@@ -2322,7 +2331,7 @@ impl Editor {
             value.gobo = Gobo::Library;
         }
         if value != original || insert || remove || matte.is_some() {
-            self.checkpoint();
+            self.begin_property_edit(("light-settings", self.layer, self.frame));
             let light = self.doc.layers[self.layer].options.light.as_mut().unwrap();
             if let Some(matte) = matte {
                 light.gobo_matte = Some(matte);

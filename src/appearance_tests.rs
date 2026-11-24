@@ -183,3 +183,52 @@ fn all_themes_and_asian_locales_render_without_changing_artwork() {
     i18n::set_locale(Language::English);
     themes::ensure(&ctx, Theme::Studio);
 }
+
+#[test]
+fn viewport_remains_usable_across_laptop_sizes_and_display_scales() {
+    for physical in [[1280., 720.], [1366., 768.], [1920., 1080.]] {
+        for scale in [1., 1.5, 2.] {
+            let logical = Vec2::new(physical[0] / scale, physical[1] / scale);
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            let mut editor =
+                crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+            editor.recovery = std::env::temp_dir().join(format!(
+                "layout-{}-{:?}.json",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            editor.add_document(crate::fresh_document(), None);
+            editor.studio.prefs.saving.enabled = false;
+            let before = serde_json::to_vec(&editor.doc).unwrap();
+            let mut canvas = Rect::NOTHING;
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, logical)),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        editor.workspace(ui);
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            canvas = ui.available_rect_before_wrap();
+                            editor.canvas_ui(ui);
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            assert!(
+                canvas.width() >= 180. && canvas.height() >= 80.,
+                "{physical:?} at {scale}: {canvas:?}"
+            );
+            assert!(
+                canvas.min.x >= 0.
+                    && canvas.min.y >= 0.
+                    && canvas.max.x <= logical.x + 1.
+                    && canvas.max.y <= logical.y + 1.
+            );
+            assert_eq!(serde_json::to_vec(&editor.doc).unwrap(), before);
+        }
+    }
+}

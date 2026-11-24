@@ -9,6 +9,8 @@ use crate::{
 };
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+#[path = "character_batch.rs"]
+mod batch;
 
 const VARIANTS: usize = 16;
 pub(crate) const FACE_FRAMES: usize = 8 * (1 + VARIANTS);
@@ -2590,6 +2592,7 @@ impl Editor {
         }
         egui::Window::new(tr("Character Rig Controllers"))
             .id(egui::Id::unique("scene-face-rig"))
+            .constrain_to(area)
             .default_pos(area.left_top() + egui::vec2(12., 12.))
             .default_size(egui::vec2(
                 (area.width() * 0.30).clamp(220., 320.),
@@ -2674,11 +2677,13 @@ impl Editor {
                             .and_then(|driver| driver.position(rig, frame));
                         let mut value =
                             driven.unwrap_or_else(|| (axes[0] * 127. / range).clamp(0., 1.));
-                        let response = ui
+                        let controls = ui
                             .add_enabled_ui(driven.is_none(), |ui| {
                                 rig_slider(ui, &mut value, piece.lip_poses.len(), "Rig pose")
-                            })
-                            .inner;
+                            });
+                        controls.response
+                            .on_disabled_hover_text(tr("This control follows a bone. Choose Manual control under Bone driver to edit it directly."));
+                        let response = controls.inner;
                         if response.changed() {
                             axes[0] = value * range / 127.;
                             edit = Some((row, None, axes));
@@ -3006,8 +3011,63 @@ impl Editor {
 
     pub(crate) fn character_timeline(&mut self, ui: &mut egui::Ui) {
         struct CharacterLayerDrag(usize);
+        enum BatchAction {
+            Attach(u64, Matrix),
+            Mirror(bool),
+            Prefix(String),
+        }
+        let batch_id = egui::Id::unique((
+            "character-piece-selection",
+            self.recovery.clone(),
+            self.feature.symbol_stack.last().map(|entry| entry.3),
+        ));
+        let mut selected_tracks = ui
+            .data(|data| data.get_temp::<std::collections::BTreeSet<u64>>(batch_id))
+            .unwrap_or_default();
+        selected_tracks.retain(|track| {
+            self.doc.layers.iter().any(|layer| {
+                layer
+                    .options
+                    .character_piece
+                    .as_ref()
+                    .is_some_and(|piece| piece.track == *track)
+            })
+        });
+        let active_track = self.doc.layers[self.layer]
+            .options
+            .character_piece
+            .as_ref()
+            .map(|piece| piece.track);
+        if selected_tracks.is_empty()
+            && let Some(track) = active_track
+        {
+            selected_tracks.insert(track);
+        }
+        let selected_rows: Vec<_> = self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(row, layer)| {
+                layer
+                    .options
+                    .character_piece
+                    .as_ref()
+                    .filter(|piece| selected_tracks.contains(&piece.track))
+                    .map(|_| row)
+            })
+            .collect();
+        let features_only = !selected_rows.is_empty()
+            && selected_rows.iter().all(|&row| {
+                self.doc.layers[row]
+                    .options
+                    .character_piece
+                    .as_ref()
+                    .is_some_and(|piece| piece.eye_parent.is_some())
+            });
+        let mut batch_action = None;
         ui.set_min_height(ui.available_height());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let add = button(
                 ui,
                 Icon::LayerAdd,
@@ -3150,6 +3210,33 @@ impl Editor {
                     .prefix("› "),
             )
             .on_hover_text(tr("Next views"));
+            let actions = button(ui, Icon::Layers, "", "Selected piece actions · Shift-click rows to select several", false, !selected_rows.is_empty());
+            egui::Popup::menu(&actions).show(|ui| {
+                ui.small(format!("{} {}", selected_rows.len(), tr("selected pieces")));
+                ui.add_enabled_ui(features_only, |ui| {
+                    ui.menu_button(tr("Attach selected features"), |ui| {
+                        for (track, name) in self.rigged_layer_targets() {
+                            if button(ui, Icon::Bones, &name, "Attach selected features to this rig layer", false, true).clicked()
+                                && let Some(matrix) = self.doc.layers.iter().filter_map(|layer| layer.options.character_piece.as_ref()).find(|piece| piece.track == track).map(|piece| piece.matrix)
+                            { batch_action = Some(BatchAction::Attach(track, matrix)); ui.close(); }
+                        }
+                    });
+                }).response.on_disabled_hover_text(tr("Select rigged feature layers; bound artwork layers keep their own rig binding."));
+                for (opposite, label) in [(false, "Mirror selected layers"), (true, "Mirror selected to opposite views")] {
+                    if button(ui, Icon::Mirror, label, "Copy all poses and preserve clipping between copied eyes and pupils", false, features_only && self.doc.layers.len() + selected_rows.len() <= 100).clicked() {
+                        batch_action = Some(BatchAction::Mirror(opposite)); ui.close();
+                    }
+                }
+                ui.menu_button(tr("Add name prefix"), |ui| {
+                    let id = batch_id.with("prefix");
+                    let mut prefix = ui.data(|data| data.get_temp::<String>(id)).unwrap_or_default();
+                    ui.add(egui::TextEdit::singleline(&mut prefix).char_limit(48).hint_text(tr("Prefix")));
+                    if button(ui, Icon::Text, "Apply prefix", "Rename selected pieces in one undo step", false, !prefix.trim().is_empty()).clicked() {
+                        batch_action = Some(BatchAction::Prefix(prefix.clone())); ui.close();
+                    }
+                    ui.data_mut(|data| data.insert_temp(id, prefix));
+                });
+            });
         });
         ui.separator();
         let mut selection = None;
@@ -3218,17 +3305,35 @@ impl Editor {
                                     let response = ui.horizontal(|ui| {
                                         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(15.), egui::Sense::hover());
                                         crate::design::draw(ui.painter(), rect, icon, color);
-                                        ui.add(egui::Label::new(egui::RichText::new(&layer.name).color(color)).sense(egui::Sense::click_and_drag()))
+                                        ui.add(egui::Button::new(egui::RichText::new(&layer.name).color(color)).selected(selected_tracks.contains(&identity)).frame_when_inactive(false).sense(egui::Sense::click_and_drag()))
                                     }).inner.on_hover_cursor(egui::CursorIcon::Grab);
                                     response.dnd_set_drag_payload(CharacterLayerDrag(index));
                                     if response.double_clicked() {
                                         rename = Some((index, layer.name.clone()));
                                     } else if response.clicked() {
+                                        let modifiers = ui.input(|input| input.modifiers);
+                                        let toggle = modifiers.command || modifiers.ctrl;
+                                        let mut choose = true;
+                                        if modifiers.shift {
+                                            selected_tracks.clear();
+                                            for target in &self.doc.layers[index.min(self.layer)..=index.max(self.layer)] {
+                                                if let Some(piece) = &target.options.character_piece { selected_tracks.insert(piece.track); }
+                                            }
+                                        } else if toggle && selected_tracks.contains(&identity) && selected_tracks.len() > 1 {
+                                            selected_tracks.remove(&identity);
+                                            choose = false;
+                                        } else {
+                                            if !toggle { selected_tracks.clear(); }
+                                            selected_tracks.insert(identity);
+                                        }
                                         let view = self.frame % 8;
                                         let offset = if let Some(piece) = mouth {
                                             (if index == self.layer { (self.frame / 8).clamp(1, piece.lip_poses.len()) } else { 1 }) * 8
                                         } else if eye.is_some() { (self.frame / 8).clamp(1, 3) * 8 } else { 0 };
-                                        selection = Some((index, offset + view));
+                                        if choose { selection = Some((index, offset + view)); }
+                                    }
+                                    if response.secondary_clicked() && !selected_tracks.contains(&identity) {
+                                        selected_tracks.clear(); selected_tracks.insert(identity);
                                     }
                                     response.context_menu(|ui| {
                                         if layer.options.character_piece.as_ref().is_some_and(|piece| {
@@ -3511,6 +3616,35 @@ impl Editor {
                         }
                     });
             });
+        if let Some(action) = batch_action {
+            match action {
+                BatchAction::Attach(track, matrix) => {
+                    self.attach_rigged_layers(&selected_rows, track, matrix);
+                }
+                BatchAction::Mirror(opposite) => {
+                    let first = self.doc.layers.len();
+                    if self.mirror_rigged_layers(&selected_rows, opposite) {
+                        selected_tracks = self.doc.layers[first..]
+                            .iter()
+                            .filter_map(|layer| {
+                                layer
+                                    .options
+                                    .character_piece
+                                    .as_ref()
+                                    .map(|piece| piece.track)
+                            })
+                            .collect();
+                    }
+                }
+                BatchAction::Prefix(prefix) => {
+                    let names: Vec<_> = selected_rows
+                        .iter()
+                        .map(|&row| (row, format!("{prefix}{}", self.doc.layers[row].name)))
+                        .collect();
+                    self.rename_rigged_layers(&names);
+                }
+            }
+        }
         if let Some(row) = duplicate_side {
             self.duplicate_face_side(row);
         }
@@ -3599,30 +3733,7 @@ impl Editor {
             self.recover();
         }
         if let Some((row, track, matrix)) = attachment {
-            let mask_tracks: Vec<_> = self
-                .doc
-                .layers
-                .iter()
-                .filter_map(|layer| layer.options.character_piece.as_ref())
-                .filter(|piece| piece.face == FacePart::Eye && piece.eye_parent == Some(track))
-                .map(|piece| piece.track)
-                .collect();
-            self.finish_pending_pen();
-            self.checkpoint();
-            let piece = self.doc.layers[row]
-                .options
-                .character_piece
-                .as_mut()
-                .unwrap();
-            piece.eye_parent = Some(track);
-            if piece
-                .eye_mask
-                .is_some_and(|mask| !mask_tracks.contains(&mask))
-            {
-                piece.eye_mask = None;
-            }
-            piece.matrix = matrix;
-            self.recover();
+            self.attach_rigged_layer(row, track, matrix);
         }
         if let Some((from, to)) = reorder.filter(|(from, to)| from != to) {
             self.finish_pending_pen();
@@ -3655,32 +3766,7 @@ impl Editor {
         }
         if let Some((row, name)) = renamed {
             draft = None;
-            if !name.is_empty() && name != self.doc.layers[row].name {
-                self.finish_pending_pen();
-                self.checkpoint();
-                let layer = &mut self.doc.layers[row];
-                layer.name = name;
-                if let Some(piece) = layer
-                    .options
-                    .character_piece
-                    .as_mut()
-                    .filter(|p| p.eye_parent.is_none())
-                    && let Some((parent, _, _, _)) = self.feature.symbol_stack.last()
-                {
-                    let mut bones = parent
-                        .extras
-                        .rig
-                        .bones
-                        .iter()
-                        .filter(|bone| bone.targets.contains(&piece.track));
-                    if let Some(bone) = bones.next()
-                        && bones.next().is_none()
-                    {
-                        piece.renamed_bone = Some(bone.id);
-                    }
-                }
-                self.recover();
-            }
+            self.rename_rigged_layers(&[(row, name)]);
         }
         ui.data_mut(|data| {
             if let Some(draft) = rename.or(draft) {
@@ -3783,7 +3869,14 @@ impl Editor {
             self.frame = slot;
             self.canvas.clear_selection();
             self.playing = false;
+            if let Some(piece) = &self.doc.layers[layer].options.character_piece
+                && !selected_tracks.contains(&piece.track)
+            {
+                selected_tracks.clear();
+                selected_tracks.insert(piece.track);
+            }
         }
+        ui.data_mut(|data| data.insert_temp(batch_id, selected_tracks));
     }
 
     fn duplicate_face_side(&mut self, row: usize) {
@@ -4027,6 +4120,10 @@ impl Editor {
         self.frame = offset + mapped(self.frame % 8);
         self.canvas.clear_selection();
         Some(track)
+    }
+
+    fn attach_rigged_layer(&mut self, row: usize, track: u64, matrix: Matrix) -> bool {
+        self.attach_rigged_layers(&[row], track, matrix)
     }
 
     fn rigged_layer_targets(&self) -> Vec<(u64, String)> {
@@ -4388,6 +4485,15 @@ impl Editor {
     }
 
     pub(crate) fn character_rig_checks(&mut self, ctx: &egui::Context, canvas: egui::Rect) {
+        enum GuideAction {
+            Draw,
+            Next(usize),
+            Area,
+            Brow(egui::Id, usize),
+            Skeleton,
+            Test,
+            Attach(u64, Matrix),
+        }
         if !self.in_character_symbol() || canvas.width() < 140. || canvas.height() < 70. {
             return;
         }
@@ -4419,6 +4525,37 @@ impl Editor {
             .or(piece.eye_parent)
             .unwrap_or(piece.track);
         let parent = &self.feature.symbol_stack.last().unwrap().0;
+        let character_name = self
+            .feature
+            .symbol_stack
+            .last()
+            .and_then(|entry| {
+                entry
+                    .0
+                    .extras
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.id == entry.3)
+            })
+            .map_or(tr("Character Symbol"), |symbol| symbol.name.as_str());
+        let editing_mode = if self.rigging.test_character_pose.is_some() {
+            "Testing pose — no keys"
+        } else if self.rigging.edit_character_bones {
+            "Editing rest pose"
+        } else {
+            "Editing artwork"
+        };
+        let state_name = self
+            .frame
+            .checked_div(8)
+            .and_then(|state| state.checked_sub(1))
+            .and_then(|state| {
+                if piece.face == FacePart::Eye {
+                    EYES.get(state).copied()
+                } else {
+                    piece.lip_poses.get(state).map(|pose| pose.name.as_str())
+                }
+            });
         let attached = target(anchor).filter(|_| {
             parent
                 .extras
@@ -4429,6 +4566,10 @@ impl Editor {
         });
         let mut check_tweens = layer.options.rig_check_tweens;
         let mut changed = false;
+        let mut guide = None;
+        let attachment_targets = self.rigged_layer_targets();
+        let brow_tool = self.brow_point_tool();
+        let wrist_tool = self.wrist_tool();
         egui::Window::new(tr("Rig Checklist"))
             .id(egui::Id::unique("floating-character-rig-checks"))
             .pivot(egui::Align2::RIGHT_TOP)
@@ -4441,6 +4582,12 @@ impl Editor {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.set_width(216f32.min(canvas.width() - 24.));
+                ui.add(egui::Label::new(egui::RichText::new(character_name).small()).truncate())
+                    .on_hover_text(character_name);
+                ui.small(tr(editing_mode));
+                if let Some(state) = state_name {
+                    ui.small(format!("{} · {}", tr("State"), tr(state)));
+                }
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small(tr(VIEWS[view]));
@@ -4527,6 +4674,38 @@ impl Editor {
                         ui.small(format!("{} {}", tr("Nearest drawing"), tr(VIEWS[other])));
                     }
                 }
+                ui.collapsing(tr("Build and test"), |ui| {
+                    ui.small(tr("Work on one piece and view at a time. Empty views can use an existing tween; these steps are optional."));
+                    if piece.face != FacePart::None {
+                        egui::ComboBox::from_id_salt("guide-attachment")
+                            .selected_text(attached.map_or(tr("Attach to a rig layer"), |parent| parent.name.as_str()))
+                            .show_ui(ui, |ui| {
+                                for (track, name) in &attachment_targets {
+                                    if *track == piece.track { continue; }
+                                    if ui.selectable_label(piece.eye_parent == Some(*track), name).clicked()
+                                        && let Some(matrix) = self.doc.layers.iter().filter_map(|layer| layer.options.character_piece.as_ref()).find(|p| p.track == *track).map(|p| p.matrix)
+                                    { guide = Some(GuideAction::Attach(*track, matrix)); }
+                                }
+                            });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if button(ui, Icon::Brush, "Draw view", "Edit the artwork of the current piece and view", false, true).clicked() { guide = Some(GuideAction::Draw); }
+                        let next = (1..=8).map(|step| (view + step) % 8).find(|&slot| !piece.hidden[slot] && !drawn(slot));
+                        if button(ui, Icon::Next, "Next empty view", "Go to a visible view without a drawing in this state", false, next.is_some()).clicked()
+                            && let Some(slot) = next
+                        { guide = Some(GuideAction::Next(offset + slot)); }
+                    });
+                    if piece.face == FacePart::Pupil && button(ui, Icon::Focus, "Set pupil area", "Drag from the center to set the pupil travel radius", false, true).clicked() { guide = Some(GuideAction::Area); }
+                    if let Some(tool) = brow_tool {
+                        for (index, label) in BROW_POINTS.into_iter().enumerate() {
+                            if button(ui, Icon::Node, label, "Pick this point on the eyebrow in the current view", false, true).clicked() { guide = Some(GuideAction::Brow(tool, index)); }
+                        }
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if button(ui, Icon::Bones, "Skeleton", "Editing rest pose", false, true).clicked() { guide = Some(GuideAction::Skeleton); }
+                        if button(ui, Icon::Play, "Test Pose", "Preview the selected layer without creating keys", self.rigging.test_character_pose.is_some(), true).clicked() { guide = Some(GuideAction::Test); }
+                    });
+                });
                 ui.separator();
                 changed = ui
                     .checkbox(&mut check_tweens, tr("Check Shape Tweens"))
@@ -4586,6 +4765,47 @@ impl Editor {
             self.checkpoint();
             self.doc.layers[row].options.rig_check_tweens = check_tweens;
             self.recover();
+        }
+        if let Some(action) = guide {
+            self.finish_pending_pen();
+            if !matches!(&action, GuideAction::Next(_) | GuideAction::Attach(..)) {
+                ctx.data_mut(|data| {
+                    data.remove::<bool>(egui::Id::unique("pupil-area-tool"));
+                    if let Some(tool) = brow_tool {
+                        data.remove::<usize>(tool);
+                    }
+                    if let Some(tool) = wrist_tool {
+                        data.remove::<bool>(tool);
+                    }
+                });
+            }
+            let was_testing = self.rigging.test_character_pose.is_some();
+            self.rigging.test_character_pose = None;
+            self.rigging.edit_character_bones = false;
+            match action {
+                GuideAction::Draw => self.activate_tool(crate::canvas::Tool::VectorBrush),
+                GuideAction::Next(frame) => {
+                    self.frame = frame;
+                    self.canvas.clear_selection();
+                }
+                GuideAction::Area => {
+                    ctx.data_mut(|data| {
+                        data.insert_temp(egui::Id::unique("pupil-area-tool"), true)
+                    });
+                }
+                GuideAction::Brow(tool, index) => {
+                    ctx.data_mut(|data| data.insert_temp(tool, index));
+                }
+                GuideAction::Skeleton => self.rigging.edit_character_bones = true,
+                GuideAction::Test => {
+                    self.rigging.test_character_pose =
+                        (!was_testing).then_some([view as f32 / 8., 0.]);
+                    self.canvas.clear_selection();
+                }
+                GuideAction::Attach(track, matrix) => {
+                    self.attach_rigged_layer(row, track, matrix);
+                }
+            }
         }
     }
 
@@ -4985,6 +5205,74 @@ mod tests {
         }
         assert_eq!(bent.nodes.first().unwrap().position, [0., -35.]);
         assert_eq!(bent.nodes.last().unwrap().position, [100., 0.]);
+    }
+
+    #[test]
+    fn shared_attachment_command_skips_noops_rejects_self_and_undoes_once() {
+        let ctx = egui::Context::default();
+        let mut editor = crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        editor.doc = crate::fresh_document();
+        editor.recovery = std::env::temp_dir().join(format!(
+            "rig-attach-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        editor.doc.layers[0].frames[0].push(Mark {
+            points: vec![[20., 30.], [120., 140.]].into(),
+            rectangle: true,
+            fill: Some([100, 120, 140, 255]),
+            ..Default::default()
+        });
+        editor.canvas.selected = vec![(0, 0)];
+        editor.create_character_from_selection();
+        let track = editor.rigged_layer_targets()[0].0;
+        editor.add_rigged_piece(FacePart::Eye, track, None);
+        let row = editor
+            .doc
+            .layers
+            .iter()
+            .position(|layer| {
+                layer
+                    .options
+                    .character_piece
+                    .as_ref()
+                    .is_some_and(|piece| piece.face == FacePart::Eye)
+            })
+            .unwrap();
+        let piece = editor.doc.layers[row]
+            .options
+            .character_piece
+            .as_ref()
+            .unwrap();
+        let matrix = piece.matrix;
+        let child = piece.track;
+        let history = editor.undo.len();
+        assert!(!editor.attach_rigged_layer(row, track, matrix));
+        assert!(!editor.attach_rigged_layer(row, child, matrix));
+        assert_eq!(editor.undo.len(), history);
+        let mut changed = matrix;
+        changed[4] += 25.;
+        assert!(editor.attach_rigged_layer(row, track, changed));
+        assert_eq!(editor.undo.len(), history + 1);
+        assert_eq!(
+            editor.doc.layers[row]
+                .options
+                .character_piece
+                .as_ref()
+                .unwrap()
+                .matrix,
+            changed
+        );
+        editor.history(false);
+        assert_eq!(
+            editor.doc.layers[row]
+                .options
+                .character_piece
+                .as_ref()
+                .unwrap()
+                .matrix,
+            matrix
+        );
     }
 
     #[test]

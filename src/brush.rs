@@ -1,4 +1,24 @@
 use eframe::egui::{Pos2, Vec2};
+
+/// Distance-based lazy brush. Document-space distance makes its response
+/// independent of zoom and event frequency. Zero distance preserves input.
+pub(crate) fn stabilize(previous: Pos2, pointer: Pos2, distance: f32) -> Pos2 {
+    if !pointer.is_finite() {
+        return previous;
+    }
+    let delta = pointer - previous;
+    let length = delta.length();
+    let distance = if distance.is_finite() {
+        distance.clamp(0., 100.)
+    } else {
+        0.
+    };
+    if length <= distance || length <= f32::EPSILON {
+        previous
+    } else {
+        pointer - delta * (distance / length)
+    }
+}
 /// Original batch filter retained as a regression and benchmark oracle.
 #[cfg(test)]
 pub fn smooth(raw: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
@@ -68,6 +88,22 @@ pub fn smooth(raw: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stabilizer_has_bounded_lag_and_zero_preserves_input() {
+        let origin = Pos2::new(2., 3.);
+        assert_eq!(stabilize(origin, Pos2::new(5., 3.), 10.), origin);
+        let cursor = Pos2::new(32., 43.);
+        let tip = stabilize(origin, cursor, 10.);
+        assert!((tip.distance(cursor) - 10.).abs() < 0.001);
+        assert_eq!(stabilize(origin, cursor, 0.), cursor);
+        assert_eq!(stabilize(origin, Pos2::new(f32::NAN, 1.), 10.), origin);
+        // Splitting a straight gesture into more input packets gives the same tip.
+        let mut incremental = origin;
+        for i in 1..=100 {
+            incremental = stabilize(incremental, origin.lerp(cursor, i as f32 / 100.), 10.);
+        }
+        assert!(tip.distance(incremental) < 0.001);
+    }
     #[test]
     fn smoothing_reduces_jitter_and_preserves_endpoints() {
         let raw: Vec<_> = (0..80)

@@ -42,3 +42,15 @@ Create a Lip Sync symbol and draw its mouth poses. Add a dialogue clip, then ope
 ### Lip sync in Character Symbol
 
 In **Add Rigged Layer → Lip Sync**, pick a library symbol and a bound face piece. The source poses are copied into the front view. Open the group and use **Copy pose from** or **Copy all poses from** to populate other views. Set pose keys under **Lip Sync** in Properties or choose the mouth in **Dialogue Lip Sync**. The same phoneme key is used across all views.
+
+In **Dialogue Lip Sync**, the previous/next key buttons navigate the timeline and audio scrub together. **Protect this mouth key from regeneration** protects a generated key or unlocks an existing manual correction. Setting or moving a pose manually protects it automatically. Regeneration affects only **Phrase range**, preserves protected keys and other phrases, and restores the original pose after the range.
+
+## Guided setup and batch actions
+
+Expand **Build and test** in Rig Checklist for actions relevant to the current piece: choose its attachment, draw a view, go to the next empty view, define a pupil area or brow points, inspect the skeleton, or test a pose without creating keys. Empty views are optional when interpolation provides the intended result.
+
+In the Character Symbol grid, Shift-click layer names to select a range; Ctrl/Cmd-click toggles individual layers. The actions menu beside the onion-skin controls can attach selected rigged layers, mirror all their poses/views, or add a name prefix. Each batch is one undo action. Mirroring an eye and its pupil together preserves their copied mask relationship.
+
+In Bones or Puppet properties, expand **Binding diagnostics** to inspect used bones, pins, unweighted cells and invalid weights. **Inspect deformation** enables the weight overlay. Unweighted cells outside the artwork may be intentional; the diagnostic does not silently repair your rig.
+
+In **Dialogue Lip Sync**, choose a mouth pose and click **Edit pose drawing** to open its source. Ordinary mouth symbols open the pose's frame. Character mouths open the matching rigged layer and the first drawn view of that pose, or its Front cell when empty. **Back to scene** returns to the previous scene frame. Opening the source does not generate mouth keys. The same action in an ordinary mouth instance's properties opens its current pose.

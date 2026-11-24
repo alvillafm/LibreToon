@@ -169,9 +169,12 @@ pub struct Preferences {
     pub theme: crate::themes::Theme,
     pub auto_key_paint: bool,
     pub(crate) preview_cache_mib: usize,
+    pub(crate) gpu_cache_mib: usize,
+    pub(crate) history_memory_mib: usize,
     pub(crate) viewport_quality: crate::depth::ViewportQuality,
     pub saving: crate::project_save::Options,
     pub raster_brush: crate::raster::Brush,
+    pub(crate) vector_pressure_curve: crate::pressure::Curve,
     pub(crate) raster_presets: Vec<crate::raster::NamedBrush>,
     pub(crate) light_presets: Vec<crate::light::Preset>,
     pub(crate) effect_presets: Vec<crate::post::Preset>,
@@ -211,9 +214,12 @@ impl Default for Preferences {
             theme: Default::default(),
             auto_key_paint: false,
             preview_cache_mib: 256,
+            gpu_cache_mib: 128,
+            history_memory_mib: 256,
             viewport_quality: Default::default(),
             saving: Default::default(),
             raster_brush: Default::default(),
+            vector_pressure_curve: Default::default(),
             raster_presets: Vec::new(),
             light_presets: Vec::new(),
             effect_presets: Vec::new(),
@@ -309,6 +315,8 @@ impl Studio {
         prefs.dpi = prefs.dpi.clamp(1., 2400.);
         prefs.view.normalize();
         prefs.preview_cache_mib = prefs.preview_cache_mib.clamp(128, 1024);
+        prefs.gpu_cache_mib = prefs.gpu_cache_mib.clamp(32, 2048);
+        prefs.history_memory_mib = prefs.history_memory_mib.clamp(32, 4096);
         prefs.light_presets.retain(crate::light::Preset::valid);
         prefs.light_presets.truncate(64);
         prefs.effect_presets.retain(crate::post::Preset::valid);
@@ -1428,8 +1436,22 @@ impl Editor {
                                         }
                                     });
                             });
+                            ui.horizontal(|ui| {
+                                ui.label(tr("Undo memory budget"));
+                                save |= ui.add(egui::DragValue::new(&mut self.studio.prefs.history_memory_mib).range(32..=4096).suffix(" MiB")).changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(tr("GPU preview cache memory"));
+                                save |= ui.add(egui::DragValue::new(&mut self.studio.prefs.gpu_cache_mib).range(32..=2048).suffix(" MiB")).changed();
+                            });
+                            ui.small(tr("Shares one allowance between resident frames, layer images and lighting normals. The displayed frame is always retained."));
+                            ui.label(format!("{}: {:.1} MiB", tr("Estimated additional undo geometry and resources"), self.memory.bytes as f64 / 1048576.));
+                            ui.label(tr("Shared data is counted once. The most recent undo is always retained; memory is estimated off-thread."));
                             let (used, count) = self.depth.cache_usage();
                             ui.label(format!("{:.1} MiB · {} {}", used as f64 / 1048576., count, tr("Cached frames")));
+                            ui.label(format!("{}: {:.1} MiB",tr("Uploaded preview textures"),self.depth.texture_bytes() as f64/1048576.));
+                            if let Some((bytes,frames))=self.depth.resident_cache_usage() { ui.label(format!("{}: {:.1} MiB · {frames}",tr("Resident GPU scenes and frames"),bytes as f64/1048576.)); }
+                            ui.small(tr("Cache estimates are separate budgets, not a total RAM or VRAM limit. Integrated GPUs share system memory."));
                             if let Some(passes) = self.depth.gpu_lighting_passes() {
                                 ui.label(format!("{} · {passes}", tr("GPU lighting passes")));
                                 if let Some(frames)=self.depth.gpu_composed_frames(){ui.label(format!("{} · {frames}",tr("GPU composed frames")));}
@@ -1439,6 +1461,8 @@ impl Editor {
                             if ui.button(tr("Restablecer")).clicked() {
                                 let defaults = Preferences::default();
                                 self.studio.prefs.preview_cache_mib = defaults.preview_cache_mib;
+                                self.studio.prefs.gpu_cache_mib = defaults.gpu_cache_mib;
+                                self.studio.prefs.history_memory_mib = defaults.history_memory_mib;
                                 self.studio.prefs.viewport_quality = defaults.viewport_quality;
                                 save = true;
                             }
@@ -1452,6 +1476,11 @@ impl Editor {
                                 ui.label(tr("Intervalo de autoguardado (minutos)"));
                                 save |= ui.add(egui::DragValue::new(&mut options.minutes).range(1..=1440)).changed();
                             });
+                            ui.horizontal(|ui| {
+                                ui.label(tr("Keep incremental versions (0 = all)"));
+                                save |= ui.add(egui::DragValue::new(&mut options.keep_incremental).range(0..=10000)).changed();
+                            });
+                            ui.small(tr("Only numbered versions of this project are cleaned up. Recovery files are kept."));
                             ui.label(tr("El intervalo se aplica al modo de autoguardado seleccionado."));
                             ui.label(tr("Incremental: guarda una nueva versión numerada y conserva las anteriores."));
                             if ui.button(tr("Restablecer")).clicked() {

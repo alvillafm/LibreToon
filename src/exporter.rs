@@ -105,8 +105,35 @@ pub struct ExportSettings {
     pub colors: u32,
     pub dither: bool,
     pub svg_sequence: bool,
+    pub(crate) transparent_video: bool,
+    pub(crate) gif: GifSettings,
     pub(crate) sheet: SheetSettings,
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct GifSettings {
+    transparent: bool,
+    alpha_threshold: u8,
+}
+impl Default for GifSettings {
+    fn default() -> Self {
+        Self {
+            transparent: false,
+            alpha_threshold: 128,
+        }
+    }
+}
+fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha != 0 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SheetSettings {
     columns: u32,
@@ -136,6 +163,10 @@ pub(crate) struct Preset {
     colors: u32,
     dither: bool,
     svg_sequence: bool,
+    #[serde(default)]
+    transparent_video: bool,
+    #[serde(default)]
+    gif: GifSettings,
     sheet: SheetSettings,
 }
 
@@ -152,6 +183,8 @@ impl Preset {
             colors: settings.colors,
             dither: settings.dither,
             svg_sequence: settings.svg_sequence,
+            transparent_video: settings.transparent_video,
+            gif: settings.gif.clone(),
             sheet: settings.sheet.clone(),
         }
     }
@@ -166,6 +199,8 @@ impl Preset {
         settings.colors = self.colors.clamp(2, 256);
         settings.dither = self.dither;
         settings.svg_sequence = self.svg_sequence;
+        settings.transparent_video = self.transparent_video;
+        settings.gif = self.gif.clone();
         settings.sheet = self.sheet.clone();
     }
 }
@@ -314,6 +349,8 @@ impl Editor {
             colors: 256,
             dither: true,
             svg_sequence: false,
+            transparent_video: false,
+            gif: GifSettings::default(),
             sheet: SheetSettings::default(),
         });
     }
@@ -597,7 +634,10 @@ impl Editor {
                         }
                         4 => {
                             ui.label(tr("Códec"));
-                            ui.label(tr(if s.quality>=100 {"Apple ProRes 4444 XQ"} else {"Apple ProRes 422 HQ"}));
+                            ui.label(tr(if s.quality>=100 {"Apple ProRes 4444 XQ"} else if s.transparent_video {"Apple ProRes 4444"} else {"Apple ProRes 422 HQ"}));
+                            ui.end_row();
+                            ui.label(tr("Background"));
+                            ui.checkbox(&mut s.transparent_video, tr("Transparent background"));
                             ui.end_row();
                         }
                         5 => {
@@ -610,6 +650,14 @@ impl Editor {
                             ui.label(tr("Tramado"));
                             ui.checkbox(&mut s.dither, crate::i18n::tr("Sierra"));
                             ui.end_row();
+                            ui.label(tr("Background"));
+                            ui.checkbox(&mut s.gif.transparent, tr("Transparent background"));
+                            ui.end_row();
+                            if s.gif.transparent {
+                                ui.label(tr("Alpha threshold"));
+                                ui.add(egui::Slider::new(&mut s.gif.alpha_threshold,1..=255));
+                                ui.end_row();
+                            }
                         }
                         _ => {}
                     }
@@ -619,6 +667,9 @@ impl Editor {
             }
             if matches!(s.format,0|2) && s.quality>=100 {
                 ui.label(tr("100 preserves RGB pixels without loss. Files are larger and some players may require quality 99."));
+            }
+            if s.format == 5 && s.gif.transparent {
+                ui.label(tr("GIF supports fully transparent or opaque pixels. Alpha threshold controls soft edges; hide background layers to export without them."));
             }
             if s.format == 5 {
                 ui.label(tr(
@@ -695,7 +746,9 @@ impl Editor {
             } else if s.format == 1 {
                 ui.label(tr("SVG exports vector artwork. Raster paint, adjustment effects, audio and video are omitted."));
             } else {
-                ui.label(tr("Rendered video uses a white background."));
+                ui.label(tr(if s.format == 4 && s.transparent_video {
+                    "ProRes 4444 preserves transparency. Hide background layers to export without them."
+                } else { "Rendered video uses a white background." }));
             }
             if !matches!(s.format, 1 | 6 | SPRITE_SHEET) {
                 ui.group(|ui| {
@@ -917,14 +970,7 @@ pub(crate) fn run_export(
                 true,
                 None,
             );
-            for pixel in rgba.chunks_exact_mut(4) {
-                let alpha = u32::from(pixel[3]);
-                if alpha != 0 {
-                    for channel in &mut pixel[..3] {
-                        *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
-                    }
-                }
-            }
+            unpremultiply_rgba(&mut rgba);
             if let Some(sheet) = &mut sheet {
                 let index = (frame - s.first) as u32;
                 let column = index % s.sheet.columns;
@@ -975,7 +1021,11 @@ pub(crate) fn run_export(
         "-f",
         "rawvideo",
         "-pixel_format",
-        "rgb24",
+        if s.format == 5 && s.gif.transparent || s.format == 4 && s.transparent_video {
+            "rgba"
+        } else {
+            "rgb24"
+        },
         "-video_size",
         &format!("{w}x{h}"),
         "-framerate",
@@ -1024,13 +1074,25 @@ pub(crate) fn run_export(
         4 => {
             command.args([
                 "-vf",
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white",
+                if s.transparent_video {
+                    "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black@0"
+                } else {
+                    "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white"
+                },
                 "-c:v",
                 "prores_ks",
                 "-profile:v",
-                if s.quality >= 100 { "5" } else { "3" },
-                "-pix_fmt",
                 if s.quality >= 100 {
+                    "5"
+                } else if s.transparent_video {
+                    "4"
+                } else {
+                    "3"
+                },
+                "-pix_fmt",
+                if s.transparent_video {
+                    "yuva444p10le"
+                } else if s.quality >= 100 {
                     "yuv444p10le"
                 } else {
                     "yuv422p10le"
@@ -1041,11 +1103,16 @@ pub(crate) fn run_export(
         }
         5 => {
             let filter = format!(
-                "split[a][b];[a]palettegen=max_colors={}:stats_mode=single[p];[b][p]paletteuse=new=1:dither={}",
+                "split[a][b];[a]palettegen=max_colors={}:stats_mode=single:reserve_transparent={}[p];[b][p]paletteuse=new=1:dither={}:alpha_threshold={}",
                 s.colors,
-                if s.dither { "sierra2_4a" } else { "none" }
+                if s.gif.transparent { 1 } else { 0 },
+                if s.dither { "sierra2_4a" } else { "none" },
+                s.gif.alpha_threshold.max(1)
             );
             command.args(["-filter_complex", &filter, "-loop", &s.loops.to_string()]);
+            if s.gif.transparent {
+                command.args(["-gifflags", "0"]);
+            }
         }
         _ => return Err("Unsupported format".into()),
     }
@@ -1076,7 +1143,29 @@ pub(crate) fn run_export(
             let frame = s.first - 1
                 + ((index as u64 * doc.fps as u64 / s.fps as u64) as usize).min(count - 1);
             let video_frames = video.frames(doc, frame, &ffmpeg)?;
-            let pixels = raster_with_video(doc, frame, w, h, &ctx, &mut cache, &video_frames);
+            let pixels =
+                if s.format == 5 && s.gif.transparent || s.format == 4 && s.transparent_video {
+                    let mut rgba = raster_composited(
+                        doc,
+                        frame,
+                        w,
+                        h,
+                        &ctx,
+                        &mut cache,
+                        &video_frames,
+                        None,
+                        true,
+                        true,
+                        true,
+                        true,
+                        true,
+                        None,
+                    );
+                    unpremultiply_rgba(&mut rgba);
+                    rgba
+                } else {
+                    raster_with_video(doc, frame, w, h, &ctx, &mut cache, &video_frames)
+                };
             input.write_all(&pixels).map_err(|e| e.to_string())?;
             progress.store((index + 1) * 950 / frames, Ordering::Relaxed);
         }
@@ -1142,6 +1231,130 @@ pub(crate) fn raster_with_video(
     raster_composited(
         doc, frame, w, h, ctx, cache, video, None, false, true, true, true, true, None,
     )
+}
+
+#[cfg(test)]
+mod transparent_gif_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires installed FFmpeg; validates encoded GIF alpha and frame disposal"]
+    fn transparent_gif_preserves_empty_background_and_clears_previous_frame() {
+        let mut doc = crate::fresh_document();
+        doc.width = 64;
+        doc.height = 48;
+        doc.fps = 10;
+        for frame in 0..2 {
+            for (a, b, color) in [
+                (
+                    [4. + 32. * frame as f32, 4.],
+                    [20. + 32. * frame as f32, 20.],
+                    [255, 0, 0, 255],
+                ),
+                ([4., 30.], [20., 44.], [0, 255, 0, 96]),
+                ([36., 30.], [52., 44.], [0, 0, 255, 192]),
+            ] {
+                doc.layers[0].frames[frame].push(crate::Mark {
+                    points: vec![a, b].into(),
+                    rectangle: true,
+                    closed: true,
+                    stroke: false,
+                    fill: Some(color),
+                    ..Default::default()
+                });
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "libretoon-transparent-gif-{}",
+            crate::features::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let settings = ExportSettings {
+            name: "alpha".into(),
+            folder: directory.to_string_lossy().into_owned(),
+            format: 5,
+            first: 1,
+            last: 2,
+            width: 64,
+            height: 48,
+            fps: 10,
+            quality: 100,
+            loops: 0,
+            colors: 256,
+            dither: false,
+            svg_sequence: false,
+            sheet: Default::default(),
+            transparent_video: false,
+            gif: GifSettings {
+                transparent: true,
+                alpha_threshold: 128,
+            },
+        };
+        let path = settings.target().unwrap();
+        let ffmpeg = ffmpeg_path("");
+        run_export(
+            &doc,
+            &settings,
+            0,
+            &path,
+            ffmpeg.clone(),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(b"GIF89a"));
+        let mut command = Command::new(ffmpeg);
+        hidden(&mut command);
+        let decoded = command
+            .args(["-v", "error", "-ignore_loop", "1", "-i"])
+            .arg(&path)
+            .args([
+                "-frames:v",
+                "2",
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(decoded.stdout.len(), 64 * 48 * 4 * 2);
+        let pixel = |frame: usize, x: usize, y: usize| {
+            <[u8; 4]>::try_from(&decoded.stdout[((frame * 48 + y) * 64 + x) * 4..][..4]).unwrap()
+        };
+        for frame in 0..2 {
+            assert_eq!(
+                pixel(frame, 60, 46)[3],
+                0,
+                "empty background remains transparent"
+            );
+            assert_eq!(
+                pixel(frame, 10, 36)[3],
+                0,
+                "alpha below threshold is transparent"
+            );
+            assert_eq!(
+                pixel(frame, 44, 36),
+                [0, 0, 255, 255],
+                "straight RGB is preserved before binary alpha"
+            );
+        }
+        assert_eq!(pixel(0, 10, 10), [255, 0, 0, 255]);
+        assert_eq!(pixel(1, 42, 10), [255, 0, 0, 255]);
+        assert_eq!(
+            pixel(1, 10, 10)[3],
+            0,
+            "moving objects leave no trails in transparent frames"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
 pub(crate) fn raster_preview(
     doc: &Document,
@@ -3199,6 +3412,8 @@ mod tests {
             colors: 256,
             dither: false,
             svg_sequence: false,
+            transparent_video: false,
+            gif: GifSettings::default(),
             sheet: SheetSettings {
                 columns: 2,
                 rows: 1,
@@ -3563,6 +3778,8 @@ mod tests {
                 colors: 256,
                 dither: true,
                 svg_sequence: false,
+                transparent_video: false,
+                gif: GifSettings::default(),
                 sheet: SheetSettings::default(),
             };
             let path = settings.target().unwrap();
@@ -3648,6 +3865,8 @@ mod tests {
                 colors: 64,
                 dither: true,
                 svg_sequence: false,
+                transparent_video: false,
+                gif: GifSettings::default(),
                 sheet: SheetSettings::default(),
             };
             let path = s.target().unwrap();
@@ -3797,4 +4016,123 @@ pub(crate) fn raster_ui_test(
         }
     }
     pixels
+}
+
+#[cfg(test)]
+mod transparent_video_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires FFmpeg with ProRes 4444 encoder and decoder"]
+    fn mov_alpha_preserves_transparency_and_straight_edge_colors() {
+        let ffmpeg = ffmpeg_path("");
+        let mut doc = crate::fresh_document();
+        doc.width = 64;
+        doc.height = 48;
+        doc.fps = 10;
+        doc.layers.truncate(1);
+        doc.layers[0].frames.truncate(2);
+        doc.layers[0].options.keys = vec![true; 2].into();
+        let mark = crate::Mark {
+            points: vec![[8., 8.], [24., 24.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([10, 90, 220, 128]),
+            stroke: false,
+            ..Default::default()
+        };
+        doc.layers[0].frames[0] = vec![mark.clone()].into();
+        doc.layers[0].frames[1] =
+            vec![crate::vector::transform(&mark, |p| p + Vec2::new(16., 0.))].into();
+        let directory = std::env::temp_dir().join(format!(
+            "libretoon-mov-alpha-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let settings = ExportSettings {
+            name: "alpha".into(),
+            folder: directory.to_string_lossy().into_owned(),
+            format: 4,
+            first: 1,
+            last: 2,
+            width: 64,
+            height: 48,
+            fps: 10,
+            quality: 100,
+            loops: 0,
+            colors: 256,
+            dither: false,
+            svg_sequence: false,
+            transparent_video: true,
+            gif: Default::default(),
+            sheet: Default::default(),
+        };
+        let path = settings.target().unwrap();
+        run_export(
+            &doc,
+            &settings,
+            0,
+            &path,
+            ffmpeg.clone(),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut command = Command::new(&ffmpeg);
+        hidden(&mut command);
+        let decoded = command
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(decoded.stdout.len(), 64 * 48 * 4 * 2);
+        let pixel = |frame: usize, x: usize, y: usize| {
+            &decoded.stdout[(frame * 64 * 48 + y * 64 + x) * 4..][..4]
+        };
+        assert_eq!(pixel(0, 40, 40)[3], 0);
+        assert_eq!(pixel(1, 12, 12)[3], 0);
+        let ctx = egui::Context::default();
+        let mut expected = raster_composited(
+            &doc,
+            0,
+            64,
+            48,
+            &ctx,
+            &mut Default::default(),
+            &[],
+            None,
+            true,
+            true,
+            true,
+            true,
+            true,
+            None,
+        );
+        unpremultiply_rgba(&mut expected);
+        let expected = &expected[(12 * 64 + 12) * 4..][..4];
+        assert!((1..255).contains(&expected[3]));
+        for channel in 0..4 {
+            assert!(
+                pixel(0, 12, 12)[channel].abs_diff(expected[channel]) <= 5,
+                "channel {channel}: {:?} != {expected:?}",
+                pixel(0, 12, 12)
+            );
+        }
+        let preset: Preset = serde_json::from_slice(
+            &serde_json::to_vec(&Preset::capture("Alpha".into(), &settings)).unwrap(),
+        )
+        .unwrap();
+        assert!(preset.transparent_video);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 }

@@ -3,7 +3,8 @@ use crate::{Document, fla_zip::Archive};
 const DOCUMENT: &str = "LIBRETOON/document.json";
 const MANIFEST: &str = "LIBRETOON/manifest.json";
 pub const EXTENSION: &str = "ltoon";
-pub const LIMIT: usize = 256 * 1024 * 1024;
+// Memory threshold for switching writers, never a native project size limit.
+const STREAM_RESOURCE_THRESHOLD: u64 = 128 * 1024 * 1024;
 const MANIFEST_V1: &[u8] = br#"{"format":"LibreToon","version":1}"#;
 const MANIFEST_V2: &[u8] = br#"{"format":"LibreToon","version":2}"#;
 const LEGACY_DOCUMENT_LIMIT: usize = 64 * 1024 * 1024;
@@ -42,6 +43,23 @@ pub(crate) fn write_with_recovery_cache(
     crate::raster::prune(&mut snapshot);
     snapshot.validate()?;
     let metadata = without_media_payloads(&snapshot);
+    let resource_bytes = snapshot
+        .extras
+        .media
+        .assets
+        .iter()
+        .map(|a| a.data.len() as u64)
+        .chain(
+            snapshot
+                .extras
+                .references
+                .iter()
+                .map(|r| r.data.len() as u64),
+        )
+        .sum::<u64>();
+    if resource_bytes >= STREAM_RESOURCE_THRESHOLD {
+        return write_streamed(&snapshot, &metadata, writer);
+    }
     let legacy = if legacy_cels_exceed_threshold(&metadata) {
         None
     } else {
@@ -50,8 +68,10 @@ pub(crate) fn write_with_recovery_cache(
     let (manifest, native) = match legacy {
         Some(native) => (MANIFEST_V1, native),
         None => {
-            let native = cels::compact(|| bounded_json(&metadata, COMPACT_DOCUMENT_LIMIT))?
-                .ok_or("Los datos del proyecto superan el límite de 128 MiB incluso sin repetir fotogramas")?;
+            let Some(native) = cels::compact(|| bounded_json(&metadata, COMPACT_DOCUMENT_LIMIT))?
+            else {
+                return write_streamed(&snapshot, &metadata, writer);
+            };
             (MANIFEST_V2, native)
         }
     };
@@ -101,7 +121,7 @@ fn legacy_cels_exceed_threshold(doc: &Document) -> bool {
     false
 }
 
-fn without_media_payloads(doc: &Document) -> Document {
+pub(crate) fn without_media_payloads(doc: &Document) -> Document {
     let mut metadata = doc.clone();
     for asset in &mut metadata.extras.media.assets {
         asset.data = Default::default();
@@ -191,8 +211,10 @@ fn write_document(
         sum.checked_add(76 + name.len() * 2)?
             .checked_add(data.len())
     });
-    if entries.len() > u16::MAX as usize || size.is_none_or(|size| size > LIMIT) {
-        return Err("El proyecto supera el límite de 256 MiB".into());
+    if entries.len() > u16::MAX as usize || size.is_none_or(|size| size >= u32::MAX as usize) {
+        return Err(
+            "Interchange archive requires ZIP64; save the native .ltoon project instead.".into(),
+        );
     }
     let raster_names: std::collections::HashSet<_> = names
         .iter()
@@ -219,6 +241,9 @@ fn media_entry(id: u64) -> String {
 }
 
 pub fn decode_if_native(bytes: &[u8]) -> Result<Option<Document>, String> {
+    if bytes.windows(4).rev().take(100).any(|b| b == b"PK\x06\x06") {
+        return read_streamed(std::io::Cursor::new(bytes));
+    }
     let archive = Archive::new(bytes)?;
     let Some(manifest) = archive.entry_limited(MANIFEST.as_bytes(), 4096)? else {
         return Ok(None);
@@ -250,12 +275,10 @@ pub fn decode_if_native(bytes: &[u8]) -> Result<Option<Document>, String> {
 
 pub(crate) fn restore(archive: &Archive<'_>, bytes: &[u8]) -> Result<Document, String> {
     let mut doc: Document = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    let mut budget = LIMIT.saturating_sub(bytes.len());
-    let mut read = |path: &str, limit: usize| -> Result<crate::shared::SharedVec<u8>, String> {
+    let read = |path: &str, limit: usize| -> Result<crate::shared::SharedVec<u8>, String> {
         let data = archive
-            .entry_limited(path.as_bytes(), budget.min(limit))?
+            .entry_limited(path.as_bytes(), limit)?
             .ok_or_else(|| format!("Missing project resource: {path}"))?;
-        budget -= data.len();
         Ok(data.into())
     };
     for asset in &mut doc.extras.media.assets {
@@ -289,7 +312,7 @@ pub(crate) mod cels {
 
     thread_local! { static COMPACT: Cell<bool> = const { Cell::new(false) }; }
 
-    pub(super) fn compact<T>(f: impl FnOnce() -> T) -> T {
+    pub(crate) fn compact<T>(f: impl FnOnce() -> T) -> T {
         struct Reset(bool);
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -568,4 +591,85 @@ mod tests {
             assert!(decode_if_native(&bytes).is_err());
         }
     }
+}
+
+fn write_streamed(
+    doc: &Document,
+    metadata: &Document,
+    output: &mut impl std::io::Write,
+) -> Result<(), String> {
+    let mut writer = crate::native_archive::Writer::new(output);
+    writer
+        .entry(MANIFEST, |w| {
+            w.write_all(br#"{"format":"LibreToon","version":3}"#)
+        })
+        .map_err(|e| e.to_string())?;
+    writer
+        .entry(DOCUMENT, |mut w| {
+            cels::compact(|| serde_json::to_writer(&mut w, metadata)).map_err(std::io::Error::other)
+        })
+        .map_err(|e| e.to_string())?;
+    for asset in &doc.extras.media.assets {
+        writer
+            .entry(&media_entry(asset.id), |w| w.write_all(&asset.data))
+            .map_err(|e| e.to_string())?;
+    }
+    for reference in doc.extras.references.iter().filter(|r| !r.data.is_empty()) {
+        writer
+            .entry(
+                &format!("LIBRETOON/references/{}.image", reference.id),
+                |w| w.write_all(&reference.data),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    writer.finish().map_err(|e| e.to_string())
+}
+pub(crate) fn read_path(path: &std::path::Path) -> Result<Option<Document>, String> {
+    read_streamed(std::io::BufReader::new(
+        std::fs::File::open(path).map_err(|e| e.to_string())?,
+    ))
+}
+fn read_streamed(input: impl std::io::Read + std::io::Seek) -> Result<Option<Document>, String> {
+    let mut archive = crate::native_archive::Reader::new(input).map_err(|e| e.to_string())?;
+    if !archive.contains(MANIFEST) {
+        return Ok(None);
+    }
+    if archive.contains("DOMDocument.xml") {
+        return Err("A native LibreToon project cannot contain an XFL preview".into());
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&archive.bytes(MANIFEST, 4096).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if manifest.format != "LibreToon" || !(1..=3).contains(&manifest.version) {
+        return Err(format!(
+            "Unsupported LibreToon project format or version ({})",
+            manifest.version
+        ));
+    }
+    let mut doc: Document = archive
+        .read(DOCUMENT, None, |r| {
+            serde_json::from_reader(r).map_err(std::io::Error::other)
+        })
+        .map_err(|e| e.to_string())?;
+    for asset in &mut doc.extras.media.assets {
+        if asset.data.is_empty() {
+            asset.data = archive
+                .bytes(&media_entry(asset.id), crate::media::ASSET_LIMIT as u64)
+                .map_err(|e| e.to_string())?
+                .into();
+        }
+    }
+    for reference in &mut doc.extras.references {
+        if reference.data.is_empty() && reference.dimensions != [0, 0] {
+            reference.data = archive
+                .bytes(
+                    &format!("LIBRETOON/references/{}.image", reference.id),
+                    16 * 1024 * 1024,
+                )
+                .map_err(|e| e.to_string())?
+                .into();
+        }
+    }
+    doc.validate()?;
+    Ok(Some(doc))
 }

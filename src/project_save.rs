@@ -15,6 +15,7 @@ pub struct Options {
     pub enabled: bool,
     pub incremental: bool,
     pub minutes: u32,
+    pub keep_incremental: usize,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -22,6 +23,7 @@ impl Default for Options {
             enabled: true,
             incremental: false,
             minutes: 30,
+            keep_incremental: 0,
         }
     }
 }
@@ -133,6 +135,29 @@ fn write_snapshot(
     expected: Option<Stamp>,
     incremental: bool,
 ) -> Result<(PathBuf, Stamp), SaveError> {
+    write_snapshot_policy(doc, target, expected, incremental, 0)
+}
+fn write_snapshot_policy(
+    doc: &Document,
+    target: &Path,
+    expected: Option<Stamp>,
+    incremental: bool,
+    keep: usize,
+) -> Result<(PathBuf, Stamp), SaveError> {
+    // Do not unlink this stable lock inode: another process may be waiting on it.
+    let filename = target.file_name().unwrap_or_default().to_string_lossy();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target.with_file_name(format!(".{filename}.libretoon-lock")))?;
+    lock.try_lock().map_err(|error| {
+        SaveError::Failed(format!(
+            "Another instance is saving this project, or its filesystem could not lock it: {error}"
+        ))
+    })?;
+
     let exists = target.try_exists()?;
     let unchanged = || -> Result<bool, SaveError> {
         Ok(if exists {
@@ -214,7 +239,14 @@ fn write_snapshot(
                     .ok_or_else(|| SaveError::Failed("No available version number".into()))?;
                 let version = target.with_file_name(format!("{base}_v{latest}.{ext}"));
                 match publish_new(&temporary, &version) {
-                    Ok(()) => return published(version),
+                    Ok(()) => {
+                        let result = published(version)?;
+                        // Retention is opt-in; never turn a successful save into a false save failure.
+                        if keep > 0 {
+                            let _ = prune_incremental(&result.0, keep);
+                        }
+                        return Ok(result);
+                    }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(e) => return Err(e.into()),
                 }
@@ -252,6 +284,37 @@ fn write_snapshot(
     })();
     let _ = fs::remove_file(temporary);
     result
+}
+
+fn prune_incremental(current: &Path, keep: usize) -> io::Result<()> {
+    let stem = current.file_stem().unwrap_or_default().to_string_lossy();
+    let base = increment_base(&stem);
+    let ext = current.extension().unwrap_or_default().to_string_lossy();
+    let prefix = format!("{base}_v");
+    let suffix = format!(".{ext}");
+    let mut versions = vec![];
+    for entry in fs::read_dir(current.parent().unwrap_or(Path::new(".")))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(number) = name
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(&suffix))
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            versions.push((number, entry.path()));
+        }
+    }
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in versions.into_iter().skip(keep.max(1)) {
+        if path != current {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 impl Editor {
@@ -370,8 +433,15 @@ impl Editor {
             interchange: false,
         });
         self.status = tr("Guardando proyecto…").into();
+        let keep = self.studio.prefs.saving.keep_incremental;
         std::thread::spawn(move || {
-            let _ = send.send(write_snapshot(&document, &path, expected, incremental));
+            let _ = send.send(write_snapshot_policy(
+                &document,
+                &path,
+                expected,
+                incremental,
+                keep,
+            ));
         });
     }
     pub(crate) fn export_fla_copy(&mut self) {
@@ -750,5 +820,97 @@ mod tests {
         assert_eq!(crate::documents::read_project(&two).unwrap().fps, 30);
         assert_eq!(fs::read(&target).unwrap(), b"external edit");
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    #[test]
+    fn concurrent_writer_is_refused_and_opt_in_retention_keeps_latest_versions() {
+        let root = std::env::temp_dir().join(format!("libretoon-policy-{}", crate::features::id()));
+        fs::create_dir(&root).unwrap();
+        let target = root.join("shot.ltoon");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(".shot.ltoon.libretoon-lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert!(write_snapshot(&crate::fresh_document(), &target, None, false).is_err());
+        assert!(!target.exists());
+        drop(lock);
+        let doc = crate::fresh_document();
+        let mut latest = target.clone();
+        fs::write(root.join("other_v1.ltoon"), b"unrelated").unwrap();
+        fs::write(root.join("recovery.ltoon"), b"recovery").unwrap();
+        for _ in 0..5 {
+            latest = write_snapshot_policy(&doc, &target, None, true, 2)
+                .unwrap()
+                .0;
+        }
+        assert!(latest.ends_with("shot_v5.ltoon"));
+        assert!(root.join("shot_v4.ltoon").exists());
+        assert!(!root.join("shot_v3.ltoon").exists());
+        assert!(root.join("other_v1.ltoon").exists());
+        assert!(root.join("recovery.ltoon").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+impl Editor {
+    pub(crate) fn save_status_ui(&self, ui: &mut egui::Ui) {
+        let Some(record) = self
+            .hub
+            .active
+            .and_then(|i| self.hub.tabs.get(i))
+            .map(|t| &t.record)
+        else {
+            return;
+        };
+        let (icon, label) = if self.project_save.error.is_some() || self.project_save.conflicted() {
+            (crate::design::Icon::Info, "Save needs attention")
+        } else if self.project_save.busy() {
+            (crate::design::Icon::Save, "Saving…")
+        } else if record.path.is_none() {
+            (crate::design::Icon::Save, "Unsaved project")
+        } else if record.dirty {
+            (crate::design::Icon::Save, "Unsaved changes")
+        } else {
+            (crate::design::Icon::Save, "Saved")
+        };
+        ui.menu_button(tr(label), |ui| {
+            ui.label(tr(label));
+            if let Some(error) = &self.project_save.error {
+                ui.label(error);
+            }
+            if let Some(path) = &record.path {
+                ui.label(path.display().to_string());
+                if crate::design::button(
+                    ui,
+                    icon,
+                    "Copy project path",
+                    "Copy project path",
+                    false,
+                    true,
+                )
+                .clicked()
+                {
+                    ui.ctx().copy_text(path.display().to_string());
+                    ui.close();
+                }
+            }
+            if record.recovery.is_file() {
+                ui.separator();
+                ui.label(tr("Recovery file"));
+                ui.label(record.recovery.display().to_string());
+                if ui.button(tr("Copy recovery path")).clicked() {
+                    ui.ctx().copy_text(record.recovery.display().to_string());
+                    ui.close();
+                }
+            }
+        });
     }
 }

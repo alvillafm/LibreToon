@@ -94,6 +94,12 @@ impl Editor {
         if !partial {
             self.checkpoint();
         }
+        // Reorder the evaluated drawing, not the held source of an in-between.
+        let selected: Vec<_> = plans
+            .iter()
+            .flat_map(|(layer, ids, _)| ids.iter().map(move |&mark| (*layer, mark)))
+            .collect();
+        self.materialize_motion(&selected);
         for (l, ids, order) in plans {
             let marks = &mut self.doc.layers[l].frames[self.frame];
             let before = marks.clone();
@@ -186,6 +192,57 @@ mod tests {
         assert_eq!(
             permutation(6, &[1, 4], Order::Index(2)),
             vec![0, 2, 1, 4, 3, 5]
+        );
+    }
+}
+
+#[cfg(test)]
+mod evaluated_order_tests {
+    #[test]
+    fn reordering_an_inbetween_keeps_evaluated_geometry_and_undo() {
+        let ctx = eframe::egui::Context::default();
+        let mut editor = crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        editor.doc = crate::fresh_document();
+        editor.recovery =
+            std::env::temp_dir().join(format!("order-evaluated-{}.ltoon", crate::features::id()));
+        editor.frame = 5;
+        let a = crate::Mark {
+            points: vec![[0., 0.], [20., 20.]].into(),
+            rectangle: true,
+            ..Default::default()
+        };
+        let b = crate::vector::transform(&a, |p| p + eframe::egui::vec2(40., 0.));
+        let layer = &mut editor.doc.layers[0];
+        layer.frames.fill(vec![a.clone(), b.clone()].into());
+        layer.frames[10] = vec![
+            crate::vector::transform(&a, |p| p + eframe::egui::vec2(100., 100.)),
+            crate::vector::transform(&b, |p| p + eframe::egui::vec2(100., 100.)),
+        ]
+        .into();
+        layer.init_keys();
+        layer.options.keys.fill(false);
+        layer.options.keys[0] = true;
+        layer.options.keys[10] = true;
+        layer.options.tweens = vec![crate::animation::Tween {
+            start: 0,
+            end: 10,
+            shape: false,
+            curve: Default::default(),
+        }]
+        .into();
+        let expected = crate::animation::marks(layer, 5);
+        let mut state = crate::canvas::Canvas::default();
+        state.selected = vec![(0, 0)];
+        editor.arrange_selection(&mut state, super::Order::Front);
+        assert_eq!(editor.doc.layers[0].frames[5][1].points, expected[0].points);
+        assert_eq!(editor.doc.layers[0].frames[5][0].points, expected[1].points);
+        assert!(editor.doc.layers[0].key(5));
+        assert_eq!(state.selected, vec![(0, 1)]);
+        editor.history(false);
+        assert!(!editor.doc.layers[0].key(5));
+        assert_eq!(
+            crate::animation::marks(&editor.doc.layers[0], 5)[0].points,
+            expected[0].points
         );
     }
 }

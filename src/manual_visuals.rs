@@ -304,6 +304,16 @@ fn save_frame(doc: &Document, frame: usize, path: &Path) {
     image::save_buffer(path, &rgb, 960, 540, image::ColorType::Rgb8).unwrap();
 }
 fn screenshot(doc: Document, frame: usize, tool: crate::canvas::Tool, color: bool, path: &Path) {
+    screenshot_setup(doc, frame, tool, color, path, |_, _| {});
+}
+pub(crate) fn screenshot_setup(
+    doc: Document,
+    frame: usize,
+    tool: crate::canvas::Tool,
+    color: bool,
+    path: &Path,
+    setup: impl FnOnce(&egui::Context, &mut Editor),
+) {
     let ctx = egui::Context::default();
     let mut e = Editor::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
     e.add_document(doc, None);
@@ -341,6 +351,7 @@ fn screenshot(doc: Document, frame: usize, tool: crate::canvas::Tool, color: boo
     e.status.clear();
     crate::i18n::set_locale(crate::i18n::Language::English);
     crate::themes::ensure(&ctx, crate::themes::Theme::Studio);
+    setup(&ctx, &mut e);
     let mut textures = HashMap::<egui::TextureId, egui::ColorImage>::new();
     for tick in 0..20 {
         let mut out = ctx.run_ui(
@@ -497,6 +508,48 @@ fn node_editor_visual_qa() {
     assert!(Path::new(&local).ends_with("manual-sandbox"));
     let output = Path::new("target/qa/node-editor.png");
     screenshot(owl(2), 0, crate::canvas::Tool::Node, false, output);
+}
+
+#[test]
+#[ignore = "headless bucket preview QA; use isolated LOCALAPPDATA"]
+fn bucket_preview_visual_qa() {
+    assert!(Path::new(&std::env::var("LOCALAPPDATA").unwrap()).ends_with("manual-sandbox"));
+    let mut doc = Document {
+        width: 1280,
+        height: 720,
+        ..Default::default()
+    };
+    doc.layers = vec![layer(
+        "Outline",
+        vec![Mark {
+            points: vec![
+                [300., 200.],
+                [980., 200.],
+                [980., 550.],
+                [300., 550.],
+                [300., 212.],
+            ]
+            .into(),
+            width: 8.,
+            color: INK,
+            ..Default::default()
+        }],
+        24,
+    )]
+    .into();
+    screenshot_setup(
+        doc,
+        0,
+        crate::canvas::Tool::Bucket,
+        false,
+        Path::new("target/qa/bucket-preview.png"),
+        |ctx, editor| {
+            editor.feature.bucket_preview = true;
+            editor.gap = crate::bucket::Gap::Medium;
+            editor.fill_enabled = true;
+            editor.start_bucket_range(ctx, Pos2::new(640., 360.), false);
+        },
+    );
 }
 
 #[test]

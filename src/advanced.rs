@@ -85,6 +85,9 @@ impl Editor {
             {
                 continue;
             }
+            if self.exposure_sync.get(l) == Some(&(f, layer.frames[f].identity())) {
+                continue;
+            }
             let exposure = layer.exposure(f);
             let marks = layer.frames[f].clone();
             let layer = &mut self.doc.layers[l];
@@ -92,6 +95,15 @@ impl Editor {
                 layer.frames[i] = marks.clone();
             }
         }
+        self.exposure_sync = self
+            .doc
+            .layers
+            .iter()
+            .map(|layer| {
+                let f = self.frame.min(layer.frames.len() - 1);
+                (f, layer.frames[f].identity())
+            })
+            .collect();
     }
     pub fn project_document(&self) -> Document {
         crate::advanced::assemble_project(&self.doc, &self.feature)

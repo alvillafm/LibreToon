@@ -5,6 +5,10 @@
 - Open **Color** and choose **Fill** or **Stroke** before picking a swatch. Edit a linked swatch to recolor its associated vector artwork. Use the eyedropper to sample a reference image loaded with **Tools → RefTool**.
 - For several similar drawings, use the **Paint Bucket** and choose a multi-frame mode in **Properties**. Click inside the region to fill. Check the results on each drawing before proceeding.
 
+## Brush stabilization
+
+Vector drawing tools offer **Stabilizer distance** in Properties. Zero keeps the original input. Increasing it makes the brush tip follow behind the pointer; a contrasting guide shows that delay. Distances use document pixels, so zoom does not change the stored brush width or stabilization distance. Releasing the pointer finishes at its final position. Smoothing and pressure response remain separate controls.
+
 ## Editing Bézier paths
 
 Select a vector path, then choose **Node** or **Pen**. The floating toolbar and **Properties** offer four anchor types:
@@ -31,3 +35,7 @@ Anchor types are saved in `.ltoon` projects. Older projects infer their initial 
 Select a vector path and open **Properties → Gradient**. Choose **Stroke**, enable **Gradient**, and edit its color stops, opacity, linear/radial type and rotation. Choose **Fill** to edit the fill gradient independently. The same options apply to new paths when a vector drawing tool is active.
 
 With Selection or Transform active, choose the desired Fill/Stroke channel and drag the gradient endpoints on the canvas to reposition it. Applying a solid stroke color replaces the stroke gradient. Native projects preserve both gradients; image/video exports render them, and SVG export converts gradient strokes into filled outline geometry.
+
+## Preview bucket regions
+
+In Paint Bucket properties, enable **Preview region and gap bridges**, then click the region. The background worker prepares a candidate without changing the document. Cyan shows the candidate boundary; orange shows temporary endpoint bridges where applicable. Choose **Apply** to commit or **Cancel** to leave the drawing unchanged. For multiple frames, select a result row to inspect that frame. Gap bridges never alter the original outlines. Closed stroke silhouettes can form barriers without endpoint bridges.

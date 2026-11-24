@@ -97,6 +97,17 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Check static diagnostics against the Windows warning budget
+        shell: pwsh
+        run: |
+          rustup component add clippy
+          New-Item -ItemType Directory -Force target/qa | Out-Null
+          cargo clippy --locked --all-targets --message-format=json > target/qa/clippy.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/test_check_clippy.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/check_clippy.py target/qa/clippy.jsonl
+
       - name: Check lightweight package staging
         run: python scripts/packaging/test_native.py
 

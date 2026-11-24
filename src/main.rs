@@ -6,6 +6,8 @@ mod animation_clips;
 mod animation_tests;
 #[cfg(test)]
 mod appearance_tests;
+#[cfg(test)]
+mod audit_regressions;
 mod brush;
 mod bucket;
 mod canvas;
@@ -29,6 +31,8 @@ mod fla_zip;
 mod folder_groups;
 mod frame_clipboard;
 mod frame_workflow;
+mod geometry_jobs;
+mod geometry_ops;
 mod gpu_composition;
 mod gpu_gaussian;
 mod gpu_image;
@@ -36,6 +40,7 @@ mod gpu_lens;
 mod gpu_light;
 mod gpu_plane;
 mod gpu_post;
+mod gpu_present;
 mod gpu_raster;
 mod gpu_resize;
 mod gpu_scene;
@@ -54,13 +59,17 @@ mod mannequin;
 #[cfg(test)]
 mod manual_visuals;
 mod media;
+mod memory;
+mod native_archive;
 mod native_project;
 mod node_edit;
 mod ordering;
 mod paint;
 mod palette;
+mod picking;
 mod post;
 mod preset_file;
+mod pressure;
 mod project_save;
 mod property_edit;
 mod raster;
@@ -75,12 +84,15 @@ mod scenes;
 mod sequencer;
 mod shared;
 mod shortcuts;
+mod spatial;
+mod storage;
 mod studio;
 #[cfg(test)]
 mod studio_tests;
 #[cfg(test)]
 mod studio_v2_tests;
 mod svg_import;
+mod svg_use;
 mod tablet;
 mod themes;
 mod tools_editor;
@@ -160,12 +172,16 @@ struct Editor {
     tick: Instant,
     draft: Option<Mark>,
     undo: Vec<Document>,
+    exposure_sync: Vec<(usize, usize)>,
     redo: Vec<Document>,
     path: Option<PathBuf>,
     status: String,
     recovery: PathBuf,
     recovery_writer: recovery::RecoveryWriter,
     project_save: project_save::State,
+    storage: storage::State,
+    memory: memory::State,
+    geometry_ops: geometry_ops::State,
     property_edit: Option<property_edit::Edit>,
     vector_import: Option<svg_import::Dialog>,
     image_sequence: Option<image_sequence::Dialog>,
@@ -260,12 +276,16 @@ impl Editor {
             tick: Instant::now(),
             draft: None,
             undo: vec![],
+            exposure_sync: Vec::new(),
             redo: vec![],
             path: None,
             status,
             recovery,
             recovery_writer: recovery::RecoveryWriter::default(),
             project_save: Default::default(),
+            storage: Default::default(),
+            memory: Default::default(),
+            geometry_ops: Default::default(),
             property_edit: None,
             vector_import: None,
             image_sequence: None,
@@ -278,6 +298,7 @@ impl Editor {
         editor
     }
     fn checkpoint(&mut self) {
+        self.exposure_sync.clear();
         self.property_edit = None;
         self.hub.dirty();
         self.canvas.clear_selection();
@@ -317,6 +338,7 @@ impl Editor {
         }
     }
     fn history(&mut self, redo: bool) {
+        self.exposure_sync.clear();
         self.property_edit = None;
         self.animation.tween_drag = None;
         self.finish_raster_stroke();
@@ -398,6 +420,7 @@ fn write_recovery_document(
             serde_json::to_writer(&mut writer, doc).map_err(|e| e.to_string())?;
         }
         std::io::Write::flush(&mut writer).map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
         drop(writer);
         publish(&temporary, path).map_err(|e| e.to_string())
     })();
@@ -408,6 +431,7 @@ impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_open(&ctx);
+        self.history_memory_tick(&ctx);
         self.drawing.pen.update(&ctx);
         if let Some(error) = self.recovery_writer.take_error() {
             self.status =
@@ -502,6 +526,7 @@ impl eframe::App for Editor {
         self.annotation_dialog(&ctx);
         self.lip_session_ui(&ctx);
         self.project_save_ui(&ctx);
+        self.storage_ui(&ctx);
         self.recovery_error_ui(&ctx);
         if self.studio.credits_open {
             egui::Window::new(crate::i18n::tr("Credits"))
@@ -553,7 +578,7 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
                 .with_inner_size([1360., 860.])
-                .with_min_inner_size([1050., 700.])
+                .with_min_inner_size([640., 360.])
                 .with_icon(design::window_icon()),
             ..Default::default()
         },

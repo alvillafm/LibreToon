@@ -429,7 +429,7 @@ impl Editor {
                     ));
                 if response.changed() && self.tool == Tool::Width {
                     let ids = self.canvas.selected.clone();
-                    self.checkpoint();
+                    self.begin_property_edit(("stroke-width", self.frame, ids.clone()));
                     for &(l, m) in &ids {
                         self.doc.layers[l].frames[self.frame][m].width = self.width;
                     }
@@ -454,6 +454,9 @@ impl Editor {
                     egui::Slider::new(&mut self.smoothing, 0.0..=1.)
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.)),
                 );
+                ui.label(crate::i18n::tr("Stabilizer distance"));
+                ui.add(egui::Slider::new(&mut self.drawing.stabilization, 0.0..=100.).suffix(" px"));
+                ui.small(crate::i18n::tr("The guide connects the pointer to the delayed brush tip. Zero disables stabilization."));
             }
             if self.tool == Tool::Pen {
                 design::category(ui, "Pen mode");
@@ -476,6 +479,7 @@ impl Editor {
             }
             if self.tool == Tool::Bucket {
                 design::category(ui, "FILL METHOD");
+                ui.checkbox(&mut self.feature.bucket_preview, crate::i18n::tr("Preview region and gap bridges"));
                 for (gap, icon) in crate::bucket::Gap::ALL.into_iter().zip([
                     Icon::Line,
                     Icon::CapRound,
@@ -505,7 +509,13 @@ impl Editor {
                     ui,
                     Icon::Film,
                     "Fill selected keyframes",
-                    "Pick a point to preview fills across the selected range",
+                    if !has_selection {
+                        "Shift-click timeline cells on the active layer to select a range first."
+                    } else if self.feature.bucket_range.is_some() {
+                        "Finish or cancel the current fill preview before starting another."
+                    } else {
+                        "Pick a point to preview fills across the selected range"
+                    },
                     self.feature.bucket_range_armed,
                     has_selection && self.feature.bucket_range.is_none(),
                 )
@@ -526,6 +536,19 @@ impl Editor {
                     .changed()
                 {
                     self.feature.bucket_range_armed = false;
+                }
+                if !self.feature.bucket_report.is_empty()
+                    && design::button(
+                        ui,
+                        Icon::Info,
+                        "Last fill report",
+                        "See results and skipped regions for every processed keyframe",
+                        false,
+                        true,
+                    )
+                    .clicked()
+                {
+                    self.feature.bucket_report_open = true;
                 }
                 if self.feature.bucket_next {
                     ui.horizontal(|ui| {
@@ -555,6 +578,7 @@ impl Editor {
                         self.fill_enabled || self.stroke_enabled,
                         egui::Button::new(crate::i18n::tr("Aplicar estilo a la selección")),
                     )
+                    .on_disabled_hover_text(crate::i18n::tr("Enable Fill or Stroke in the Color panel first."))
                     .clicked()
                 {
                     self.apply_drawing_style();
@@ -721,6 +745,9 @@ impl Editor {
                     self.width_profile.len() < 128,
                     egui::Button::new(crate::i18n::tr("+ Punto")),
                 )
+                .on_disabled_hover_text(crate::i18n::tr(
+                    "The width profile already has 128 points. Remove an interior point first.",
+                ))
                 .clicked()
             {
                 if self.width_profile.is_empty() {
@@ -742,6 +769,9 @@ impl Editor {
                 .is_some_and(|i| i > 0 && i + 1 < self.width_profile.len());
             if ui
                 .add_enabled(removable, egui::Button::new(crate::i18n::tr("− Punto")))
+                .on_disabled_hover_text(crate::i18n::tr(
+                    "Select an interior width point. The two endpoints must remain.",
+                ))
                 .clicked()
             {
                 self.width_profile

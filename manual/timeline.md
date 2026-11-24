@@ -21,3 +21,11 @@ A keyframe starts an exposure. Held frames continue showing the same drawing. Us
 Open the **Exposure Sheet** from the timeline. Each column is a layer and each row is a frame. Select cells to edit timing or classify drawings as keys, breakdowns, or in-betweens. Use **On ones**, **On twos**, or **On threes** to adjust cadence.
 
 Select a keyframe range and choose **Transform keyframes** to move, rotate, or scale drawings together. Use **Shift & Trace** to align two temporary references while drawing the current frame.
+
+## Independent timing curves
+
+Open the animation curves window and choose Drawing, Camera, Bone or Pin. Select a channel such as X or Y and enable **Independent channel curve** to give it its own easing. Other channels retain their existing timing. Disable the checkbox to return that channel to shared timing. The vertical marker follows the current frame. These curves control progress between keys, rather than absolute property values.
+
+## Layer Objects selection
+
+In **Layer Objects**, Shift-click to select a displayed range, including folder children. Ctrl/Cmd-click toggles individual objects. Right-click a row for Copy, Cut, Paste and drawing-order actions. Right-clicking an already selected object preserves the multiple selection. Reordering artwork inside a tween preserves its evaluated geometry and can be undone once.

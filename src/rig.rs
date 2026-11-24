@@ -425,7 +425,43 @@ pub struct Binding {
     pub cells: SharedVec<Cell>,
     pub pins: SharedVec<Pin>,
 }
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct BindingDiagnostics {
+    pub unweighted_cells: usize,
+    pub invalid_cells: usize,
+    pub used_bones: usize,
+    pub pins: usize,
+}
 impl Binding {
+    pub(crate) fn diagnostics(&self, bones: &HashSet<u64>) -> BindingDiagnostics {
+        let mut report = BindingDiagnostics {
+            pins: self.pins.len(),
+            ..Default::default()
+        };
+        let mut used = HashSet::new();
+        for cell in &self.cells {
+            let mut sum = 0.;
+            let mut invalid = false;
+            for influence in cell.influences {
+                if influence.weight == 0. {
+                    continue;
+                }
+                if !influence.weight.is_finite()
+                    || !(0. ..=1.).contains(&influence.weight)
+                    || !bones.contains(&influence.bone)
+                {
+                    invalid = true;
+                } else {
+                    sum += influence.weight;
+                    used.insert(influence.bone);
+                }
+            }
+            report.unweighted_cells += usize::from(sum <= 1e-6);
+            report.invalid_cells += usize::from(invalid || sum > 1.001);
+        }
+        report.used_bones = used.len();
+        report
+    }
     pub fn new(target: u64, symbol: u64, matrix: Matrix, bounds: Rect) -> Self {
         let bounds = bounds.expand(1.);
         Self {
@@ -513,19 +549,22 @@ pub fn bone_value(bone: &Bone, frame: usize) -> BoneKey {
     let Some(b) = bone.keys.get(index) else {
         return a.clone();
     };
-    let t = a
-        .curve
-        .time((frame - a.frame) as f32 / (b.frame - a.frame) as f32);
+    let raw_t = (frame - a.frame) as f32 / (b.frame - a.frame) as f32;
+    let t = a.curve.time(raw_t);
+    let angle_t = a.curve.channel_time_or(2, raw_t, t);
+    let scale_t = a.curve.channel_time_or(3, raw_t, t);
+    let stretch_t = a.curve.channel_time_or(4, raw_t, t);
     BoneKey {
         frame,
-        angle: a.angle * (1. - t) + b.angle * t,
-        translation: vector::xy(a.curve.point(
+        angle: a.angle * (1. - angle_t) + b.angle * angle_t,
+        translation: vector::xy(a.curve.channel_point_at(
             vector::pos(a.translation),
             vector::pos(b.translation),
+            raw_t,
             t,
         )),
-        scale: a.scale * (1. - t) + b.scale * t,
-        stretch: a.stretch * (1. - t) + b.stretch * t,
+        scale: a.scale * (1. - scale_t) + b.scale * scale_t,
+        stretch: a.stretch * (1. - stretch_t) + b.stretch * stretch_t,
         curve: a.curve.clone(),
     }
 }
@@ -541,11 +580,9 @@ pub fn pin_value(pin: &Pin, frame: usize) -> Pos2 {
     let Some(b) = pin.keys.get(index) else {
         return vector::pos(a.position);
     };
-    let t = a
-        .curve
-        .time((frame - a.frame) as f32 / (b.frame - a.frame) as f32);
+    let t = (frame - a.frame) as f32 / (b.frame - a.frame) as f32;
     a.curve
-        .point(vector::pos(a.position), vector::pos(b.position), t)
+        .channel_point(vector::pos(a.position), vector::pos(b.position), t)
 }
 impl Rig {
     pub fn snapshot_targets(&self, targets: &HashSet<u64>, frame: usize) -> Self {
@@ -1082,7 +1119,12 @@ impl<'a> Deformer<'a> {
             out.push(deform_path(&fill, &f));
         }
         if mark.stroke {
-            for m in vector::polygons_to_marks(crate::width::outline(mark), mark.color) {
+            for mut m in vector::polygons_to_marks(crate::width::outline(mark), mark.color) {
+                m.style = mark.style.clone();
+                m.style.gradient = mark.style.stroke_gradient.clone();
+                m.style.stroke_gradient = None;
+                m.style.palette_fill = mark.style.palette_stroke;
+                m.style.palette_stroke = None;
                 out.push(deform_path(&m, &f));
             }
         }
@@ -1318,5 +1360,41 @@ impl Warp {
                 p + delta / sum.max(1e-9)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn weight_diagnostics_report_invalid_references_without_repairing_artwork() {
+        let mut binding = Binding::new(
+            1,
+            2,
+            IDENTITY,
+            Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.)),
+        );
+        let bones = [7].into_iter().collect();
+        assert_eq!(binding.diagnostics(&bones).unweighted_cells, CELLS);
+        binding.cells[0].influences[0] = Influence {
+            bone: 7,
+            weight: 1.,
+        };
+        let report = binding.diagnostics(&bones);
+        assert_eq!(report.unweighted_cells, CELLS - 1);
+        assert_eq!(report.used_bones, 1);
+        assert_eq!(report.invalid_cells, 0);
+        binding.cells[0].influences[1] = Influence {
+            bone: 999,
+            weight: 0.5,
+        };
+        binding.cells[1].influences[0] = Influence {
+            bone: 7,
+            weight: f32::NAN,
+        };
+        let report = binding.diagnostics(&bones);
+        assert_eq!(report.invalid_cells, 2);
+        assert_eq!(binding.cells[0].influences[1].bone, 999);
+        assert!(binding.cells[1].influences[0].weight.is_nan());
     }
 }

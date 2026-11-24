@@ -2353,6 +2353,8 @@ mod tests {
             colors: 256,
             dither: false,
             svg_sequence: false,
+            transparent_video: false,
+            gif: Default::default(),
             sheet: Default::default(),
         };
         crate::exporter::run_export(

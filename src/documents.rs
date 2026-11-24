@@ -189,7 +189,30 @@ fn catalogue_path() -> PathBuf {
 }
 
 pub fn read_project(path: &std::path::Path) -> Result<Document, String> {
-    use std::io::Read;
+    use std::io::{Read, Seek};
+    // Native archives are indexed and decoded from the file, not collected into RAM.
+    let mut source = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut prefix = [0; 4];
+    let count = source.read(&mut prefix).map_err(|e| e.to_string())?;
+    source.rewind().map_err(|e| e.to_string())?;
+    if count >= 2
+        && &prefix[..2] == b"PK"
+        && !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("fla"))
+    {
+        if let Some(mut doc) = crate::native_project::read_path(path)? {
+            doc.extras.media.remove_empty_tracks();
+            return Ok(doc);
+        }
+    }
+    if crate::native_project::is_native_path(path) && &prefix[..2] != b"PK" {
+        let mut doc: Document =
+            serde_json::from_reader(std::io::BufReader::new(source)).map_err(|e| e.to_string())?;
+        doc.validate()?;
+        doc.extras.media.remove_empty_tracks();
+        return Ok(doc);
+    }
     const LIMIT: u64 = 256 * 1024 * 1024;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let declared = file.metadata().map_or(0, |metadata| metadata.len());
@@ -633,6 +656,16 @@ impl Editor {
         egui::Panel::top("document-tabs")
             .exact_size(42.)
             .show(ui, |ui| {
+                let available = ui.available_rect_before_wrap();
+                let status = (!self.hub.home && available.width() > 480.).then(|| {
+                    Rect::from_min_max(
+                        Pos2::new(available.right() - 135., available.top()),
+                        available.max,
+                    )
+                });
+                if status.is_some() {
+                    ui.set_max_width(available.width() - 143.);
+                }
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().interact_size.y = 30.;
                     ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
@@ -736,6 +769,11 @@ impl Editor {
                     self.hub.tab_extent = (scroll.content_size.x, scroll.inner_rect.width());
                     self.hub.tab_offset = scroll.state.clamped_offset().x;
                 });
+                if let Some(status) = status {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+                        self.save_status_ui(ui);
+                    });
+                }
             });
         self.drawing.scroll_to_tab = false;
         if home {

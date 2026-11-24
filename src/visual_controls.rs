@@ -18,6 +18,11 @@ fn motion_curve_hit(
     pointer: Pos2,
     view: crate::canvas::View,
 ) -> Option<f32> {
+    // Independent X/Y timings can leave the shared geometric path. Edit their
+    // curves in the graph rather than applying an ambiguous single-parameter bend.
+    if curve.channels[0].is_some() || curve.channels[1].is_some() {
+        return None;
+    }
     let mut best = (8., 0.);
     let mut previous = view.screen(curve.point(a, b, 0.));
     for i in 1..=64 {
@@ -240,7 +245,15 @@ impl Editor {
             let stationary = a.distance(b) < 0.1;
             if !stationary {
                 let line = (0..=64)
-                    .map(|i| view.screen(curve.point(a, b, i as f32 / 64.)))
+                    .map(|i| {
+                        view.screen(
+                            if curve.channels[0].is_some() || curve.channels[1].is_some() {
+                                curve.channel_point(a, b, i as f32 / 64.)
+                            } else {
+                                curve.point(a, b, i as f32 / 64.)
+                            },
+                        )
+                    })
                     .collect();
                 p.add(egui::Shape::line(
                     line,
@@ -263,7 +276,7 @@ impl Editor {
                 let q = if stationary {
                     (a - Vec2::X * 80.).lerp(a + Vec2::X * 80., curve.time(t))
                 } else {
-                    curve.point(a, b, curve.time(t))
+                    curve.channel_point(a, b, t)
                 };
                 p.circle_filled(view.screen(q), 2.5, Color32::from_rgb(180, 120, 250));
             }
@@ -271,7 +284,7 @@ impl Editor {
             let current = if stationary {
                 (a - Vec2::X * 80.).lerp(a + Vec2::X * 80., curve.time(active))
             } else {
-                curve.point(a, b, curve.time(active))
+                curve.channel_point(a, b, active)
             };
             p.circle_filled(view.screen(current), 4., Color32::WHITE);
             for (i, h) in handles.iter().enumerate() {
@@ -829,6 +842,15 @@ pub fn timing_controls(
     handle: &mut Option<usize>,
     frames: usize,
 ) {
+    timing_controls_at(ui, curve, handle, frames, None);
+}
+pub(crate) fn timing_controls_at(
+    ui: &mut egui::Ui,
+    curve: &mut crate::animation::Curve,
+    handle: &mut Option<usize>,
+    frames: usize,
+    phase: Option<f32>,
+) {
     ui.horizontal(|ui| {
         for (icon, label, pace) in [
             (Icon::Line, "Lineal", [1. / 3., 1. / 3.]),
@@ -985,6 +1007,18 @@ pub fn timing_controls(
         line,
         Stroke::new(2., crate::themes::accent()),
     ));
+    if let Some(t) = phase {
+        let t = t.clamp(0., 1.);
+        let point = screen([t, curve.time(t)]);
+        painter.line_segment(
+            [
+                Pos2::new(point.x, graph.top()),
+                Pos2::new(point.x, graph.bottom()),
+            ],
+            Stroke::new(1., crate::themes::muted()),
+        );
+        painter.circle_filled(point, 4., crate::themes::palette().text);
+    }
     if let Some(points) = &curve.timing {
         for &p in points {
             painter.circle_filled(screen(p), 4., crate::themes::accent());

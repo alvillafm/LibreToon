@@ -8,7 +8,6 @@ use std::{
 };
 
 pub(crate) const ASSET_LIMIT: usize = 64 * 1024 * 1024;
-const LIBRARY_LIMIT: usize = 256 * 1024 * 1024;
 const DEMUXERS: &str =
     "mov,matroska,avi,mp3,wav,ogg,flac,aac,png_pipe,jpeg_pipe,bmp_pipe,tiff_pipe,webp_pipe,image2";
 fn read_media_file(path: &Path) -> Result<Vec<u8>, String> {
@@ -70,6 +69,17 @@ pub(crate) struct Asset {
     peaks: SharedVec<u8>,
 }
 
+impl Asset {
+    pub(crate) fn same_payload(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.size == other.size
+            && self.seconds == other.seconds
+            && self.raster_tile == other.raster_tile
+            && self.data == other.data
+            && self.peaks == other.peaks
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Clip {
     asset: u64,
@@ -123,6 +133,9 @@ pub(crate) struct Track {
 }
 
 impl Track {
+    pub(crate) fn asset_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.clips.iter().map(|clip| clip.asset)
+    }
     fn replacement_fits(&self, old: u64, frames: usize) -> bool {
         self.clips
             .iter()
@@ -130,7 +143,7 @@ impl Track {
             .all(|clip| clip.offset.saturating_add(clip.length) <= frames)
     }
 
-    fn replace_asset_reference(&mut self, old: u64, new: u64) {
+    pub(crate) fn replace_asset_reference(&mut self, old: u64, new: u64) {
         if self.asset_use_count(old) > 0 {
             for clip in self.clips.iter_mut().filter(|clip| clip.asset == old) {
                 clip.asset = new;
@@ -544,16 +557,11 @@ impl Editor {
             let (send, receive) = std::sync::mpsc::channel();
             self.media.importing = Some((self.recovery.clone(), receive));
             std::thread::spawn(move || {
-                let mut bytes = 0usize;
                 let results = files
                     .into_iter()
                     .map(|path| {
                         let asset = Self::read_media(&path, &ffmpeg)
                             .map_err(|error| format!("{}: {error}", path.display()))?;
-                        if bytes.saturating_add(asset.data.len()) > LIBRARY_LIMIT {
-                            return Err("Media library exceeds 256 MiB".into());
-                        }
-                        bytes += asset.data.len();
                         Ok(asset)
                     })
                     .collect();
@@ -2181,24 +2189,15 @@ impl MediaLibrary {
     }
     pub(crate) fn can_add(&self, asset: &Asset) -> bool {
         asset.data.len() <= ASSET_LIMIT
-            && self
-                .assets
-                .iter()
-                .map(|asset| asset.data.len())
-                .fold(asset.data.len(), usize::saturating_add)
-                <= LIBRARY_LIMIT
     }
 
     pub(crate) fn validate(&self, scenes: &[crate::animation::Scene]) -> Result<(), String> {
         use std::collections::HashMap;
         let mut assets = HashMap::new();
-        let mut total = 0usize;
         for asset in &self.assets {
-            total = total.saturating_add(asset.data.len());
             if asset.id == 0
                 || asset.data.is_empty()
                 || asset.data.len() > ASSET_LIMIT
-                || total > LIBRARY_LIMIT
                 || assets.insert(asset.id, asset.kind).is_some()
                 || (asset.kind == Kind::Image && self.pixels(asset.id).is_none())
                 || (asset.kind != Kind::Image

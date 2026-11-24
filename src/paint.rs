@@ -8,7 +8,7 @@ use lyon_tessellation::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct Key {
     points: usize,
     nodes: usize,
@@ -174,6 +174,20 @@ pub struct RenderCache {
     builds: usize,
 }
 impl RenderCache {
+    pub(crate) fn prepare_composited(&mut self, marks: &[(usize, usize, Mark)]) {
+        self.begin_frame();
+        for (_, _, mark) in marks {
+            let _ = self.get(mark, 1., true);
+        }
+    }
+    pub(crate) fn geometry_snapshot(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            epoch: self.epoch,
+            bytes: self.bytes,
+            ..Default::default()
+        }
+    }
     pub fn begin_frame(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         self.entries

@@ -6,3 +6,7 @@
 
 # Generated documentation site
 /site/
+
+# Python validation tools
+__pycache__/
+*.py[cod]

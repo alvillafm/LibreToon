@@ -20,7 +20,7 @@ Open a compatible FLA, inspect the stage and timeline, then read **File → FLA 
 
 Choose **File → Import → SVG vector artwork…**. After parsing, the dialog reports the editable path count and any compatibility notices. Choose whether to fit the artwork to the stage, then click **Import vectors**. A new vector layer is added at the current frame; the source SVG is preserved. Undo removes the import in one step.
 
-Supported artwork includes paths, cubic and quadratic curves, arcs, basic shapes, nested group transforms, solid fill/stroke colors, opacity, and common linear/radial gradients, including linked Inkscape gradient definitions. Compound fills become editable polygon boundaries; their original Bézier strokes remain available. Some stroke transforms and radial gradients are approximated.
+Supported artwork includes paths, cubic and quadratic curves, arcs, basic shapes, nested group transforms, solid fill/stroke colors, opacity, and common linear/radial gradients, including linked Inkscape gradient definitions. Local `<use>` instances and linked definitions are expanded into editable artwork, with bounded recursion and no network access. Compound fills become editable polygon boundaries; their original Bézier strokes remain available. Some stroke transforms and radial gradients are approximated.
 
 SVG text, linked images, scripts, CSS classes, filters, masks and clipping features are not reproduced as native SVG effects. Read the dialog's notices before importing. In the source editor, convert text or special objects to paths when possible. SVG is an artwork exchange format here, not a project or animation interchange format.
 
@@ -33,7 +33,7 @@ SVG text, linked images, scripts, CSS classes, filters, masks and clipping featu
 5. Enable **Set project FPS** only if you want to change the project's frame rate. Otherwise the current FPS is retained.
 6. Click **Import sequence**. Decoding runs in the background with progress and cancellation. The completed sequence is inserted on a new layer as image keyframes and held exposures. Existing drawings are retained, and the timeline extends if needed.
 
-Imported images are embedded in the project. The sequence must fit within the 10,000-frame timeline and the 256 MiB media budget. A failed decode does not insert a partial sequence. One Undo removes the whole import, including its added media.
+Imported images are embedded in the project. The sequence must fit within the 10,000-frame timeline ; each individual media file must fit within its 64 MiB decoder safety limit. A failed decode does not insert a partial sequence. One Undo removes the whole import, including its added media.
 
 ## Export a short test
 
@@ -44,3 +44,21 @@ Imported images are embedded in the project. The sequence must fit within the 10
 5. Open the result outside LibreToon and check timing, sharpness, audio and transparency as applicable.
 
 Viewport quality does not lower final export quality. The renderer uses the requested output resolution. For video, configure a compatible FFmpeg executable when prompted. An installed FFmpeg can be selected manually on platforms without a bundled download.
+
+
+## Native storage and recovery
+
+Native `.ltoon` save, open and recovery no longer impose an aggregate 256 MiB project limit. Large projects use a streamed ZIP64 container (native version 3); smaller projects keep the compatible compact container when possible. Very large version-3 files require this updated application. The available RAM and disk space still determine practical capacity. Individual media decoding and structural complexity checks remain in place.
+
+**File → Project storage…** reports embedded resource sizes before compression, references, unused media and exact duplicates. Cleanup scans all scenes and symbols in the background. It rechecks the current project and aborts if edits would make its result stale. Cleanup is undoable. It never deletes the source files on disk.
+
+**Preferences → Saving** can retain a chosen number of incremental versions; **0** preserves all of them. Retention is opt-in and does not remove recovery files. A small persistent `.libretoon-lock` sidecar coordinates saves between LibreToon instances.
+
+
+## Animated GIF with a transparent background
+
+Choose **File → Export GIF…**, then enable **Transparent background**. Hide any background artwork layers you do not want in the GIF. Set **Alpha threshold** to control which soft-edge pixels become opaque; GIF supports a single transparent palette entry rather than partial alpha. The default threshold is 128 out of 255. Lower values retain more edge pixels; higher values remove more of them. PNG sequence remains suitable when you need smooth partial transparency.
+
+## MOV with partial transparency
+
+In video export, choose **MOV** and enable **Transparent background**. LibreToon uses ProRes 4444 (4444 XQ at quality 100) and preserves partial alpha. Hide opaque background layers first. A compatible FFmpeg build and a player or editor that supports ProRes alpha are required. MP4, MKV and AVI export remain opaque. This option is included in saved export presets; viewport preview quality does not reduce final output quality.

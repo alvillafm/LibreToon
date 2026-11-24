@@ -320,8 +320,8 @@ struct CachedPreview {
     texture: Option<egui::TextureHandle>,
 }
 
-fn preview_identity(doc: &Document) -> [usize; 25] {
-    let mut identity = [0; 25];
+fn preview_identity(doc: &Document) -> [usize; 28] {
+    let mut identity = [0; 28];
     identity[..11].copy_from_slice(&[
         doc.layers.identity(),
         doc.extras.cameras.identity(),
@@ -335,8 +335,70 @@ fn preview_identity(doc: &Document) -> [usize; 25] {
         doc.width as usize,
         doc.height as usize,
     ]);
-    identity[11..].copy_from_slice(&doc.extras.rig.character_turns.identity());
+    identity[11..25].copy_from_slice(&doc.extras.rig.character_turns.identity());
+    identity[25..].copy_from_slice(&[
+        doc.fps as usize,
+        doc.extras.scenes.identity(),
+        doc.extras.active_scene,
+    ]);
     identity
+}
+
+fn frame_dependencies_equal(before: &Document, after: &Document, frame: usize) -> bool {
+    let old = preview_identity(before);
+    let new = preview_identity(after);
+    if old[2..] != new[2..] || before.fps != after.fps || before.layers.len() != after.layers.len()
+    {
+        return false;
+    }
+    if old[1] != new[1] {
+        match (camera(before, frame), camera(after, frame)) {
+            (None, None) => {}
+            (Some(a), Some(b)) if a.id == b.id => {
+                let x = crate::animation::camera_at(a, frame);
+                let y = crate::animation::camera_at(b, frame);
+                if x.center != y.center
+                    || x.zoom != y.zoom
+                    || x.angle != y.angle
+                    || x.optics(a) != y.optics(b)
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    for (a, b) in before.layers.iter().zip(after.layers.iter()) {
+        if a.visible != b.visible
+            || a.frames
+                .get(frame)
+                .zip(b.frames.get(frame))
+                .is_none_or(|(a, b)| a.identity() != b.identity())
+        {
+            return false;
+        }
+        let mut x = a.options.clone();
+        let y = &b.options;
+        match (&mut x.light, &y.light) {
+            (Some(x), Some(y)) => {
+                if !x.same_at(y, frame) {
+                    return false;
+                }
+                *x = y.clone();
+            }
+            (None, None) => {}
+            _ => return false,
+        }
+        if crate::post::effects_at(a, frame) != crate::post::effects_at(b, frame) {
+            return false;
+        }
+        x.adjustment = y.adjustment.clone();
+        x.adjustment_bands = y.adjustment_bands.clone();
+        if x != *y {
+            return false;
+        }
+    }
+    true
 }
 
 // Only retain a composited frame across changes to light or FX parameters.
@@ -381,6 +443,7 @@ pub struct DepthEditor {
     pub open: bool,
     pub hide_blur: bool,
     pub preview: Option<egui::TextureHandle>,
+    presenter: Option<crate::gpu_present::Presenter>,
     job: Option<std::sync::mpsc::Receiver<(Vec<usize>, Vec<u8>, [usize; 2])>>,
     requested: Vec<usize>,
     failed_request: Vec<usize>,
@@ -507,11 +570,18 @@ impl DepthEditor {
         });
         Self {
             gpu_init,
+            presenter: cc
+                .wgpu_render_state
+                .as_ref()
+                .and_then(crate::gpu_present::Presenter::new),
             ..Self::default()
         }
     }
 
     pub(crate) fn invalidate_preview(&mut self) {
+        if let Some(presenter) = &mut self.presenter {
+            presenter.reset();
+        }
         self.cancel_job();
         self.preview = None;
         self.prepare = None;
@@ -548,8 +618,33 @@ impl DepthEditor {
             if !self.interactive_job {
                 self.cancel_job();
             }
-            self.preview_epoch = self.preview_epoch.wrapping_add(1);
-            self.cached.clear();
+            let epoch = self.preview_epoch.wrapping_add(1);
+            if let Some(before) = &self.owner {
+                if let Some(presenter) = &mut self.presenter {
+                    presenter
+                        .retain_frames(epoch, |frame| frame_dependencies_equal(before, doc, frame));
+                }
+                self.cached.retain_mut(|cached| {
+                    let valid = cached
+                        .key
+                        .get(1)
+                        .is_some_and(|&f| frame_dependencies_equal(before, doc, f));
+                    if valid {
+                        cached.key[0] = epoch;
+                    }
+                    valid
+                });
+                if self
+                    .shown
+                    .get(1)
+                    .is_some_and(|&f| frame_dependencies_equal(before, doc, f))
+                {
+                    self.shown[0] = epoch;
+                }
+            } else {
+                self.cached.clear();
+            }
+            self.preview_epoch = epoch;
 
             self.owner = Some(doc.clone());
             self.render_doc = None;
@@ -606,15 +701,36 @@ impl DepthEditor {
     }
 
     pub(crate) fn gpu_lighting_passes(&self) -> Option<usize> {
-        self.gpu.as_ref().map(|gpu| gpu.light_pass_count())
+        let resident = self
+            .presenter
+            .as_ref()
+            .map(crate::gpu_present::Presenter::stats);
+        self.gpu
+            .as_ref()
+            .map(|gpu| gpu.light_pass_count() + resident.map_or(0, |s| s.3))
+            .or_else(|| resident.map(|s| s.3))
     }
     pub(crate) fn gpu_context(&self) -> Option<std::sync::Arc<crate::gpu_lens::GpuLens>> {
         self.gpu.clone()
     }
     pub(crate) fn gpu_composed_frames(&self) -> Option<usize> {
-        self.gpu.as_ref().map(|gpu| {
-            gpu.composed_frames
-                .load(std::sync::atomic::Ordering::Relaxed)
+        let resident = self
+            .presenter
+            .as_ref()
+            .map(crate::gpu_present::Presenter::stats);
+        self.gpu
+            .as_ref()
+            .map(|gpu| {
+                gpu.composed_frames
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    + resident.map_or(0, |s| s.2)
+            })
+            .or_else(|| resident.map(|s| s.2))
+    }
+    pub(crate) fn resident_cache_usage(&self) -> Option<(usize, usize)> {
+        self.presenter.as_ref().map(|p| {
+            let s = p.stats();
+            (s.0, s.1)
         })
     }
 
@@ -637,7 +753,7 @@ impl DepthEditor {
         }
     }
 
-    fn texture_bytes(&self) -> usize {
+    pub(crate) fn texture_bytes(&self) -> usize {
         self.cached
             .iter()
             .filter_map(|f| f.texture.as_ref())
@@ -1014,6 +1130,37 @@ impl Editor {
     }
 
     pub(crate) fn paint_preview_progress(&self, painter: &egui::Painter, area: egui::Rect) {
+        if self.depth.prepare.is_none() {
+            if let Some(progress) = self
+                .depth
+                .presenter
+                .as_ref()
+                .and_then(crate::gpu_present::Presenter::progress)
+            {
+                let text = format!(
+                    "{} · {} · {progress}%",
+                    self.frame + 1,
+                    tr("Preparing viewport geometry")
+                );
+                let at = area.left_top() + egui::vec2(10., 10.);
+                let galley = painter.layout_no_wrap(
+                    text,
+                    egui::FontId::proportional(12.),
+                    crate::themes::palette().text,
+                );
+                let rect = egui::Rect::from_min_size(at, galley.size() + egui::vec2(16., 12.));
+                painter.rect_filled(rect, 4., crate::themes::palette().panel);
+                painter.galley(
+                    at + egui::vec2(8., 6.),
+                    galley,
+                    crate::themes::palette().text,
+                );
+                painter
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(30));
+                return;
+            }
+        }
         let Some(work) = self.depth.work.as_ref() else {
             return;
         };
@@ -1107,6 +1254,14 @@ impl Editor {
         )
     }
     pub fn camera_blur_preview(&mut self, painter: &egui::Painter, stage: View) -> bool {
+        if let Some(message) = self
+            .depth
+            .presenter
+            .as_ref()
+            .and_then(crate::gpu_present::Presenter::take_failure)
+        {
+            self.status = tr(message).into();
+        }
         if let Some(init) = &self.depth.gpu_init {
             match init.try_recv() {
                 Ok(gpu) => {
@@ -1447,37 +1602,21 @@ impl Editor {
                 }
             }
         }
+        let direct = self
+            .depth
+            .presenter
+            .as_ref()
+            .is_some_and(crate::gpu_present::Presenter::available);
+        if direct && self.depth.prepare.is_none() {
+            next = None;
+            self.depth.cancel_job();
+        }
         if let Some((key, prefetch)) = next {
             let size = [key[3], key[4]];
             let doc = self
                 .depth
                 .render_doc
-                .get_or_insert_with(|| {
-                    let mut doc =
-                        crate::animation::scene_doc(&self.doc, self.doc.extras.active_scene);
-                    if !lights || !fx || solo.is_some() {
-                        for (index, layer) in doc.layers.iter_mut().enumerate() {
-                            if !crate::post::is_adjustment(layer) {
-                                continue;
-                            }
-                            let use_light = lights
-                                && solo.is_none_or(|selected| selected == index)
-                                && layer.options.light.is_some();
-                            let use_fx = fx && layer.options.adjustment.is_some();
-                            if !use_light && !use_fx {
-                                layer.visible = false;
-                            } else {
-                                if !use_light {
-                                    layer.options.light = None;
-                                }
-                                if !use_fx {
-                                    layer.options.adjustment = None;
-                                }
-                            }
-                        }
-                    }
-                    doc
-                })
+                .get_or_insert_with(|| preview_document(&self.doc, lights, fx, solo))
                 .clone();
             self.depth.requested = key.clone();
             let frame = key[1];
@@ -1495,6 +1634,7 @@ impl Editor {
             let submitted = key.clone();
             let render_cache = self.depth.render_cache.clone();
             let gpu = self.depth.gpu.clone();
+            let video = video.clone();
             std::thread::spawn(move || {
                 crate::gpu_lens::use_on_worker(gpu);
                 let render = egui::Context::default();
@@ -1523,6 +1663,39 @@ impl Editor {
                 let _ = tx.send((submitted, pixels, size));
                 ctx.request_repaint();
             });
+        }
+        if direct {
+            let doc = self
+                .depth
+                .render_doc
+                .get_or_insert_with(|| preview_document(&self.doc, lights, fx, solo))
+                .clone();
+            let render_camera = use_camera
+                || (allow_blur
+                    && camera(&doc, self.frame).is_some_and(|c| {
+                        crate::animation::camera_optics(c, self.frame).strength > 0.
+                    }));
+            let request = crate::gpu_present::Request {
+                key: key.clone(),
+                doc,
+                frame: self.frame,
+                clock,
+                size: [size[0] as u32, size[1] as u32],
+                video: video.clone(),
+                camera: render_camera,
+                post,
+                blur: allow_blur,
+                full: !reduced,
+                budget: self.studio.prefs.gpu_cache_mib.clamp(32, 2048) * 1048576,
+            };
+            if self.depth.presenter.as_mut().unwrap().paint(
+                request,
+                painter,
+                stage,
+                self.depth.preview.is_some() && self.depth.shown.get(..3) == key.get(..3),
+            ) {
+                return true;
+            }
         }
         let hold = playback_ready
             // Never flash unprocessed artwork between completed playback
@@ -2057,7 +2230,8 @@ mod tests {
             assert_ne!(e.depth.shown[0], e.depth.preview_epoch);
             assert_eq!(e.depth.ready_frames(&e.doc).count(), 0);
             e.doc.layers[0].frames[0].push(Mark::default());
-            assert!(!preview(&mut e));
+            // This edit is outside the displayed frame; its completed preview remains valid.
+            assert!(preview(&mut e));
         });
         output.textures_delta.clear();
     }
@@ -2120,8 +2294,9 @@ mod tests {
             e.doc.layers[0].name.push('!');
             e.camera_blur_preview(ui.painter(), view);
             assert_eq!(e.depth.preview.as_ref().unwrap().id(), first);
-            assert_eq!(e.depth.ready_frames(&e.doc).count(), 0);
-            assert_ne!(e.depth.requested[0], e.depth.shown[0]);
+            // A layer rename does not invalidate rendered pixels.
+            assert_eq!(e.depth.ready_frames(&e.doc).count(), 2);
+            assert_eq!(e.depth.shown[0], e.depth.preview_epoch);
         });
         out.textures_delta.clear();
     }
@@ -2639,3 +2814,126 @@ mod focus_key_tests {
         assert!(crate::animation::camera_optics(&e.doc.extras.cameras[0], 10) == expected);
     }
 }
+
+#[cfg(test)]
+mod invalidation_tests {
+    use super::*;
+    #[test]
+    fn fps_changes_invalidate_prepared_frames_and_scene_changes_change_identity() {
+        let before = crate::fresh_document();
+        let mut state = DepthEditor::default();
+        state.sync_document(&before);
+        state.cached.push_back(CachedPreview {
+            key: vec![state.preview_epoch, 0, 0, 10, 10],
+            pixels: vec![0; 300],
+            size: [10, 10],
+            texture: None,
+        });
+        let mut after = before.clone();
+        after.fps += 1;
+        state.sync_document(&after);
+        assert!(state.cached.is_empty());
+        after
+            .extras
+            .scenes
+            .push(crate::animation::scene_from(&before, 123, "Scene".into()));
+        assert_ne!(preview_identity(&before), preview_identity(&after));
+    }
+    #[test]
+    fn camera_edit_keeps_frames_outside_its_interpolation_segment() {
+        let mut before = crate::fresh_document();
+        before.extras.cameras.push(crate::features::Camera {
+            id: 1,
+            name: "Camera".into(),
+            start: 0,
+            duration: 24,
+            center: [0., 0.],
+            zoom: 1.,
+            angle: 0.,
+            optics: Default::default(),
+            animation: crate::animation::CameraAnimation {
+                keys: vec![
+                    crate::animation::CameraKey {
+                        frame: 10,
+                        center: [100., 0.],
+                        zoom: 1.,
+                        angle: 0.,
+                        optics: None,
+                    },
+                    crate::animation::CameraKey {
+                        frame: 20,
+                        center: [200., 0.],
+                        zoom: 1.,
+                        angle: 0.,
+                        optics: None,
+                    },
+                ]
+                .into(),
+                ..Default::default()
+            },
+        });
+        let mut after = before.clone();
+        after.extras.cameras[0].animation.keys[1].center[0] = 300.;
+        assert!(frame_dependencies_equal(&before, &after, 5));
+        assert!(!frame_dependencies_equal(&before, &after, 15));
+        assert!(!frame_dependencies_equal(&before, &after, 23));
+    }
+    #[test]
+    fn an_edit_keeps_unrelated_prepared_frames() {
+        let mut before = crate::fresh_document();
+        before.layers[0].options.keys[1] = true;
+        before.layers[0].options.keys[2] = true;
+        let mut state = DepthEditor::default();
+        state.sync_document(&before);
+        let epoch = state.preview_epoch;
+        for f in 0..3 {
+            state.cached.push_back(CachedPreview {
+                key: vec![epoch, f, f, 10, 10],
+                pixels: vec![0; 300],
+                size: [10, 10],
+                texture: None,
+            });
+        }
+        let mut after = before.clone();
+        after.layers[0].frames[1].push(crate::Mark {
+            points: vec![[10., 10.], [20., 20.]].into(),
+            ..Default::default()
+        });
+        state.sync_document(&after);
+        assert_eq!(
+            state.cached.iter().map(|c| c.key[1]).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert!(state.cached.iter().all(|c| c.key[0] == state.preview_epoch));
+    }
+}
+
+fn preview_document(source: &Document, lights: bool, fx: bool, solo: Option<usize>) -> Document {
+    let mut doc = crate::animation::scene_doc(source, source.extras.active_scene);
+    if !lights || !fx || solo.is_some() {
+        for (index, layer) in doc.layers.iter_mut().enumerate() {
+            if !crate::post::is_adjustment(layer) {
+                continue;
+            }
+            let use_light = lights
+                && solo.is_none_or(|selected| selected == index)
+                && layer.options.light.is_some();
+            let use_fx = fx && layer.options.adjustment.is_some();
+            if !use_light && !use_fx {
+                layer.visible = false;
+            } else {
+                if !use_light {
+                    layer.options.light = None;
+                }
+                if !use_fx {
+                    layer.options.adjustment = None;
+                }
+            }
+        }
+    }
+    doc
+}
+
+#[cfg(test)]
+#[path = "gpu_viewport_tests.rs"]
+mod resident_integration_tests;

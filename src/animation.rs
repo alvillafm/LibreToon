@@ -4,7 +4,7 @@ use crate::{
     features::{Camera, Folder, Perspective},
     shared::SharedVec,
 };
-use eframe::egui::{Pos2, Vec2};
+use eframe::egui::{self, Pos2, Vec2};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -14,6 +14,63 @@ pub struct Curve {
     pub path: [[f32; 2]; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<Vec<[f32; 2]>>,
+    #[serde(skip_serializing_if = "channels_empty")]
+    pub channels: Channels,
+}
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Channels(Option<std::sync::Arc<[Option<ChannelCurve>; 5]>>);
+impl std::ops::Deref for Channels {
+    type Target = [Option<ChannelCurve>; 5];
+    fn deref(&self) -> &Self::Target {
+        static EMPTY: [Option<ChannelCurve>; 5] = [None, None, None, None, None];
+        self.0.as_deref().unwrap_or(&EMPTY)
+    }
+}
+impl std::ops::DerefMut for Channels {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::sync::Arc::make_mut(
+            self.0
+                .get_or_insert_with(|| std::sync::Arc::new(Default::default())),
+        )
+    }
+}
+fn channels_empty(channels: &Channels) -> bool {
+    channels.iter().all(Option::is_none)
+}
+/// Scalar channel timing, without recursive curves or document references.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelCurve {
+    pace: [f32; 2],
+    ease: [[f32; 2]; 2],
+    timing: Option<Vec<[f32; 2]>>,
+}
+impl ChannelCurve {
+    fn from_curve(curve: &Curve) -> Self {
+        Self {
+            pace: curve.pace,
+            ease: curve.ease,
+            timing: curve.timing.clone(),
+        }
+    }
+    fn curve(&self) -> Curve {
+        Curve {
+            pace: self.pace,
+            ease: self.ease,
+            timing: self.timing.clone(),
+            ..Default::default()
+        }
+    }
+    fn sample(&self, t: f32) -> f32 {
+        let base = Curve {
+            pace: self.pace,
+            ease: self.ease,
+            ..Default::default()
+        };
+        self.timing
+            .as_ref()
+            .map_or_else(|| base.time(t), |points| base.direct_time(t, points))
+    }
 }
 impl Default for Curve {
     fn default() -> Self {
@@ -22,10 +79,35 @@ impl Default for Curve {
             ease: [[1. / 3., 1. / 3.], [2. / 3., 2. / 3.]],
             path: [[0., 0.], [0., 0.]],
             timing: None,
+            channels: Default::default(),
         }
     }
 }
 impl Curve {
+    #[cfg(test)]
+    pub fn channel_time(&self, channel: usize, t: f32) -> f32 {
+        self.channels
+            .get(channel)
+            .and_then(Option::as_ref)
+            .map_or_else(|| self.time(t), |curve| curve.sample(t))
+    }
+    pub fn channel_time_or(&self, channel: usize, t: f32, shared: f32) -> f32 {
+        self.channels
+            .get(channel)
+            .and_then(Option::as_ref)
+            .map_or(shared, |curve| curve.sample(t))
+    }
+    pub fn channel_point(&self, a: Pos2, b: Pos2, raw_t: f32) -> Pos2 {
+        self.channel_point_at(a, b, raw_t, self.time(raw_t))
+    }
+    pub fn channel_point_at(&self, a: Pos2, b: Pos2, raw_t: f32, shared: f32) -> Pos2 {
+        if self.channels[0].is_none() && self.channels[1].is_none() {
+            return self.point(a, b, shared);
+        }
+        let x = self.point(a, b, self.channel_time_or(0, raw_t, shared)).x;
+        let y = self.point(a, b, self.channel_time_or(1, raw_t, shared)).y;
+        Pos2::new(x, y)
+    }
     pub fn time(&self, t: f32) -> f32 {
         if let Some(points) = &self.timing {
             return self.direct_time(t, points);
@@ -162,21 +244,26 @@ impl Curve {
             + (b - a) * (t * t * t)
     }
     pub fn valid(&self) -> bool {
-        self.timing.as_ref().is_none_or(|points| {
-            points.len() <= 32
-                && points.iter().all(|p| {
-                    p.iter().all(|v| v.is_finite())
-                        && p[0] > 0.
-                        && p[0] < 1.
-                        && (0. ..=1.).contains(&p[1])
-                })
-                && points
-                    .windows(2)
-                    .all(|p| p[0][0] < p[1][0] && p[0][1] <= p[1][1])
-        }) && self
-            .pace
+        self.channels
             .iter()
-            .all(|v| v.is_finite() && (0. ..=1.).contains(v))
+            .flatten()
+            .all(|channel| channel.curve().valid())
+            && self.timing.as_ref().is_none_or(|points| {
+                points.len() <= 32
+                    && points.iter().all(|p| {
+                        p.iter().all(|v| v.is_finite())
+                            && p[0] > 0.
+                            && p[0] < 1.
+                            && (0. ..=1.).contains(&p[1])
+                    })
+                    && points
+                        .windows(2)
+                        .all(|p| p[0][0] < p[1][0] && p[0][1] <= p[1][1])
+            })
+            && self
+                .pace
+                .iter()
+                .all(|v| v.is_finite() && (0. ..=1.).contains(v))
             && self
                 .ease
                 .iter()
@@ -247,6 +334,7 @@ pub struct MotionBend {
 }
 #[derive(Default)]
 pub struct State {
+    shape_diagnostic: Option<(usize, usize, usize)>,
     pub(crate) tween_drag: Option<crate::tween_edit::Drag>,
     pub clock: usize,
     pub(crate) annotation: Option<crate::dialogue::Draft>,
@@ -257,6 +345,7 @@ pub struct State {
     pub(crate) exposure_sheet: bool,
     pub(crate) graph_open: bool,
     graph_selected: usize,
+    graph_channel: Option<usize>,
     graph_handle: Option<usize>,
     graph_transaction: bool,
     pub(crate) rig_channels_open: bool,
@@ -278,6 +367,11 @@ pub struct State {
 }
 #[derive(Clone, Copy)]
 enum GraphTarget {
+    Pin {
+        binding: usize,
+        pin: usize,
+        key: usize,
+    },
     Drawing {
         layer: usize,
         tween: usize,
@@ -299,7 +393,7 @@ enum GraphTarget {
 }
 
 impl Editor {
-    pub(crate) fn animation_graph_ui(&mut self, ctx: &eframe::egui::Context) {
+    pub(crate) fn animation_graph_ui(&mut self, ctx: &eframe::egui::Context, canvas: egui::Rect) {
         use crate::{
             design::{Icon, button},
             i18n::tr,
@@ -309,6 +403,7 @@ impl Editor {
         if self.hub.home || !self.animation.graph_open {
             return;
         }
+        let rig_clock = self.group_rig_frame();
         let drawing_layer = self
             .canvas
             .selected
@@ -407,7 +502,34 @@ impl Editor {
                     active_layer.name.as_str(),
                 )
             });
-        let targets = [drawing, camera, bone, light, effects];
+        let pin = self
+            .rigging
+            .target
+            .zip(self.rigging.pin)
+            .and_then(|(target, id)| {
+                let binding = self
+                    .doc
+                    .extras
+                    .rig
+                    .bindings
+                    .iter()
+                    .position(|b| b.target == target)?;
+                let pins = &self.doc.extras.rig.bindings[binding].pins;
+                let pin = pins.iter().position(|p| p.id == id)?;
+                let key = pins[pin].keys.iter().rposition(|k| k.frame <= rig_clock)?;
+                let first = &pins[pin].keys[key];
+                let frames = pins[pin]
+                    .keys
+                    .get(key + 1)
+                    .map_or(1, |last| last.frame - first.frame + 1);
+                Some((
+                    GraphTarget::Pin { binding, pin, key },
+                    &first.curve,
+                    frames,
+                    pins[pin].name.as_str(),
+                ))
+            });
+        let targets = [drawing, camera, bone, light, effects, pin];
         let mut open = true;
         let mut edit = None;
         if !ctx.input(|input| input.pointer.primary_down()) {
@@ -417,6 +539,12 @@ impl Editor {
             .id(egui::Id::unique("animation-graph"))
             .open(&mut open)
             .default_width(390.)
+            .default_height(500.)
+            .default_pos(canvas.left_top() + Vec2::splat(12.))
+            .constrain_to(canvas)
+            .max_width((canvas.width() - 24.).max(120.))
+            .max_height((canvas.height() - 32.).max(48.))
+            .vscroll(true)
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for (index, (icon, name)) in [
@@ -425,6 +553,7 @@ impl Editor {
                         (Icon::Bones, "Bone"),
                         (Icon::Bulb, "Light"),
                         (Icon::Fx, "Adjustment layer"),
+                        (Icon::Pin, "Puppet pin"),
                     ]
                     .into_iter()
                     .enumerate()
@@ -432,14 +561,15 @@ impl Editor {
                         if button(
                             ui,
                             icon,
+                            if index == self.animation.graph_selected { name } else { "" },
                             name,
-                            "",
                             index == self.animation.graph_selected,
                             true,
                         )
                         .clicked()
                         {
                             self.animation.graph_selected = index;
+                            self.animation.graph_channel = None;
                             self.animation.graph_handle = None;
                             self.animation.graph_transaction = false;
                         }
@@ -448,12 +578,65 @@ impl Editor {
                 if let Some((target, old, frames, name)) = targets[self.animation.graph_selected] {
                     ui.label(name);
                     let mut curve = old.clone();
-                    crate::visual_controls::timing_controls(
-                        ui,
-                        &mut curve,
-                        &mut self.animation.graph_handle,
-                        frames,
-                    );
+                    let phase = match target {
+                        GraphTarget::Drawing { layer, .. } => segment(&self.doc.layers[layer], self.frame).map(|(a, b, _)| (self.frame - a) as f32 / (b - a).max(1) as f32),
+                        GraphTarget::Camera(index) => {
+                            let camera = &self.doc.extras.cameras[index];
+                            let local = self.frame.saturating_sub(camera.start).min(camera.duration - 1);
+                            let a = camera.animation.keys.iter().rev().find(|key| key.frame <= local).map_or(0, |key| key.frame);
+                            camera.animation.keys.iter().find(|key| key.frame > local).map(|b| (local - a) as f32 / (b.frame - a).max(1) as f32)
+                        }
+                        GraphTarget::Bone { bone, key } => Some(rig_clock.saturating_sub(self.doc.extras.rig.bones[bone].keys[key].frame) as f32 / frames.saturating_sub(1).max(1) as f32),
+                        GraphTarget::Light { frame, .. } => Some(self.frame.saturating_sub(frame) as f32 / frames.saturating_sub(1).max(1) as f32),
+                        GraphTarget::Pin { binding, pin, key } => Some(rig_clock.saturating_sub(self.doc.extras.rig.bindings[binding].pins[pin].keys[key].frame) as f32 / frames.saturating_sub(1).max(1) as f32),
+                        _ => None,
+                    };
+                    let labels: &[&str] = match target {
+                        GraphTarget::Drawing { layer, tween } if !self.doc.layers[layer].options.tweens[tween].shape => &["Position X", "Position Y", "Rotation", "Scale X", "Scale Y"],
+                        GraphTarget::Camera(_) => &["Position X", "Position Y", "Rotation", "Zoom"],
+                        GraphTarget::Bone { .. } => &["Position X", "Position Y", "Rotation", "Scale", "Stretch"],
+                        GraphTarget::Pin { .. } => &["Position X", "Position Y"],
+                        _ => &[],
+                    };
+                    if !labels.is_empty() {
+                        let previous = self.animation.graph_channel;
+                        egui::ComboBox::from_id_salt("graph-property-channel")
+                            .selected_text(self.animation.graph_channel.and_then(|i| labels.get(i)).map_or(tr("Shared timing"), |label| tr(label)))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.animation.graph_channel, None, tr("Shared timing"));
+                                for (index, label) in labels.iter().enumerate() {
+                                    ui.selectable_value(&mut self.animation.graph_channel, Some(index), tr(label));
+                                }
+                            });
+                        if previous != self.animation.graph_channel {
+                            self.animation.graph_handle = None;
+                            self.animation.graph_transaction = false;
+                        }
+                    } else {
+                        self.animation.graph_channel = None;
+                    }
+                    if let Some(channel) = self.animation.graph_channel {
+                        let mut custom = curve.channels[channel].is_some();
+                        if ui.checkbox(&mut custom, tr("Independent channel curve")).changed() {
+                            curve.channels[channel] = custom.then(|| ChannelCurve::from_curve(&curve));
+                        }
+                        let mut scalar = curve.channels[channel].as_ref().map_or_else(|| {
+                            let mut shared = curve.clone();
+                            shared.channels = Default::default();
+                            shared
+                        }, ChannelCurve::curve);
+                        ui.add_enabled_ui(custom, |ui| {
+                            crate::visual_controls::timing_controls_at(ui, &mut scalar, &mut self.animation.graph_handle, frames, phase);
+                        });
+                        if custom {
+                            curve.channels[channel] = Some(ChannelCurve::from_curve(&scalar));
+                        }
+                        ui.small(tr("Other channels keep their timing. Disable the override to follow Shared timing again."));
+                    } else {
+                        let channels = curve.channels.clone();
+                        crate::visual_controls::timing_controls_at(ui, &mut curve, &mut self.animation.graph_handle, frames, phase);
+                        curve.channels = channels;
+                    }
                     if curve != *old {
                         edit = Some((target, curve));
                     }
@@ -470,6 +653,9 @@ impl Editor {
             }
             self.animation.graph_transaction = self.animation.graph_handle.is_some();
             match target {
+                GraphTarget::Pin { binding, pin, key } => {
+                    self.doc.extras.rig.bindings[binding].pins[pin].keys[key].curve = curve;
+                }
                 GraphTarget::Drawing { layer, tween } => {
                     self.doc.layers[layer].options.tweens[tween].curve = curve
                 }
@@ -650,15 +836,19 @@ pub fn shortest(angle: f32) -> f32 {
     (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 pub fn interpolate(a: &Mark, b: &Mark, t: f32, curve: &Curve) -> Mark {
+    let raw_t = t;
     let t = curve.time(t);
     let center = crate::vector::control_bounds(a).center();
     let target = crate::vector::control_bounds(b).center();
-    let position = curve.point(center, target, t);
+    let position = curve.channel_point_at(center, target, raw_t, t);
     let m = delta(a, b);
     let sx = Vec2::new(m[0], m[1]).length().max(0.00001);
     let sy = (m[0] * m[3] - m[1] * m[2]) / sx;
-    let angle = shortest(m[1].atan2(m[0])) * t;
-    let scale = Vec2::new(1. + (sx - 1.) * t, 1. + (sy - 1.) * t);
+    let angle = shortest(m[1].atan2(m[0])) * curve.channel_time_or(2, raw_t, t);
+    let scale = Vec2::new(
+        1. + (sx - 1.) * curve.channel_time_or(3, raw_t, t),
+        1. + (sy - 1.) * curve.channel_time_or(4, raw_t, t),
+    );
     let mut out = crate::vector::transform(a, |p| {
         position + crate::canvas::rotate((p - center) * scale, angle)
     });
@@ -779,6 +969,121 @@ pub(crate) fn shape_pair_with(
         })
 }
 
+pub(crate) fn shape_diagnostics(
+    first: &[Mark],
+    last: &[Mark],
+) -> Vec<(Option<usize>, Vec<&'static str>)> {
+    let mut rows = Vec::new();
+    if first.is_empty() || last.is_empty() {
+        rows.push((None, vec!["Both keyframes need vector artwork."]));
+    }
+    if first.len() != last.len() {
+        rows.push((None, vec!["The keyframes have different object counts."]));
+    }
+    for (index, (a, b)) in first.iter().zip(last).enumerate().take(200) {
+        if shape_pair(std::slice::from_ref(a), std::slice::from_ref(b)) {
+            continue;
+        }
+        let mut reasons = Vec::new();
+        if [a, b].iter().any(|m| {
+            m.style.instance.is_some()
+                || m.style.media_image.is_some()
+                || m.style.text.is_some()
+                || m.style.raster_tile
+                || m.style.guide
+        }) {
+            reasons.push("Convert symbols, text or images to editable vector artwork first.");
+        }
+        if a.style.track != 0 && b.style.track != 0 && a.style.track != b.style.track {
+            reasons.push("These objects belong to different tracks; match their object order.");
+        }
+        if a.nodes.len() != b.nodes.len() || a.points.len() != b.points.len() {
+            reasons.push("The paths have different node or point counts.");
+        }
+        if a.closed != b.closed || a.rectangle != b.rectangle {
+            reasons.push("One path is open or uses a different primitive type.");
+        }
+        if a.stroke != b.stroke || a.fill.is_some() != b.fill.is_some() {
+            reasons.push("Fill and stroke channels do not match.");
+        }
+        if a.holes.len() != b.holes.len()
+            || a.holes
+                .iter()
+                .zip(b.holes.iter())
+                .any(|(a, b)| a.len() != b.len())
+        {
+            reasons.push("The holes have different boundaries or point counts.");
+        }
+        if a.width_profile.len() != b.width_profile.len() {
+            reasons.push("The variable-width profiles have different stop counts.");
+        }
+        for (ga, gb) in [
+            (a.style.gradient.as_ref(), b.style.gradient.as_ref()),
+            (
+                a.style.stroke_gradient.as_ref(),
+                b.style.stroke_gradient.as_ref(),
+            ),
+        ] {
+            if !match (ga, gb) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.radial == b.radial && a.stops.len() == b.stops.len(),
+                _ => false,
+            } {
+                reasons.push("Gradient types or stop counts do not match.");
+                break;
+            }
+        }
+        if reasons.is_empty() {
+            reasons.push("This path has no editable geometry.");
+        }
+        rows.push((Some(index), reasons));
+    }
+    rows
+}
+impl Editor {
+    pub(crate) fn shape_diagnostic_ui(&mut self, ctx: &egui::Context) {
+        let Some((layer, start, end)) = self.animation.shape_diagnostic else {
+            return;
+        };
+        let Some(drawing) = self.doc.layers.get(layer).filter(|l| end < l.frames.len()) else {
+            self.animation.shape_diagnostic = None;
+            return;
+        };
+        let rows = shape_diagnostics(&drawing.frames[start], &drawing.frames[end]);
+        let mut open = true;
+        let mut select = None;
+        egui::Window::new(crate::i18n::tr("Shape Tween diagnostics")).open(&mut open).default_width(480.).show(ctx, |ui| {
+            ui.label(format!("{} · {} → {}", drawing.name, start+1, end+1));
+            ui.label(crate::i18n::tr("Duplicate a keyframe before editing nodes to preserve correspondence. Changes are never made automatically."));
+            egui::ScrollArea::vertical().max_height(280.).show(ui, |ui| {
+                for (index,reasons) in &rows {
+                    ui.group(|ui| {
+                        if let Some(index) = index {
+                            ui.strong(format!("{} {}", crate::i18n::tr("Object"), index+1));
+                            ui.horizontal(|ui| {
+                                if ui.button(crate::i18n::tr("Select first drawing")).clicked() { select = Some((start,*index)); }
+                                if ui.button(crate::i18n::tr("Select last drawing")).clicked() { select = Some((end,*index)); }
+                            });
+                        }
+                        for reason in reasons { ui.label(crate::i18n::tr(reason)); }
+                    });
+                }
+                if rows.is_empty() { ui.label(crate::i18n::tr("The drawings are compatible now. Create the Shape Tween again.")); }
+            });
+        });
+        if let Some((frame, index)) = select {
+            self.playing = false;
+            self.frame = frame;
+            self.layer = layer;
+            self.canvas.clear_selection();
+            self.canvas.selected = vec![(layer, index)];
+        }
+        if !open {
+            self.animation.shape_diagnostic = None;
+        }
+    }
+}
+
 pub(crate) fn morph(a: &Mark, b: &Mark, t: f32) -> Mark {
     let mix = |a: f32, b: f32| a + (b - a) * t;
     let point = |a: [f32; 2], b: [f32; 2]| std::array::from_fn(|i| mix(a[i], b[i]));
@@ -862,6 +1167,7 @@ impl Editor {
             return;
         }
         if !shape_pair(&drawing.frames[start], &drawing.frames[end]) {
+            self.animation.shape_diagnostic = Some((layer, start, end));
             self.status = crate::i18n::tr("Duplicate the first drawing and edit its nodes to create a compatible Shape Tween.").into();
             return;
         }
@@ -927,20 +1233,21 @@ pub fn camera_at(camera: &Camera, frame: usize) -> CameraKey {
         key.optics = Some(a.optics(camera));
         return key;
     };
-    let t = camera
-        .animation
-        .curve
-        .time((local - a.frame) as f32 / (b.frame - a.frame) as f32);
+    let raw_t = (local - a.frame) as f32 / (b.frame - a.frame) as f32;
+    let curve = &camera.animation.curve;
+    let t = curve.time(raw_t);
+    let zoom_t = curve.channel_time_or(3, raw_t, t);
     CameraKey {
         optics: Some(a.optics(camera).interpolate(&b.optics(camera), t)),
         frame: local,
-        center: crate::vector::xy(camera.animation.curve.point(
+        center: crate::vector::xy(curve.channel_point_at(
             crate::vector::pos(a.center),
             crate::vector::pos(b.center),
+            raw_t,
             t,
         )),
-        zoom: a.zoom * (1. - t) + b.zoom * t,
-        angle: a.angle + shortest(b.angle - a.angle) * t,
+        zoom: a.zoom * (1. - zoom_t) + b.zoom * zoom_t,
+        angle: a.angle + shortest(b.angle - a.angle) * curve.channel_time_or(2, raw_t, t),
     }
 }
 pub fn camera_record(camera: &mut Camera, key: CameraKey) {
@@ -1122,5 +1429,164 @@ impl Editor {
         } else {
             self.frame = (self.frame + steps) % self.doc.layers[0].frames.len();
         }
+    }
+}
+
+#[cfg(test)]
+mod independent_channel_tests {
+    use super::*;
+    fn delayed() -> ChannelCurve {
+        ChannelCurve {
+            pace: [1. / 3.; 2],
+            ease: Curve::default().ease,
+            timing: Some(vec![[0.5, 0.2]]),
+        }
+    }
+    fn drawings() -> (Mark, Mark) {
+        let a = Mark {
+            points: vec![[10., 10.], [50., 30.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([200, 40, 80, 255]),
+            ..Default::default()
+        };
+        let center = crate::vector::control_bounds(&a).center();
+        let b = crate::vector::transform(&a, |p| {
+            center + (p - center) * Vec2::new(2., 3.) + Vec2::new(100., 200.)
+        });
+        (a, b)
+    }
+    #[test]
+    fn independent_x_does_not_change_y_or_scale_and_native_roundtrips() {
+        let (a, b) = drawings();
+        let mut curve = Curve::default();
+        let baseline = crate::vector::control_bounds(&interpolate(&a, &b, 0.5, &curve));
+        curve.channels[0] = Some(delayed());
+        assert!(curve.valid());
+        let changed = crate::vector::control_bounds(&interpolate(&a, &b, 0.5, &curve));
+        assert!((changed.center().x - 50.).abs() < 0.01);
+        assert!((changed.center().y - baseline.center().y).abs() < 0.01);
+        assert!((changed.width() - baseline.width()).abs() < 0.01);
+        assert!((changed.height() - baseline.height()).abs() < 0.01);
+        let mut doc = crate::fresh_document();
+        let count = doc.layers[0].frames.len();
+        doc.layers[0].options.keys = vec![false; count].into();
+        doc.layers[0].options.keys[0] = true;
+        doc.layers[0].options.keys[10] = true;
+        doc.layers[0].frames[0] = vec![a].into();
+        doc.layers[0].frames[10] = vec![b].into();
+        doc.layers[0].options.tweens = vec![Tween {
+            start: 0,
+            end: 10,
+            shape: false,
+            curve,
+        }]
+        .into();
+        let restored =
+            crate::native_project::decode_if_native(&crate::native_project::encode(&doc).unwrap())
+                .unwrap()
+                .unwrap();
+        assert!(
+            doc.layers[0].options.tweens[0].curve == restored.layers[0].options.tweens[0].curve
+        );
+        assert!(marks(&doc.layers[0], 5) == marks(&restored.layers[0], 5));
+    }
+    #[test]
+    fn legacy_curves_keep_identical_evaluation_and_invalid_channel_is_rejected() {
+        let legacy: Curve = serde_json::from_str(
+            r#"{"pace":[0.2,0.6],"ease":[[0.1,0.3],[0.8,0.9]],"path":[[4,8],[20,-10]]}"#,
+        )
+        .unwrap();
+        for i in 0..=100 {
+            let t = i as f32 / 100.;
+            for channel in 0..5 {
+                assert_eq!(legacy.channel_time(channel, t), legacy.time(t));
+            }
+            assert_eq!(
+                legacy.channel_point(Pos2::ZERO, Pos2::new(100., 200.), t),
+                legacy.point(Pos2::ZERO, Pos2::new(100., 200.), legacy.time(t))
+            );
+        }
+        let mut bad = legacy;
+        bad.channels[2] = Some(delayed());
+        bad.channels[2].as_mut().unwrap().timing.as_mut().unwrap()[0][0] = f32::NAN;
+        assert!(!bad.valid());
+    }
+    #[test]
+    #[ignore = "headless graph UI visual QA; use isolated LOCALAPPDATA"]
+    fn independent_channel_graph_visual_qa() {
+        assert!(
+            std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap())
+                .ends_with("manual-sandbox")
+        );
+        let mut doc = crate::fresh_document();
+        doc.width = 1280;
+        doc.height = 720;
+        doc.layers.truncate(1);
+        let a = Mark {
+            points: vec![[800., 200.], [1000., 450.]].into(),
+            rectangle: true,
+            closed: true,
+            fill: Some([120, 80, 220, 255]),
+            ..Default::default()
+        };
+        let b = crate::vector::transform(&a, |p| p + Vec2::new(100., 100.));
+        let count = doc.layers[0].frames.len();
+        doc.layers[0].frames.fill(vec![a.clone()].into());
+        doc.layers[0].frames[10] = vec![b].into();
+        doc.layers[0].options.keys = vec![false; count].into();
+        doc.layers[0].options.keys[0] = true;
+        doc.layers[0].options.keys[10] = true;
+        let mut curve = Curve::default();
+        curve.channels[0] = Some(delayed());
+        doc.layers[0].options.tweens = vec![Tween {
+            start: 0,
+            end: 10,
+            shape: false,
+            curve,
+        }]
+        .into();
+        crate::manual_visuals::screenshot_setup(
+            doc,
+            5,
+            crate::canvas::Tool::Select,
+            false,
+            std::path::Path::new("target/qa/channel-graph.png"),
+            |_, editor| {
+                editor.canvas.selected = vec![(0, 0)];
+                editor.animation.graph_open = true;
+                editor.animation.graph_channel = Some(0);
+            },
+        );
+    }
+
+    #[test]
+    fn camera_channels_do_not_change_other_properties() {
+        let mut camera = Camera {
+            id: 1,
+            name: "Camera".into(),
+            start: 0,
+            duration: 11,
+            center: [0., 0.],
+            zoom: 1.,
+            angle: 0.,
+            optics: Default::default(),
+            animation: Default::default(),
+        };
+        camera.animation.keys = vec![CameraKey {
+            frame: 10,
+            center: [100., 200.],
+            zoom: 3.,
+            angle: 1.,
+            optics: None,
+        }]
+        .into();
+        let baseline = camera_at(&camera, 5);
+        camera.animation.curve.channels[0] = Some(delayed());
+        let result = camera_at(&camera, 5);
+        assert!((result.center[0] - 20.).abs() < 0.01);
+        assert_eq!(result.center[1], baseline.center[1]);
+        assert_eq!(result.angle, baseline.angle);
+        assert_eq!(result.zoom, baseline.zoom);
     }
 }

@@ -1,3 +1,21 @@
+# Cambios de rendimiento en curso · 23 de noviembre de 2026
+
+Actualización del 24 de noviembre: caché de caras/barreras del bote por geometría, cálculo de rellenos complejos de un clic fuera del hilo UI y presupuesto conjunto configurable de imágenes residentes GPU (cuadros, capas y normales). La comprobación de admisión de un recurso ya no suma toda la biblioteca. Las cachés no alteran la geometría ni la resolución de exportación.
+
+Ampliación del 24 de noviembre: los cuadros residentes GPU no afectados también sobreviven a ediciones locales. Los cambios de cámara se comparan con su estado evaluado por fotograma; FPS y escena forman parte de la identidad. Símbolos y rig todavía invalidan conservadoramente. Los canales de aceleración independientes usan metadatos COW asignados solo al activarlos; los documentos anteriores no crean cinco curvas por clave. La evaluación reutiliza el tiempo compartido cuando no hay override.
+
+El estado de aplicación de los 45 puntos está en `docs/AUDIT_IMPLEMENTATION.md`. Los apartados antiguos de este documento son mediciones históricas y no describen por sí solos la aplicación actual.
+
+- El guardado nativo grande y su apertura utilizan ZIP64 por bloques; ya no hay techo agregado de 256 MiB. Se mantienen las comprobaciones estructurales y por recurso individual.
+- La caché de cuadros conserva resultados cuya dependencia por fotograma no cambia; los cambios globales aún invalidan de forma conservadora.
+- La selección conectada y el cierre de huecos usan un índice espacial acotado. La alineación de nodos agrupa las escrituras por trazado.
+- El viewport compatible presenta buffers GPU directamente, con preparación geométrica en segundo plano y caché residente de cuadros acotada. Exportación/preparación RAM conservan lectura cuando la necesitan. La nueva ruta se comprueba con el renderer real de egui y capturas GPU de prueba.
+- El historial admite un presupuesto configurable de geometría/recursos adicionales estimados. El recuento reconoce datos COW compartidos y se calcula en segundo plano. No representa toda la RAM del proceso ni la VRAM.
+- Sincronizar repetidamente la misma exposición sin cambios evita recorrer todas las capas.
+- `benchmark_production_scenes` mide evaluación completa y evaluación repetida a resolución nativa, con p50/p95/p99 y CRC de los píxeles. Incluye tres escenas integradas y acepta `LIBRETOON_BENCH_PROJECT`; `LIBRETOON_BENCH_GPU=1` solicita GPU. Ejecutar en release con `cargo test --release --locked benchmark_production_scenes -- --ignored --nocapture --test-threads=1`. Guarda resultados en `target/qa/production-benchmark-*.json`. Estos tiempos incluyen la lectura GPU→CPU actual; no son FPS de la interfaz.
+
+---
+
 # Base de rendimiento
 
 Esta iteración reduce trabajo durante la edición sin cambiar el formato de los proyectos. No constituye una comparación con Adobe Animate.
@@ -318,3 +336,32 @@ Para repetir, definir `LIBRETOON_BENCHMARK_PROJECT` y ejecutar `cargo test --rel
 Los errores del trabajador GPU se capturan y se repite ese fotograma por CPU con una caché limpia. Si también falla la CPU, se muestra el error y no se reintenta la misma solicitud en cada repintado; cambiar de fotograma o de generación permite reintentar. Las regresiones cubren el canal desconectado, el fallo simulado GPU y el compositor asíncrono con la interfaz repintándose. La comprobación local con DBGT-Rebuild-v1 no reproduce un bloqueo permanente en 0 %; otros casos requieren su proyecto o el error mostrado.
 
 Un trabajador GPU que no termina en diez segundos se cancela y se desacopla de su caché. Los siguientes fotogramas usan una caché nueva por CPU: nunca esperan al mutex retenido por un trabajador bloqueado. Se limita esta recuperación a una vez por contexto; no se crean trabajadores GPU ilimitados. La regresión simula una caché retenida por el controlador y comprueba que el render CPU puede terminar sin adquirirla.
+
+## Medición integrada · 23 de noviembre de 2026
+
+Windows x64, perfil release, tres escenas integradas a 960 × 540, 16 muestras distribuidas por escena y una repetición de cada muestra. La prueba confirma igualdad de píxeles entre primera evaluación y repetición en cada backend. La paridad GPU/CPU se comprueba por separado con tolerancia; sus CRC no tienen por qué coincidir.
+
+| Escena | CPU repetida p50 / p95 | GPU con lectura a RAM repetida p50 / p95 |
+| --- | ---: | ---: |
+| Pip · Wave rig | 20.98 / 21.44 ms | 2.68 / 3.27 ms |
+| Woodland · Focus pull | 202.36 / 208.83 ms | 5.11 / 14.23 ms |
+| Orbit · Live lighting | 40.00 / 40.82 ms | 1.79 / 1.93 ms |
+
+Estos datos comparan los dos backends de este árbol, **no el programa antes y después de la auditoría**. No miden la interfaz, latencia de entrada, 1080p/4K ni un proyecto complejo del usuario. La primera evaluación GPU puede incluir compilación de pipelines (máximos de esta ejecución: 25–134 ms). Con 16 muestras, p95 y p99 coinciden con el máximo observado; no son garantías de latencia. Informes completos en `target/qa/production-benchmark-cpu.json` y `target/qa/production-benchmark-gpu.json`.
+
+
+## Presentación directa del viewport
+
+`gpu_present` compone sobre el dispositivo de egui exclusivamente durante `CallbackTrait::prepare`, evitando que los scopes de validación del compositor y la interfaz se intercalen desde hilos distintos. El cálculo de geometría usa el ejecutor de fondo. La salida se dibuja directamente desde su buffer de almacenamiento, con filtrado bilineal y tratamiento gamma/sRGB equivalente. No se mapea a CPU ni se sube otra textura para cada cuadro interactivo.
+
+Pruebas: 18 comparaciones con el resultado GPU previo, en tres ejemplos y dos formatos de framebuffer (diferencia observada: 0); integración con el renderer real de egui, cambio de fotogramas, caché residente, preparación de cuadros en RAM y fallback simulado. El contador de lecturas de escena a CPU permanece en cero durante la edición interactiva comprobada. El archivo de prueba DBGT-Rebuild-v1 se abre únicamente para lectura.
+
+Benchmark completo sin ventana: `LIBRETOON_VIEWPORT_BENCH=1`, opcionalmente `LIBRETOON_VIEWPORT_PROJECT=<archivo.ltoon>`, y `cargo test --release --locked viewport_uses_shared_device_callbacks_without_readback_and_recovers -- --ignored --nocapture --test-threads=1`. Incluye actualización de UI, preparación de geometría, composición, dibujo y espera de finalización GPU; excluye la presentación/vsync del monitor y la latencia física de entrada. Escribe `target/qa/gpu-viewport-benchmark.json`.
+
+Resultado release del 23 de noviembre: RTX 2060/Vulkan, DBGT-Rebuild-v1, viewport de prueba 1360 × 860, composición 1920 × 1080 y 16 cuadros. Con pipelines calientes, cuadros nuevos: p50 14,50 ms y p95/p99 25,41 ms. Repetición residente: p50 0,94 ms y p95/p99 1,81 ms. Cero lecturas de escena a RAM. Estas muestras no incluyen vsync ni constituyen una garantía de FPS en otras escenas o equipos.
+
+## Guardado y apertura nativos · 24 de noviembre de 2026
+
+`cargo test --release --locked benchmark_native_storage -- --ignored --nocapture --test-threads=1` mide ocho escrituras con flush/sync y ocho aperturas por proyecto. `LIBRETOON_BENCH_PROJECT` añade un proyecto de solo lectura; las salidas se crean y eliminan exclusivamente en `target/qa`. Informe completo: `target/qa/storage-benchmark.json`.
+
+En DBGT-Rebuild-v1: archivo de salida 4.084.680 bytes, escritura/sincronización p50 444,41 ms / p95 588,77 ms; apertura p50 189,53 ms / p95 202,95 ms. Se validan los documentos reabiertos y sus dimensiones, FPS, duración, capas y cantidades de símbolos/recursos. Es una medición del códec y E/S con caché del sistema operativo caliente; excluye publicación de versiones, conflictos, latencia de UI y no compara con una versión anterior. Los extremos p95/p99 coinciden con el máximo de ocho muestras.

@@ -217,8 +217,8 @@ impl Editor {
                 .filter(|mark| crate::features::object_visible(layer, mark, self.frame))
             {
                 if mark.style.media_image.is_some() {
-                    if let Some([r, g, b, _]) = self.doc.extras.media.image_pixel(mark, point) {
-                        let color = Color32::from_rgb(r, g, b);
+                    if let Some([r, g, b, a]) = self.doc.extras.media.image_pixel(mark, point) {
+                        let color = Color32::from_rgba_unmultiplied(r, g, b, a);
                         if picker.is_none() {
                             self.color = color;
                             self.stroke_enabled = true;
@@ -230,20 +230,23 @@ impl Editor {
                 }
                 let stroke = crate::canvas::stroke_hit(mark, point, tolerance);
                 if stroke {
-                    let c = mark.color;
+                    let c = mark
+                        .style
+                        .stroke_gradient
+                        .as_ref()
+                        .map_or(mark.color, |g| g.color(point));
                     let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
                     if let Some(fill) = picker {
                         self.apply_picker_color(color, fill);
                         return None;
                     }
                     self.color = color;
-                    self.fill_color = color;
                     self.stroke_enabled = true;
                     self.active_fill = false;
                     self.width = mark.width;
                     self.width_profile = mark.width_profile.clone();
                     self.width_preset = crate::width::Preset::Custom;
-                    return None;
+                    return Some(mark.clone());
                 }
                 if crate::vector::contains_fill(mark, point) {
                     let c = mark
@@ -270,11 +273,15 @@ impl Editor {
             .rev()
             .filter(|(_, l)| l.visible && !l.options.locked)
             .find_map(|(l, layer)| {
-                layer.frames[self.frame]
+                crate::animation::marks(layer, self.frame)
                     .iter()
                     .enumerate()
                     .rev()
                     .find_map(|(m, mark)| {
+                        let point = self.depth_point(point, self.layer, l);
+                        if !crate::features::object_visible(layer, mark, self.frame) {
+                            return None;
+                        }
                         if crate::canvas::stroke_hit(mark, point, 3.) {
                             Some((l, m, false))
                         } else if crate::vector::contains_fill(mark, point) {
@@ -290,13 +297,14 @@ impl Editor {
         let Some((l, m, target_fill)) = found else {
             return;
         };
-        let reference = &self.doc.layers[l].frames[self.frame][m];
+        let evaluated = crate::animation::marks(&self.doc.layers[l], self.frame);
+        let reference = &evaluated[m];
         let color = if target_fill {
             reference.fill.unwrap()
         } else {
             reference.color
         };
-        let mut candidates: Vec<_> = self.doc.layers[l].frames[self.frame]
+        let mut candidates: Vec<_> = evaluated
             .iter()
             .enumerate()
             .filter_map(|(index, mark)| {
@@ -317,7 +325,22 @@ impl Editor {
             .collect();
         candidates.sort_unstable_by(|a, b| b.cmp(a));
         for m in candidates {
-            let id = self.separate_component(state, (l, m), !target_fill);
+            let id = (l, m);
+            let mark = &evaluated[m];
+            if mark.stroke && mark.fill.is_some() && !self.keeps_outline_fill(l, mark) {
+                let mut fill = mark.clone();
+                fill.stroke = false;
+                fill.style.stroke_gradient = None;
+                let mut stroke = mark.clone();
+                stroke.fill = None;
+                stroke.style.gradient = None;
+                let (outside, inside) = if target_fill {
+                    (stroke, fill)
+                } else {
+                    (fill, stroke)
+                };
+                state.partial.insert(id, (vec![outside], vec![inside]));
+            }
             if !state.selected.contains(&id) {
                 state.selected.push(id);
             }
@@ -550,7 +573,8 @@ impl Editor {
         strokes_only: bool,
     ) {
         use geo::{BooleanOps, Intersects};
-        let marks = &self.doc.layers[seed.0].frames[self.frame];
+        let evaluated = crate::animation::marks(&self.doc.layers[seed.0], self.frame);
+        let marks = &evaluated;
         let ink = |mark: &Mark| {
             let mut area = if !strokes_only && mark.fill.is_some() {
                 geo::MultiPolygon(vec![crate::vector::polygon(mark)])
@@ -562,6 +586,11 @@ impl Editor {
             }
             area
         };
+        let spatial = crate::spatial::Index::new(
+            marks
+                .iter()
+                .map(|mark| crate::vector::control_bounds(mark).expand(mark.width * 2. + 0.1)),
+        );
         let mut visited = vec![false; marks.len()];
         visited[seed.1] = true;
         let mut stack = vec![seed.1];
@@ -573,7 +602,7 @@ impl Editor {
                 .entry(index)
                 .or_insert_with(|| ink(&marks[index]))
                 .clone();
-            for j in 0..marks.len() {
+            for j in spatial.query(bounds) {
                 if visited[j]
                     || (strokes_only && !marks[j].stroke)
                     || !crate::features::object_visible(
@@ -606,6 +635,30 @@ impl Editor {
     pub fn tool_options_ui(&mut self, ui: &mut egui::Ui) {
         self.studio_tool_options(ui);
         match self.tool {
+            Tool::Eyedropper => {
+                crate::design::category(ui, "Sample");
+                ui.horizontal(|ui| {
+                    for (style, label) in [(false, "Color"), (true, "Copy style")] {
+                        if crate::design::button(
+                            ui,
+                            crate::design::Icon::Eyedropper,
+                            label,
+                            "",
+                            self.drawing.sample_style == style,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.drawing.sample_style = style;
+                        }
+                    }
+                });
+                ui.small(crate::i18n::tr(if self.active_fill {
+                    "Target: Fill"
+                } else {
+                    "Target: Stroke"
+                }));
+            }
             Tool::Zoom => {
                 ui.radio_value(&mut self.zoom_out, false, crate::i18n::tr("Acercar (+)"));
                 ui.radio_value(&mut self.zoom_out, true, crate::i18n::tr("Alejar (−)"));

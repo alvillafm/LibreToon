@@ -96,6 +96,28 @@ pub struct Key {
     pub manual: bool,
 }
 
+fn merge_suggestions(keys: &mut Vec<Key>, range: std::ops::Range<usize>, suggestions: Vec<Key>) {
+    if range.is_empty() {
+        return;
+    }
+    let resume = pose_at(keys, range.end).unwrap_or(0);
+    keys.retain(|key| key.manual || !range.contains(&key.frame));
+    let retained: std::collections::HashSet<_> = keys.iter().map(|key| key.frame).collect();
+    keys.extend(
+        suggestions
+            .into_iter()
+            .filter(|key| range.contains(&key.frame) && !retained.contains(&key.frame)),
+    );
+    if range.end < 10_000 && !keys.iter().any(|key| key.frame == range.end) {
+        keys.push(Key {
+            frame: range.end,
+            pose: resume,
+            manual: false,
+        });
+    }
+    keys.sort_by_key(|key| key.frame);
+}
+
 pub fn pose_at(keys: &[Key], frame: usize) -> Option<usize> {
     keys.get(
         keys.partition_point(|key| key.frame <= frame)
@@ -266,6 +288,54 @@ struct Target {
     drawn: Vec<bool>,
 }
 
+// Resolve the library drawing, not an evaluated scene instance. Character mouths
+// store each pose in eight view cells; ordinary mouth symbols use one frame.
+fn pose_source(doc: &crate::Document, slot: Slot, pose: usize) -> Option<(u64, usize, usize)> {
+    let symbol = doc
+        .extras
+        .symbols
+        .iter()
+        .find(|symbol| symbol.id == slot.symbol)?;
+    if let Some((index, layer)) = symbol.layers.iter().enumerate().find(|(_, layer)| {
+        layer
+            .options
+            .character_piece
+            .as_ref()
+            .is_some_and(|piece| piece.track == slot.track && piece.is_lip())
+    }) {
+        let piece = layer.options.character_piece.as_ref()?;
+        if pose >= piece.lip_poses.len() {
+            return None;
+        }
+        let first = (pose + 1) * 8;
+        let frame = (first..first + 8)
+            .find(|&frame| {
+                layer
+                    .frames
+                    .get(frame)
+                    .is_some_and(|marks| !marks.is_empty())
+            })
+            .unwrap_or(first);
+        return layer.frames.get(frame).map(|_| (symbol.id, index, frame));
+    }
+    if pose >= symbol.mouth_poses.len() {
+        return None;
+    }
+    let layer = symbol
+        .layers
+        .iter()
+        .position(|layer| {
+            layer.visible
+                && layer
+                    .frames
+                    .get(pose)
+                    .is_some_and(|marks| !marks.is_empty())
+        })
+        .unwrap_or(0);
+    symbol.layers.get(layer)?.frames.get(pose)?;
+    Some((symbol.id, layer, pose))
+}
+
 #[derive(Clone, Copy)]
 struct AnalysisOptions {
     sensitivity: f32,
@@ -428,6 +498,18 @@ impl Editor {
         });
     }
 
+    fn open_mouth_pose_source(&mut self, (symbol, layer, frame): (u64, usize, usize)) {
+        self.playing = false;
+        self.restart_media_audio();
+        let depth = self.feature.symbol_stack.len();
+        self.enter_symbol(symbol);
+        if self.feature.symbol_stack.len() == depth + 1 {
+            self.layer = layer;
+            self.frame = frame;
+            self.activate_tool(crate::canvas::Tool::Select);
+        }
+    }
+
     pub(crate) fn close_lip_session(&mut self) {
         self.lip.session = None;
         self.lip.preview_range = None;
@@ -449,6 +531,8 @@ impl Editor {
         let mut generate = false;
         let mut edit = None;
         let mut edit_frame = self.frame;
+        let mut lock_edit = None;
+        let mut source = None;
         let end = (session.audio.start + session.audio.length).min(self.doc.layers[0].frames.len());
         let start = session.audio.start;
         let mut run_preview = false;
@@ -501,6 +585,10 @@ impl Editor {
                             .unwrap_or(first)
                     });
                 let _ = self.symbol_thumbnail(ui, symbol, preview_frame, egui::vec2(100., 52.));
+                let destination = pose_source(&self.doc, target.path.last().copied().unwrap_or(target.root), pose);
+                if design::button(ui, Icon::Node, "Edit pose drawing", "Open the source mouth drawing; use Back to scene to return.", false, destination.is_some() && self.feature.symbol_stack.len() < 8).clicked() {
+                    source = destination;
+                }
                 let Some(artwork) = self
                     .doc
                     .layers
@@ -638,6 +726,17 @@ impl Editor {
                     }
                 }
                 ui.horizontal_wrapped(|ui| {
+                    for (icon, label, destination) in [
+                        (Icon::Previous, "Previous mouth key", keys.iter().rev().find(|key| key.frame < edit_frame).map(|key| (key.frame, key.pose))),
+                        (Icon::Next, "Next mouth key", keys.iter().find(|key| key.frame > edit_frame).map(|key| (key.frame, key.pose))),
+                    ] {
+                        if design::button(ui, icon, "", label, false, destination.is_some()).clicked()
+                            && let Some((frame, pose)) = destination
+                        {
+                            edit_frame = frame;
+                            session.pose = pose;
+                        }
+                    }
                     session.pose = session.pose.min(target.poses.len().saturating_sub(1));
                     egui::ComboBox::from_id_salt("dialogue-pose")
                         .selected_text(&target.poses[session.pose].name)
@@ -674,6 +773,15 @@ impl Editor {
                     )
                     .clicked();
                 });
+                if let Some(key) = keys.iter().find(|key| key.frame == edit_frame) {
+                    let mut locked = key.manual;
+                    if ui.checkbox(&mut locked, tr("Protect this mouth key from regeneration"))
+                        .on_hover_text(tr("Manual corrections are protected automatically. Unlock a key to let automated sync replace it within the phrase range."))
+                        .changed()
+                    {
+                        lock_edit = Some((key.frame, locked));
+                    }
+                }
                 design::category(ui, "AUTOMATED SYNC");
                 let empty = target.drawn.iter().filter(|&&drawn| !drawn).count();
                 if empty > 0 {
@@ -708,7 +816,13 @@ impl Editor {
                     ui,
                     Icon::Audio,
                     "Generate mouth keys",
-                    "",
+                    if self.lip.job.is_some() {
+                        "Wait for the current audio analysis to finish."
+                    } else if !target.drawn.iter().any(|&drawn| drawn) {
+                        "Draw at least one mouth pose before generating keys."
+                    } else {
+                        "Regenerate only this phrase; protected keys and other phrases are preserved."
+                    },
                     false,
                     self.lip.job.is_none() && target.drawn.iter().any(|&drawn| drawn),
                 )
@@ -724,12 +838,29 @@ impl Editor {
             }
             return;
         }
+        if let Some(destination) = source {
+            self.open_mouth_pose_source(destination);
+            return;
+        }
         if edit_frame != self.frame {
             self.frame = edit_frame;
             self.playing = false;
             self.scrub_media_audio(ctx);
         }
         if let Some(target) = session.targets.get(session.target) {
+            if let Some((frame, locked)) = lock_edit {
+                self.change_mouth_channel(
+                    target.root.layer,
+                    target.root.mark,
+                    session.frame,
+                    &target.path,
+                    |keys| {
+                        if let Some(key) = keys.iter_mut().find(|key| key.frame == frame) {
+                            key.manual = locked;
+                        }
+                    },
+                );
+            }
             if let Some((from, key)) = edit {
                 self.change_mouth_channel(
                     target.root.layer,
@@ -992,8 +1123,29 @@ impl Editor {
         let has_generated = mark.style.mouth_keys.iter().any(|key| !key.manual);
         let unlocked = !self.doc.layers[l].options.locked;
         design::category(ui, "LIPSYNC");
-        if design::button(ui, Icon::Node, "Editar símbolo", "", false, true).clicked() {
-            self.enter_symbol(symbol);
+        let source = pose_source(
+            &self.doc,
+            Slot {
+                layer: l,
+                mark: m,
+                symbol,
+                track: mark.style.track,
+            },
+            current,
+        );
+        if design::button(
+            ui,
+            Icon::Node,
+            "Edit pose drawing",
+            "Open the source mouth drawing; use Back to scene to return.",
+            false,
+            source.is_some() && self.feature.symbol_stack.len() < 8,
+        )
+        .clicked()
+        {
+            if let Some(source) = source {
+                self.open_mouth_pose_source(source);
+            }
             return true;
         }
         let previous = mark
@@ -1519,25 +1671,7 @@ impl Editor {
         match result {
             Ok(suggestions) => {
                 self.change_mouth_channel(job.layer, job.mark, job.frame, &job.path, |keys| {
-                    let resume = pose_at(keys, job.audio_end).unwrap_or(0);
-                    keys.retain(|key| {
-                        key.manual || !(job.audio_start..job.audio_end).contains(&key.frame)
-                    });
-                    let retained: std::collections::HashSet<_> =
-                        keys.iter().map(|key| key.frame).collect();
-                    keys.extend(
-                        suggestions
-                            .into_iter()
-                            .filter(|key| !retained.contains(&key.frame)),
-                    );
-                    if job.audio_end < 10_000 && !keys.iter().any(|key| key.frame == job.audio_end)
-                    {
-                        keys.push(Key {
-                            frame: job.audio_end,
-                            pose: resume,
-                            manual: false,
-                        });
-                    }
+                    merge_suggestions(keys, job.audio_start..job.audio_end, suggestions);
                 });
                 self.status = tr("Lip Sync keys generated.").into();
             }
@@ -2174,5 +2308,139 @@ mod tests {
         let resolved = crate::features::resolve(&decoded, 0, false);
         assert_eq!(crate::vector::control_bounds(&resolved[0].2).height(), 20.);
         assert_eq!(crate::vector::control_bounds(&resolved[1].2).height(), 10.);
+    }
+}
+
+#[cfg(test)]
+mod regeneration_tests {
+    use super::*;
+    #[test]
+    fn phrase_regeneration_retains_manual_keys_outside_keys_and_exit_pose() {
+        let mut keys: Vec<Key> = vec![
+            Key {
+                frame: 0,
+                pose: 0,
+                manual: false,
+            },
+            Key {
+                frame: 10,
+                pose: 3,
+                manual: true,
+            },
+            Key {
+                frame: 15,
+                pose: 4,
+                manual: false,
+            },
+            Key {
+                frame: 30,
+                pose: 6,
+                manual: false,
+            },
+        ]
+        .into();
+        merge_suggestions(
+            &mut keys,
+            8..20,
+            vec![
+                Key {
+                    frame: 18,
+                    pose: 7,
+                    manual: false,
+                },
+                Key {
+                    frame: 10,
+                    pose: 2,
+                    manual: false,
+                },
+                Key {
+                    frame: 9,
+                    pose: 1,
+                    manual: false,
+                },
+                Key {
+                    frame: 31,
+                    pose: 99,
+                    manual: false,
+                },
+            ],
+        );
+        assert!(
+            keys.iter()
+                .any(|key| key.frame == 10 && key.pose == 3 && key.manual)
+        );
+        assert!(!keys.iter().any(|key| key.frame == 15 || key.frame == 31));
+        assert_eq!(pose_at(&keys, 0), Some(0));
+        assert_eq!(pose_at(&keys, 9), Some(1));
+        assert_eq!(pose_at(&keys, 18), Some(7));
+        assert_eq!(pose_at(&keys, 20), Some(4));
+        assert_eq!(pose_at(&keys, 30), Some(6));
+        let before = serde_json::to_vec(&keys).unwrap();
+        merge_suggestions(&mut keys, 8..8, Vec::new());
+        assert_eq!(serde_json::to_vec(&keys).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod source_navigation_tests {
+    use super::*;
+    fn fixture() -> crate::Document {
+        let mut doc = crate::fresh_document();
+        let mut layer = doc.layers[0].clone();
+        layer.frames[2].push(crate::Mark {
+            points: vec![[1., 2.], [10., 20.]].into(),
+            ..Default::default()
+        });
+        doc.extras.symbols.push(crate::features::Symbol {
+            id: 1234,
+            name: "Mouth".into(),
+            layers: vec![layer].into(),
+            mouth_poses: vec!["Rest".into(), "A".into(), "O".into()].into(),
+            rig: Default::default(),
+            library_folder: None,
+            folders: Default::default(),
+            perspective: Default::default(),
+        });
+        doc
+    }
+    #[test]
+    fn source_navigation_opens_active_pose_and_returns_to_scene_frame() {
+        let ctx = egui::Context::default();
+        let mut editor = crate::Editor::new(&eframe::CreationContext::_new_kittest(ctx));
+        editor.doc = fixture();
+        editor.recovery =
+            std::env::temp_dir().join(format!("mouth-source-{}.ltoon", crate::features::id()));
+        editor.frame = 7;
+        let slot = Slot {
+            layer: 0,
+            mark: 0,
+            symbol: 1234,
+            track: 0,
+        };
+        let source = pose_source(&editor.doc, slot, 2).unwrap();
+        assert_eq!(source, (1234, 0, 2));
+        assert!(pose_source(&editor.doc, slot, 99).is_none());
+        editor.open_mouth_pose_source(source);
+        assert_eq!(editor.frame, 2);
+        assert_eq!(editor.feature.symbol_stack.len(), 1);
+        assert!(!editor.playing);
+        editor.exit_symbol();
+        assert_eq!(editor.frame, 7);
+        assert!(editor.feature.symbol_stack.is_empty());
+    }
+    #[test]
+    fn character_source_finds_drawn_view_and_correct_pose_block() {
+        let mut doc = fixture();
+        let layer = &mut doc.extras.symbols[0].layers[0];
+        layer.frames.iter_mut().for_each(|frame| frame.clear());
+        layer.frames[19].push(crate::Mark {
+            points: vec![[1., 2.], [10., 20.]].into(),
+            ..Default::default()
+        });
+        layer.options.character_piece = Some(serde_json::from_value(serde_json::json!({"track":77, "matrix":crate::rig::IDENTITY, "face":"Mouth", "lip_poses":[{"name":"Rest"},{"name":"O"}]})).unwrap());
+        let slot = character_mouth_slot(1234, 77);
+        assert_eq!(pose_source(&doc, slot, 1), Some((1234, 0, 19)));
+        assert_eq!(pose_source(&doc, slot, 0), Some((1234, 0, 8)));
+        assert!(pose_source(&doc, slot, 2).is_none());
     }
 }

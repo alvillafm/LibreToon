@@ -38,7 +38,7 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
         vec![
             ("mimetype", b"application/vnd.adobe.xfl"),
             ("DOMDocument.xml", xml.as_bytes()),
-            ("LIBRETOON/xfl-preview-v2", b"2"),
+            ("LIBRETOON/xfl-preview-v3", b"3"),
         ],
     )
 }
@@ -51,25 +51,57 @@ fn solid(color: [u8; 4]) -> String {
         color[3] as f32 / 255.
     )
 }
+fn paint_style(color: [u8; 4], gradient: Option<&crate::features::Gradient>) -> String {
+    let Some(g) = gradient else {
+        return solid(color);
+    };
+    let tag = if g.radial {
+        "RadialGradient"
+    } else {
+        "LinearGradient"
+    };
+    let divisor = if g.radial { 819.2 } else { 1638.4 };
+    let dx = (g.end[0] - g.start[0]) / divisor;
+    let dy = (g.end[1] - g.start[1]) / divisor;
+    let t = if g.radial {
+        g.start
+    } else {
+        [(g.start[0] + g.end[0]) * 0.5, (g.start[1] + g.end[1]) * 0.5]
+    };
+    let mut xml = format!(
+        "<{tag}><matrix><Matrix a=\"{dx}\" b=\"{dy}\" c=\"{}\" d=\"{dx}\" tx=\"{}\" ty=\"{}\"/></matrix>",
+        -dy, t[0], t[1]
+    );
+    for stop in &g.stops {
+        xml += &format!(
+            "<GradientEntry ratio=\"{}\" color=\"#{:02X}{:02X}{:02X}\" alpha=\"{}\"/>",
+            stop.t,
+            stop.color[0],
+            stop.color[1],
+            stop.color[2],
+            stop.color[3] as f32 / 255.
+        );
+    }
+    xml + &format!("</{tag}>")
+}
 fn document_xml(doc: &Document) -> String {
-    render_document_xml(doc, false)
+    render_document_xml_mode(doc, false, true)
 }
 fn render_document_xml(doc: &Document, legacy: bool) -> String {
+    render_document_xml_mode(doc, legacy, false)
+}
+fn render_document_xml_mode(doc: &Document, legacy: bool, native_gradients: bool) -> String {
+    let bake = |doc: &Document| crate::features::baked_mode(doc, native_gradients);
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?><DOMDocument xmlns=\"http://ns.adobe.com/xfl/2008/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" width=\"{}\" height=\"{}\" frameRate=\"{}\" backgroundColor=\"#FFFFFF\" xflVersion=\"2.97\" creatorInfo=\"LibreToon\" currentTimeline=\"1\"><timelines>",
         doc.width, doc.height, doc.fps
     );
     if legacy || doc.extras.scenes.is_empty() {
-        timeline_xml(&mut xml, &crate::features::baked(doc), "Escena 1", legacy);
+        timeline_xml(&mut xml, &bake(doc), "Escena 1", legacy);
     } else {
         for (index, scene) in doc.extras.scenes.iter().enumerate() {
             let scene_doc = crate::animation::scene_doc(doc, index);
-            timeline_xml(
-                &mut xml,
-                &crate::features::baked(&scene_doc),
-                &scene.name,
-                false,
-            );
+            timeline_xml(&mut xml, &bake(&scene_doc), &scene.name, false);
         }
     }
     xml += "</timelines></DOMDocument>";
@@ -129,7 +161,19 @@ fn timeline_xml(xml: &mut String, doc: &Document, name: &str, legacy: bool) {
             *xml += &format!(
                 "<DOMFrame index=\"{index}\" duration=\"{duration}\" keyMode=\"9728\"><elements>"
             );
-            let export_marks: Vec<_> = marks.iter().flat_map(crate::width::export_marks).collect();
+            let export_marks: Vec<_> = marks
+                .iter()
+                .flat_map(|m| {
+                    if m.width_profile.is_empty()
+                        && m.style.start_cap == crate::features::Cap::Round
+                        && m.style.end_cap == crate::features::Cap::Round
+                    {
+                        vec![m.clone()]
+                    } else {
+                        crate::width::export_marks(m)
+                    }
+                })
+                .collect();
             for mark in &export_marks {
                 let mut rings = vec![crate::vector::flatten(mark, 0.04)];
                 rings.extend(
@@ -144,14 +188,14 @@ fn timeline_xml(xml: &mut String, doc: &Document, name: &str, legacy: bool) {
                 if let Some(fill) = mark.fill {
                     *xml += &format!(
                         "<fills><FillStyle index=\"1\">{}</FillStyle></fills>",
-                        solid(fill)
+                        paint_style(fill, mark.style.gradient.as_ref())
                     );
                 }
                 if mark.stroke {
                     *xml += &format!(
                         "<strokes><StrokeStyle index=\"1\"><SolidStroke weight=\"{}\" caps=\"round\" joints=\"round\" scaleMode=\"none\"><fill>{}</fill></SolidStroke></StrokeStyle></strokes>",
                         mark.width,
-                        solid(mark.color)
+                        paint_style(mark.color, mark.style.stroke_gradient.as_ref())
                     );
                 }
                 *xml += "<edges>";
@@ -409,6 +453,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         let archive = crate::fla_zip::Archive::new(bytes)?;
         if let Ok(doc) = crate::native_project::restore(&archive, native) {
             if same_native_preview(&document_xml(&doc), &xml)
+                || same_native_preview(&render_document_xml(&doc, false), &xml)
                 || (archive
                     .entry(b"LIBRETOON/xfl-preview-v2")
                     .is_ok_and(|entry| entry.is_none())
@@ -939,6 +984,52 @@ mod legacy_fixture_tests {
             assert_eq!(a.name, b.name);
             assert_eq!(a.options.keys, b.options.keys);
             assert_eq!(a.frames.len(), b.frames.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_gradient_tests {
+    use super::*;
+    #[test]
+    fn visible_xfl_keeps_gradient_stops_without_polygon_grid() {
+        for radial in [false, true] {
+            let mut doc = Document::default();
+            let mut mark = Mark {
+                points: vec![[10., 10.], [100., 100.]].into(),
+                rectangle: true,
+                closed: true,
+                fill: Some([255; 4]),
+                width: 4.,
+                ..Default::default()
+            };
+            let mut gradient = crate::features::Gradient::default();
+            gradient.radial = radial;
+            gradient.start = [10., 10.];
+            gradient.end = [100., 30.];
+            mark.style.gradient = Some(gradient.clone());
+            mark.style.stroke_gradient = Some(gradient.clone());
+            doc.layers[0].frames[0].push(mark);
+            let xml = document_xml(&doc);
+            assert_eq!(xml.matches("<DOMShape").count(), 1);
+            assert!(xml.contains("GradientEntry"));
+            let mut copy = crate::xfl::import(
+                &crate::fla_zip::pack(&[("DOMDocument.xml", xml.as_bytes().to_vec())]),
+                &xml,
+            )
+            .unwrap();
+            let gradients = copy
+                .layers
+                .iter_mut()
+                .flat_map(|l| l.frames[0].iter_mut())
+                .flat_map(|m| m.style.gradients_mut())
+                .collect::<Vec<_>>();
+            assert!(!gradients.is_empty());
+            for g in gradients {
+                assert_eq!(g.stops, gradient.stops);
+                assert!((g.start[0] - gradient.start[0]).abs() < 0.01);
+                assert!((g.end[1] - gradient.end[1]).abs() < 0.01);
+            }
         }
     }
 }

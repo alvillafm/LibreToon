@@ -459,10 +459,13 @@ pub struct FeatureState {
     pub symbol_stack: Vec<(Document, usize, usize, u64)>,
     pub frame_selection: Option<(usize, usize, usize)>,
     pub(crate) bucket_range_armed: bool,
+    pub(crate) bucket_preview: bool,
     pub(crate) bucket_next: bool,
     pub(crate) bucket_link_outline: bool,
     pub(crate) bucket_next_count: usize,
     pub(crate) bucket_range: Option<crate::canvas::BucketRange>,
+    pub(crate) bucket_report: Vec<(usize, Option<String>)>,
+    pub(crate) bucket_report_open: bool,
     pub frame_drag: Option<FrameDrag>,
     pub exposure_drag: Option<crate::exposure_resize::Drag>,
     pub row_drag: Option<(bool, usize)>,
@@ -490,10 +493,13 @@ impl Default for FeatureState {
             symbol_stack: vec![],
             frame_selection: None,
             bucket_range_armed: false,
+            bucket_preview: false,
             bucket_next: false,
             bucket_link_outline: false,
             bucket_next_count: 2,
             bucket_range: None,
+            bucket_report: Vec::new(),
+            bucket_report_open: false,
             frame_drag: None,
             exposure_drag: None,
             row_drag: None,
@@ -980,7 +986,11 @@ pub(crate) fn project_camera_marks(
     }
 }
 
+#[cfg(test)]
 pub fn baked(doc: &Document) -> Document {
+    baked_mode(doc, false)
+}
+pub(crate) fn baked_mode(doc: &Document, preserve_gradients: bool) -> Document {
     if doc.extras.rig.is_empty()
         && doc
             .extras
@@ -1002,8 +1012,8 @@ pub fn baked(doc: &Document) -> Document {
                 && l.options.masked_by.is_none()
                 && l.frames.iter().flatten().all(|m| {
                     !m.style.guide
-                        && m.style.gradient.is_none()
-                        && m.style.stroke_gradient.is_none()
+                        && (preserve_gradients
+                            || m.style.gradient.is_none() && m.style.stroke_gradient.is_none())
                         && m.style.instance.is_none()
                 })
         })
@@ -1021,13 +1031,27 @@ pub fn baked(doc: &Document) -> Document {
         for mark in crate::animation::resolve_movie(doc, f, true)
             .into_iter()
             .flat_map(|(_, _, mark)| {
-                if mark.style.stroke_gradient.is_some() {
+                if !preserve_gradients && mark.style.stroke_gradient.is_some() {
                     crate::width::export_marks(&mark)
                 } else {
                     vec![mark]
                 }
             })
         {
+            if preserve_gradients {
+                if mark.style.text.is_some() {
+                    for mut shape in crate::vector::polygons_to_marks(
+                        crate::vector::text_ink(&mark),
+                        mark.fill.unwrap_or(mark.color),
+                    ) {
+                        shape.style.gradient = mark.style.gradient.clone();
+                        frame.push(shape);
+                    }
+                } else {
+                    frame.push(mark);
+                }
+                continue;
+            }
             if let Some(g) = &mark.style.gradient {
                 let bounds = crate::vector::control_bounds(&mark);
                 let source = if mark.style.text.is_some() {

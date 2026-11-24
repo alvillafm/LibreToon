@@ -1217,6 +1217,13 @@ pub fn button(
             Sense::hover()
         },
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            enabled,
+            if label.is_empty() { tip } else { label },
+        )
+    });
     let fill = if selected {
         crate::themes::color(Color32::from_rgb(47, 73, 104))
     } else if response.hovered() && enabled {
@@ -1225,7 +1232,7 @@ pub fn button(
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(r, 3., fill);
-    if selected {
+    if selected || response.has_focus() {
         ui.painter().rect_stroke(
             r,
             3.,

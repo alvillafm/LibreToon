@@ -1665,6 +1665,7 @@ impl Editor {
         ui.spacing_mut().text_edit_width = ui.available_width().min(250.);
         if self.tool == Tool::Puppet {
             self.puppet_properties(ui);
+            self.rig_binding_diagnostics_ui(ui);
             return;
         }
         design::category(ui, "HUESOS");
@@ -1699,6 +1700,7 @@ impl Editor {
             }
         });
         self.rig_anchor_mode_button(ui);
+        self.rig_binding_diagnostics_ui(ui);
         if self.feature.symbol_stack.is_empty() && !self.doc.extras.rig.bones.is_empty() {
             if design::button(
                 ui,
@@ -2175,7 +2177,7 @@ impl Editor {
                 frames,
             );
             if curve != old {
-                self.checkpoint();
+                self.begin_property_edit(("bone-timing-curve", bone.id, current));
                 self.doc.extras.rig.bones[index].keys[current].curve = curve;
                 self.recover();
             }
@@ -2196,6 +2198,65 @@ impl Editor {
             self.recover();
         }
     }
+    fn rig_binding_diagnostics_ui(&mut self, ui: &mut egui::Ui) {
+        let mut inspect = None;
+        ui.collapsing(tr("Binding diagnostics"), |ui| {
+            let targets = self.rig_targets();
+            let bones = self.doc.extras.rig.bones.iter().map(|bone| bone.id).collect();
+            let mut found = false;
+            for binding in &self.doc.extras.rig.bindings {
+                let Some(target) = targets.iter().find(|target| target.layer == self.layer && target.track == binding.target) else { continue; };
+                found = true;
+                let report = binding.diagnostics(&bones);
+                ui.group(|ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&target.name).strong()).truncate()).on_hover_text(&target.name);
+                    ui.small(format!("{}: {} · {}: {}", tr("Bones"), report.used_bones, tr("Pins"), report.pins));
+                    ui.label(format!("{}: {}/{}", tr("Unweighted cells"), report.unweighted_cells, binding.cells.len()));
+                    if report.invalid_cells > 0 {
+                        ui.colored_label(ui.visuals().warn_fg_color, format!("{}: {}", tr("Invalid weight cells"), report.invalid_cells));
+                    }
+                    if design::button(ui, Icon::WeightPaint, "Inspect deformation", "Show weights and unweighted areas without changing them", false, report.used_bones > 0 || report.pins > 0).clicked() {
+                        inspect = Some(binding.target);
+                    }
+                });
+            }
+            if !found { ui.small(tr("No bound artwork on this layer. Select a symbol and bind it first.")); }
+            ui.small(tr("Unweighted cells can be intentional outside the artwork. Diagnostics never alter your weights."));
+        });
+        if let Some(target) = inspect {
+            let bone = self
+                .doc
+                .extras
+                .rig
+                .bones
+                .iter()
+                .find(|bone| bone.targets.contains(&target))
+                .map(|bone| bone.id);
+            let pin = self
+                .doc
+                .extras
+                .rig
+                .bindings
+                .iter()
+                .find(|binding| binding.target == target)
+                .and_then(|binding| binding.pins.first())
+                .map(|pin| pin.id);
+            self.activate_tool(if bone.is_some() {
+                Tool::Bones
+            } else {
+                Tool::Puppet
+            });
+            self.rigging.bone = bone;
+            self.rigging.pin = pin;
+            self.rigging.target = Some(target);
+            self.rigging.show_weights = true;
+            self.rigging.show_unweighted = true;
+            self.rigging.paint = false;
+            self.rigging.create = false;
+            self.rigging.reanchor = false;
+        }
+    }
+
     fn rig_anchor_mode_button(&mut self, ui: &mut egui::Ui) {
         if design::button(
             ui,

@@ -561,6 +561,23 @@ impl Editor {
             })
             .collect()
     }
+    fn selected_node_mode(&self, ids: &[Id]) -> Option<Mode> {
+        let sources = self.node_sources();
+        let mut paths = BTreeMap::new();
+        let mut selected = None;
+        for &(l, m, n) in ids {
+            let mark = paths
+                .entry((l, m))
+                .or_insert_with(|| editable(&sources[&(l, m)]));
+            let node = mark.nodes.get(n)?;
+            let mode = node.mode.effective(node);
+            if selected.is_some_and(|old| old != mode) {
+                return None;
+            }
+            selected = Some(mode);
+        }
+        selected
+    }
     fn selected_nodes(&self) -> Vec<Id> {
         let mut counts = BTreeMap::new();
         self.canvas
@@ -692,11 +709,15 @@ impl Editor {
     }
     fn align_nodes(&mut self, axis: usize, distribute: bool) {
         let nodes = self.selected_nodes();
-        let sources = self.node_sources();
+        let sources = self
+            .node_sources()
+            .into_iter()
+            .map(|(id, m)| (id, editable(&m)))
+            .collect::<BTreeMap<_, _>>();
         let mut points: Vec<_> = nodes
             .iter()
             .filter_map(|&(l, m, n)| {
-                editable(&sources[&(l, m)]).nodes.get(n).map(|p| {
+                sources[&(l, m)].nodes.get(n).map(|p| {
                     (
                         (l, m, n),
                         self.depth_point(vector::pos(p.position), l, self.layer),
@@ -723,12 +744,20 @@ impl Editor {
         let selected = self.canvas.selected.clone();
         self.checkpoint();
         self.materialize_motion(&selected);
+        let mut changed = BTreeMap::new();
         for ((l, m, n), point) in targets {
-            let marks = &mut self.doc.layers[l].frames[self.frame];
-            let mut mark = editable(&marks[m]);
+            let mark = changed
+                .entry((l, m))
+                .or_insert_with(|| sources[&(l, m)].clone());
             let delta = point - vector::pos(mark.nodes[n].position);
-            move_handle(&mut mark, n, 0, delta, false);
-            marks[m] = mark;
+            let node = &mut mark.nodes[n];
+            node.position = vector::xy(vector::pos(node.position) + delta);
+            node.in_handle = vector::xy(vector::pos(node.in_handle) + delta);
+            node.out_handle = vector::xy(vector::pos(node.out_handle) + delta);
+        }
+        for ((l, m), mut mark) in changed {
+            update_automatic(&mut mark);
+            self.doc.layers[l].frames[self.frame][m] = mark;
         }
         self.canvas.selected = selected;
         self.canvas.set_node_ids(nodes);
@@ -971,18 +1000,14 @@ impl Editor {
         crate::design::category(ui, "VECTOR NODES");
         let ids = self.selected_nodes();
         let count = ids.len();
-        ui.label(format!("{count} selected nodes"));
-        let mode = ids
-            .first()
-            .and_then(|&(l, m, n)| {
-                self.doc.layers.get(l)?.frames[self.frame]
-                    .get(m)
-                    .map(editable)?
-                    .nodes
-                    .get(n)
-                    .cloned()
-            })
-            .map(|n| n.mode.effective(&n));
+        ui.label(crate::i18n::message(
+            "{count} selected nodes",
+            &[("count", count.to_string())],
+        ));
+        let mode = self.selected_node_mode(&ids);
+        if count > 1 && mode.is_none() {
+            ui.small(crate::i18n::tr("Mixed node types"));
+        }
         ui.horizontal_wrapped(|ui| {
             for (kind, icon) in [
                 (Mode::Corner, Icon::NodeCorner),
@@ -1017,7 +1042,7 @@ impl Editor {
             {
                 self.select_all_nodes();
             }
-            ui.checkbox(&mut self.nodes.all_handles, "All handles");
+            ui.checkbox(&mut self.nodes.all_handles, crate::i18n::tr("All handles"));
         });
         ui.horizontal_wrapped(|ui| {
             if button(
@@ -1086,7 +1111,7 @@ impl Editor {
         });
         ui.checkbox(
             &mut self.nodes.preserve_delete,
-            "Preserve curve when deleting nodes",
+            crate::i18n::tr("Preserve curve when deleting nodes"),
         );
         if button(
             ui,
@@ -1118,7 +1143,7 @@ impl Editor {
         {
             self.separate_fill_stroke();
         }
-        ui.collapsing("Align and distribute", |ui| {
+        ui.collapsing(crate::i18n::tr("Align and distribute"), |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (axis, label) in [(0, "Same X"), (1, "Same Y")] {
                     if button(
@@ -1152,13 +1177,13 @@ impl Editor {
                 }
             });
         });
-        ui.collapsing("Transform selected nodes", |ui| {
+        ui.collapsing(crate::i18n::tr("Transform selected nodes"), |ui| {
             for (i, label) in ["Move X", "Move Y", "Rotation °", "Scale X %", "Scale Y %"]
                 .into_iter()
                 .enumerate()
             {
                 ui.horizontal(|ui| {
-                    ui.label(label);
+                    ui.label(crate::i18n::tr(label));
                     ui.add(
                         egui::DragValue::new(&mut self.nodes.transform[i]).range(if i >= 3 {
                             0.1..=10000.
@@ -1195,6 +1220,32 @@ impl Editor {
         {
             self.begin_simplify();
         }
+        ui.horizontal_wrapped(|ui| {
+            if button(
+                ui,
+                Icon::Line,
+                "Expand Stroke…",
+                "Convert stroke to filled outlines with preview",
+                false,
+                !self.canvas.selected.is_empty(),
+            )
+            .clicked()
+            {
+                self.begin_geometry_conversion(true);
+            }
+            if button(
+                ui,
+                Icon::Polygon,
+                "Offset Path…",
+                "Preview an inset or outset of a closed fill",
+                false,
+                !self.canvas.selected.is_empty(),
+            )
+            .clicked()
+            {
+                self.begin_geometry_conversion(false);
+            }
+        });
     }
 }
 
@@ -1675,18 +1726,23 @@ impl Editor {
         let mut apply = false;
         let mut canceled = false;
         if preview.open {
-            egui::Window::new("Simplify Vector Path")
+            egui::Window::new(crate::i18n::tr("Simplify Vector Path"))
                 .open(&mut open)
                 .collapsible(false)
                 .default_width(380.)
                 .show(ctx, |ui| {
-                    ui.label("The original drawing stays unchanged until Apply.");
+                    ui.label(crate::i18n::tr(
+                        "The original drawing stays unchanged until Apply.",
+                    ));
                     ui.add(
                         egui::Slider::new(&mut preview.tolerance, 0.05..=10.)
                             .logarithmic(true)
                             .text("Tolerance · px"),
                     );
-                    ui.checkbox(&mut preview.preserve, "Preserve corner nodes");
+                    ui.checkbox(
+                        &mut preview.preserve,
+                        crate::i18n::tr("Preserve corner nodes"),
+                    );
                     ui.label(
                         egui::RichText::new("Cyan = candidate contour and its nodes")
                             .color(egui::Color32::from_rgb(75, 222, 207)),
@@ -1694,7 +1750,7 @@ impl Editor {
                     if preview.job.is_some() {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Calculating preview…");
+                            ui.label(crate::i18n::tr("Calculating preview…"));
                         });
                     }
                     let ready = preview.result.as_ref().filter(|(tol, c)| {
@@ -1704,7 +1760,7 @@ impl Editor {
                     if let Some((_, result)) = ready {
                         ui.label(format!("{} → {} nodes", result.before, result.after));
                         if result.after >= result.before {
-                            ui.label("No reduction at this tolerance.");
+                            ui.label(crate::i18n::tr("No reduction at this tolerance."));
                         }
                     }
                     if let Some(error) = &preview.error {
@@ -1762,7 +1818,7 @@ impl Editor {
             preview.requested = Some((tolerance.to_bits(), preserve));
             preview.job = Some(rx);
             preview.error = None;
-            std::thread::spawn(move || {
+            crate::geometry_jobs::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut paths = Vec::new();
                     let (mut before, mut after) = (0, 0);
@@ -1818,17 +1874,7 @@ impl Editor {
             return;
         }
         let ids = self.selected_nodes();
-        let mode = ids
-            .first()
-            .and_then(|&(l, m, n)| {
-                self.doc.layers[l].frames[self.frame]
-                    .get(m)
-                    .map(editable)?
-                    .nodes
-                    .get(n)
-                    .cloned()
-            })
-            .map(|n| n.mode.effective(&n));
+        let mode = self.selected_node_mode(&ids);
         let position = egui::pos2(
             canvas.center().x,
             canvas.bottom()

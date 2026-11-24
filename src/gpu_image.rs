@@ -4,6 +4,9 @@ use eframe::wgpu;
 #[cfg(test)]
 use eframe::wgpu::util::DeviceExt;
 use std::{sync::Arc, time::Duration};
+#[cfg(test)]
+pub(crate) static READBACKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 pub(crate) struct Image {
     pub buffer: wgpu::Buffer,
     pub width: u32,
@@ -45,6 +48,8 @@ impl Image {
         self.width as usize * self.height as usize * self.bytes_per_pixel as usize
     }
     pub fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        READBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bytes = self.bytes() as u64;
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Completed frame transfer"),

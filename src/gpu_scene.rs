@@ -49,6 +49,39 @@ pub(crate) struct Cache {
     pub reason: &'static str,
 }
 impl Cache {
+    /// Release derived normals first, then old raster sources. Referenced images
+    /// remain alive in the in-flight frame; eviction never changes its pixels.
+    pub(crate) fn trim_to(&mut self, budget: usize) {
+        while self.resident_bytes() > budget {
+            if self.normals.pop_front().is_none() && self.sources.pop_front().is_none() {
+                break;
+            }
+        }
+    }
+    pub(crate) fn resident_bytes(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        self.resident_bytes_with(&mut seen)
+    }
+    pub(crate) fn resident_bytes_with(&self, seen: &mut std::collections::HashSet<usize>) -> usize {
+        let mut count = |image: &Arc<Image>| {
+            if seen.insert(Arc::as_ptr(image) as usize) {
+                image.bytes()
+            } else {
+                0
+            }
+        };
+        let mut bytes = 0;
+        for source in &self.sources {
+            bytes += count(&source.image);
+        }
+        for normal in &self.normals {
+            bytes += count(&normal.source) + count(&normal.image);
+            if let Some(height) = &normal.height {
+                bytes += count(height);
+            }
+        }
+        bytes
+    }
     fn source(&mut self, key: &Key) -> Option<Arc<Image>> {
         let i = self.sources.iter().position(|s| s.key == *key)?;
         let source = self.sources.remove(i)?;
@@ -351,6 +384,54 @@ pub(crate) fn render(
     work: Option<&crate::depth::PreviewWork>,
 ) -> Option<Vec<u8>> {
     let gpu = crate::gpu_lens::on_worker()?;
+    let image = render_resident(
+        &gpu,
+        doc,
+        frame,
+        w,
+        h,
+        ctx,
+        render_cache,
+        cache,
+        world,
+        video,
+        camera,
+        post,
+        blur,
+        full_quality,
+        transparent,
+        work,
+    )?;
+    let rgba = image.read(&gpu.device, &gpu.queue)?;
+    if transparent {
+        Some(rgba)
+    } else {
+        Some(
+            rgba.chunks_exact(4)
+                .flat_map(|p| p[..3].iter().copied())
+                .collect(),
+        )
+    }
+}
+
+pub(crate) fn render_resident(
+    gpu: &Arc<crate::gpu_lens::GpuLens>,
+    doc: &Document,
+    frame: usize,
+    w: u32,
+    h: u32,
+    ctx: &egui::Context,
+    render_cache: &mut crate::paint::RenderCache,
+    cache: &mut Cache,
+    world: &[(usize, usize, Mark)],
+    video: &[crate::media::ExportVideoFrame],
+    camera: Option<&crate::features::Camera>,
+    post: bool,
+    blur: bool,
+    full_quality: bool,
+    transparent: bool,
+    work: Option<&crate::depth::PreviewWork>,
+) -> Option<Arc<Image>> {
     cache.reason = "device or image limits";
     if w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 > 32 * 1024 * 1024 {
         return None;
@@ -1027,19 +1108,11 @@ pub(crate) fn render(
             white[..3].copy_from_slice(&[w, h, 13]);
             gpu.native_post(&result, &white, None)?
         };
-        let rgba = result.read(&gpu.device, &gpu.queue)?;
         cache.frames = cache.frames.saturating_add(1);
         gpu.composed_frames
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         cache.reason = "";
-        if transparent {
-            return Some(rgba);
-        }
-        let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
-        for p in rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&p[..3]);
-        }
-        Some(rgb)
+        Some(result)
     })
 }
 
