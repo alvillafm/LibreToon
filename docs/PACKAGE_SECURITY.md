@@ -6,7 +6,8 @@ The existing workflow remains **manual (`workflow_dispatch`) only**. It does not
 
 - Windows: check application/installer product, publisher and package version; verify signatures when requested; verify the portable contains the same executable; check package SHA-256 values; update Microsoft Defender intelligence and scan the unpacked payload and final packages.
 - macOS/Linux: update ClamAV definitions and scan final archives and the unpacked native application. Definitions/logs stay outside all payloads.
-- A missing/stopped scanner, failed definition update, definitions older than 48 hours, detection, scan error, checksum mismatch or invalid signature blocks the package upload. Logs and JSON reports are available as separate security artifacts, including on failure.
+- Definition builds normally must be at most 48 hours old. During a publisher pause, a build up to seven days old is accepted only when the successful FreshClam invocation explicitly confirms the exact daily database version reported by the scanner. Missing/mismatched evidence, builds older than seven days and invalid/future timestamps block upload. Reports distinguish the database build time from the time it was checked and record the freshness policy used.
+- A missing/stopped scanner, failed definition update, detection, scan error, checksum mismatch or invalid signature blocks the package upload. Logs and JSON reports are available as separate security artifacts, including on failure.
 - Windows scans use custom scan mode with `DisableRemediation`: detections cannot become an exit-code-zero result because a file was silently removed. This scan option ignores file exclusions and includes archives; it does not disable antivirus protection.
 - A passing report records the particular engine, definitions and hashes. It does **not** certify a malware-free program or guarantee acceptance by Chrome, SmartScreen or Gatekeeper.
 

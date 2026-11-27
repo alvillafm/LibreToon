@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,15 +17,44 @@ def require_success(code, phase):
         raise RuntimeError(f"{phase} failed or detected a threat (exit {code}); packages are blocked")
 
 
-def database_timestamp(version, now):
+# Normally require builds within 48 h. During a publisher pause, accept the
+# current official daily version only with evidence from this successful
+# FreshClam invocation. Never accept an unbounded/offline stale database.
+RECENT_DATABASE_HOURS = 48
+CURRENT_DATABASE_MAX_HOURS = 7 * 24
+
+
+def current_daily_confirmed(version, update_log):
     fields = version.strip().split("/", 2)
-    if len(fields) != 3:
+    if len(fields) != 3 or not fields[1].isdigit():
+        return False
+    daily = re.findall(
+        r"\bdaily\.(?:cvd|cld) (?:database is up-to-date|updated) "
+        r"\(version: (\d+),", update_log
+    )
+    return bool(daily) and daily[-1] == fields[1]
+
+
+def database_timestamp(version, now, update_log=""):
+    fields = version.strip().split("/", 2)
+    if len(fields) != 3 or not fields[1].isdigit():
         raise RuntimeError("Scanner did not report its database version/date")
-    updated = dt.datetime.strptime(fields[2].strip(), "%a %b %d %H:%M:%S %Y").replace(tzinfo=dt.timezone.utc)
+    try:
+        updated = dt.datetime.strptime(fields[2].strip(), "%a %b %d %H:%M:%S %Y").replace(tzinfo=dt.timezone.utc)
+    except ValueError as error:
+        raise RuntimeError("Scanner reported an invalid database timestamp: " + version) from error
     age = (now - updated).total_seconds() / 3600
-    if not -24 <= age <= 48:
-        raise RuntimeError("ClamAV definitions are stale or their timestamp is invalid")
-    return updated
+    if -24 <= age <= RECENT_DATABASE_HOURS:
+        return updated
+    if (RECENT_DATABASE_HOURS < age <= CURRENT_DATABASE_MAX_HOURS
+            and current_daily_confirmed(version, update_log)):
+        return updated
+    raise RuntimeError(
+        f"ClamAV database {fields[1]} built {updated.isoformat()} is {age:.1f} hours old "
+        f"at {now.isoformat()}. Require a build within {RECENT_DATABASE_HOURS} hours, "
+        f"or the exact current daily version confirmed by this FreshClam update "
+        f"within {CURRENT_DATABASE_MAX_HOURS} hours. Packages are blocked."
+    )
 
 
 def inventory(directory):
@@ -90,10 +120,18 @@ def scan(root=ROOT):
         else:
             raise RuntimeError("Unknown ClamAV mode: " + mode)
         report.update(databaseMode=mode, databaseDirectory=str(database), updaterConfig=str(config))
-        command(update_args, "intelligence-update.log")
+        update_log = command(update_args, "intelligence-update.log")
         version = command([scanner, f"--database={database}", "--version"], "scanner-version.log").strip()
         now = dt.datetime.now(dt.timezone.utc)
-        report.update(scannerVersion=version, intelligenceUpdatedUtc=database_timestamp(version, now).isoformat(), timeUtc=now.isoformat())
+        report.update(scannerVersion=version, timeUtc=now.isoformat(),
+                      intelligenceCheckedUtc=now.isoformat(),
+                      currentDailyConfirmed=current_daily_confirmed(version, update_log))
+        updated = database_timestamp(version, now, update_log)
+        age = (now - updated).total_seconds() / 3600
+        report.update(intelligenceUpdatedUtc=updated.isoformat(), intelligenceAgeHours=round(age, 2),
+                      freshnessPolicy="recent-build" if age <= RECENT_DATABASE_HOURS else "freshclam-current-daily-version")
+        print(f"ClamAV: {version}; database age {age:.1f} hours; "
+              f"freshness policy: {report['freshnessPolicy']}")
         # Archive scanning is explicit; embedded executables and final containers are checked.
         payloads = [path for path in (root / "work/packages/macos/LibreToon.app", root / "work/packages/linux/LibreToon.AppDir") if path.is_dir()]
         if not payloads:

@@ -39,6 +39,53 @@ class Gates(unittest.TestCase):
         for version in ['ClamAV 1.4.3','ClamAV 1.4.3/123/Sun Nov  1 10:00:00 2026']:
             with self.assertRaises(RuntimeError):security.database_timestamp(version,now)
 
+    def test_current_publisher_database_can_be_older_than_48_hours(self):
+        # Captured Linux/macOS failure: latest daily build was 58 h old.
+        now=dt.datetime(2026,11,27,16,28,5,tzinfo=dt.timezone.utc)
+        version='ClamAV 1.5.4/28194/Wed Nov 25 06:26:59 2026'
+        for extension, state in [('cvd','database is up-to-date'),('cld','updated')]:
+            log=f'Fri Nov 27 16:28:05 2026 -> daily.{extension} {state} (version: 28194, sigs: 355842, f-level: 90)'
+            self.assertEqual(security.database_timestamp(version,now,log).day,25)
+        for log in ['', 'main.cvd database is up-to-date (version: 28194, sigs: 1)',
+                    'daily.cvd database is up-to-date (version: 28193, sigs: 1)']:
+            with self.subTest(log=log),self.assertRaises(RuntimeError):
+                security.database_timestamp(version,now,log)
+        with self.assertRaises(RuntimeError):
+            security.database_timestamp(version,now+dt.timedelta(days=7),
+                'daily.cvd database is up-to-date (version: 28194, sigs: 1)')
+        with self.assertRaises(RuntimeError):
+            security.database_timestamp(version,now-dt.timedelta(days=5),
+                'daily.cvd database is up-to-date (version: 28194, sigs: 1)')
+
+    def test_gate_scans_only_after_matching_the_current_daily_version(self):
+        for matching in [True, False]:
+            with self.subTest(matching=matching), tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+                root=Path(tmp);self.fixture(root);calls=[]
+                built=dt.datetime.now(dt.timezone.utc)-dt.timedelta(hours=58)
+                def fake(args,stdout,**kwargs):
+                    calls.append(args)
+                    if '--version' in args:
+                        stdout.write('ClamAV 1.5.4/28194/'+built.strftime('%a %b %d %H:%M:%S %Y')+'\n')
+                    elif args[0]=='freshclam':
+                        stdout.write('daily.cvd database is up-to-date (version: '+('28194' if matching else '28195')+', sigs: 355842)\n')
+                    else:stdout.write('scan fixture\n')
+                    return subprocess.CompletedProcess(args,0)
+                with patch.dict(security.os.environ,{'LIBRETOON_CLAMAV_MODE':'isolated','RUNNER_TEMP':str(root/'temp')}), patch.object(security.shutil,'which',side_effect=lambda n:n), patch.object(security.subprocess,'run',side_effect=fake):
+                    if matching:security.scan(root)
+                    else:
+                        with self.assertRaises(RuntimeError):security.scan(root)
+                report=json.loads((root/'work/package-security/native/security-report.json').read_text())
+                self.assertEqual(report['status'],'passed' if matching else 'failed')
+                self.assertEqual(any('--recursive' in args for args in calls),matching)
+                self.assertEqual(report['currentDailyConfirmed'],matching)
+                if matching:self.assertEqual(report['freshnessPolicy'],'freshclam-current-daily-version')
+
+    def test_invalid_database_dates_and_versions_are_rejected(self):
+        now=dt.datetime(2026,11,27,tzinfo=dt.timezone.utc)
+        for version in ['ClamAV 1.5.4/abc/Wed Nov 25 06:26:59 2026',
+                        'ClamAV 1.5.4/123/not a date']:
+            with self.assertRaises(RuntimeError):security.database_timestamp(version,now)
+
     def test_missing_scanner_never_creates_a_pass_report(self):
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root=Path(tmp);self.fixture(root)
