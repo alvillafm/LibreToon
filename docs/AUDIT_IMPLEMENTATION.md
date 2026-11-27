@@ -48,7 +48,7 @@ Trabajo autorizado: los 45 puntos del informe, sustituyendo el límite agregado 
 | C04 | Pendiente |  |
 | C05 | Parcial | MOV ProRes 4444/4444 XQ con alfa opcional y presets compatibles. Codificación/decodificación FFmpeg comprobada con transparencia y bordes semitransparentes. Gestión ICC e importación de alfa de vídeo pendientes. |
 | C06 | Verificado en desarrollo | Informe en Archivo, tamaños de recursos y metadatos compactos, usos en escenas/símbolos, eliminación sin uso y unificación exacta con remapeo. Trabajo en segundo plano, resultado obsoleto descartado y deshacer. |
-| C07 | Parcial | Añadida CAPABILITIES.md, actualizado manual de formatos y aviso histórico de PERFORMANCE. Manifiesto/binario/paquetes/wiki usan 1.0.0; los paquetes leen Cargo.toml. Versión actualizada localmente; no se ha publicado una release. |
+| C07 | Parcial | Añadida CAPABILITIES.md, actualizado manual de formatos y aviso histórico de PERFORMANCE. Manifiesto/binario/paquetes/wiki usan 1.0.1; los paquetes leen Cargo.toml. Versión actualizada localmente; no se ha publicado una release. |
 
 ## Verificación
 

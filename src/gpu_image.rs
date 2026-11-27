@@ -86,7 +86,10 @@ pub(crate) fn checked_scope<T>(
 ) -> Option<T> {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let allocation = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let result = draw();
-    let bad = block_on(allocation.pop()).is_some() | block_on(validation.pop()).is_some();
+    let bad = block_on(internal.pop()).is_some()
+        | block_on(allocation.pop()).is_some()
+        | block_on(validation.pop()).is_some();
     if bad { None } else { result }
 }

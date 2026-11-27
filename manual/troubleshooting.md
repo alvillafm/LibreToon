@@ -27,3 +27,9 @@ Finish typing in any text field, return focus to the stage, and inspect **Progra
 ## Report a useful bug
 
 Include the app version, operating system, GPU if relevant, exact steps, expected result, actual result and any error text. A small `.ltoon` reproduction is especially useful. Remove private media before sharing. Submit it through [GitHub Issues](https://github.com/alvillafm/LibreToon/issues).
+
+## Windows crashes before the window opens
+
+Version 1.0.1 uses DirectX 12 for Windows startup by default, avoiding automatic Vulkan driver enumeration. This addresses the startup path implicated by a supplied Intel `igvk64.dll` crash report. It is a compatibility mitigation; the affected mini PC still needs to be tested.
+
+An explicit `WGPU_BACKEND` environment setting overrides the default. Remove an old Vulkan override when testing the default. For diagnostic use, `WGPU_BACKEND=dx12` selects DirectX 12 explicitly. If window initialization returns an error, LibreToon displays it and tries to write `LibreToon-startup-error.log` in the system temporary directory. A native driver access violation can terminate the process before this handler runs; its Windows crash report remains useful.

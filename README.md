@@ -19,7 +19,7 @@
   </a>
 </p>
 
-**LibreToon 1.0.0** is a free, open-source 2D animation application built from scratch in **Rust** for **Windows, macOS and Linux**. Draw with vectors or pixels, animate frame by frame, build reusable character rigs, and composite scenes with cameras, lights and effects in one workspace.
+**LibreToon 1.0.1** is a free, open-source 2D animation application built from scratch in **Rust** for **Windows, macOS and Linux**. Draw with vectors or pixels, animate frame by frame, build reusable character rigs, and composite scenes with cameras, lights and effects in one workspace.
 
 <p align="center"><img src="https://i.imgur.com/0qjDPEz.png" width="1050" alt="LibreToon interface"></p>
 
@@ -27,7 +27,7 @@
 
 > LibreToon is our independent reimagining of what an “Animate 2” could have been: a drawing-first animation workflow with its own Rust implementation. Projects use the native `.ltoon` format. FLA import and export exchange supported artwork and animation; compatibility reports identify omissions and approximations. ActionScript is not supported.
 
-[Download LibreToon](https://github.com/alvillafm/LibreToon/releases) · [Read the Wiki](https://alvillafm.github.io/LibreToon/) · [Start the tutorials](manual/learn/index.md) · [1.0.0 release notes](docs/RELEASE_NOTES_1.0.0.md)
+[Download LibreToon](https://github.com/alvillafm/LibreToon/releases) · [Read the Wiki](https://alvillafm.github.io/LibreToon/) · [Start the tutorials](manual/learn/index.md) · [1.0.1 release notes](docs/RELEASE_NOTES_1.0.1.md)
 
 ## Features
 
@@ -36,8 +36,11 @@
 - **Classic Brush, Advanced Vector Brush and Raster Brush**, with pressure-sensitive drawing and erasing, including compatible stylus eraser ends.
 - **Vector stabilization and smoothing**, document-pixel stroke widths, variable-width profiles, and an editable pressure-response curve.
 - **Raster brush textures and custom tips:** hardness, opacity, texture strength, PNG/JPEG tip import, alpha lock, and reusable presets with `.ltbrush` import/export.
+- **Parametric ovals** with editable angular sectors and inner radii for half circles, rings and ring segments; **Alt-drag** quick copying of selected objects.
+- **Editable rectangle primitives** with linked or independent corner radii; fill and outline follow the same shape before and after saving.
 - **Pen, Node, Line and primitive shape tools**, plus text, erasing and Vector Trim.
 - **Fill, Shade and Light brushes** for painting and toon shading, plus canvas pan, zoom and rotation.
+- **Editable Shape Masks** with reveal/hide modes, independent keyframes and shape/motion tween animation.
 - **Independent fill and stroke selection**, object selection, lasso/polygon selection, magic wand, connected-contour selection and clipping masks. Partial selection leaves the source intact until an edit is applied.
 - **Symmetry, mirror, perspective guides, rulers, grids and snapping** for drawing and placement.
 - **RefTool** for floating visual references and color sampling, plus a **poseable 3D mannequin** with joint rotation controls.

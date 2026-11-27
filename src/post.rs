@@ -2131,7 +2131,7 @@ mod tests {
     #[ignore = "requires a GPU; all post-processing effects without intermediate readback"]
     fn gpu_native_effects_match_the_reference() {
         use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
-        let instance = eframe::wgpu::Instance::default();
+        let instance = crate::startup::test_instance();
         let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
         let gpu = GpuLens::new(device, queue);
@@ -2187,7 +2187,7 @@ mod tests {
     #[ignore = "requires a GPU; complete spatial effects against the CPU renderer"]
     fn gpu_spatial_effects_match_cpu() {
         use crate::gpu_lens::{GpuLens, block_on, use_on_worker};
-        let instance = eframe::wgpu::Instance::default();
+        let instance = crate::startup::test_instance();
         let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
         let gpu = std::sync::Arc::new(GpuLens::new(device, queue));
@@ -2236,7 +2236,7 @@ mod tests {
     #[test]
     #[ignore = "requires a compute GPU; post-processing image parity and timings"]
     fn gpu_post_chain_matches_cpu() {
-        let instance = eframe::wgpu::Instance::default();
+        let instance = crate::startup::test_instance();
         let adapter =
             crate::gpu_lens::block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) =

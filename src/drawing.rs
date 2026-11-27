@@ -3,6 +3,8 @@ use crate::{Editor, Mark, canvas::Tool, shared::SharedVec, width::WidthStop};
 use eframe::egui::{self, Color32, Pos2};
 pub struct Drawing {
     pub radius: f32,
+    pub(crate) oval: [f32; 3],
+    pub(crate) corner_radii: Option<[f32; 4]>,
     pub pressure: bool,
     pub vector_pressure: bool,
     pub sample_style: bool,
@@ -26,6 +28,8 @@ impl Default for Drawing {
     fn default() -> Self {
         Self {
             radius: 0.,
+            oval: [0., 360., 0.],
+            corner_radii: None,
             pressure: true,
             vector_pressure: false,
             sample_style: false,
@@ -150,46 +154,7 @@ impl Drawing {
     }
 }
 pub fn rounded_rectangle(a: Pos2, b: Pos2, radius: f32, style: &Mark) -> Mark {
-    use crate::{
-        document::Node,
-        vector::{pos, xy},
-    };
-    let r = egui::Rect::from_two_pos(a, b);
-    let radius = radius.max(0.).min(r.width().min(r.height()) * 0.5);
-    let mut mark = style.clone();
-    if radius < 0.001 {
-        mark.rectangle = true;
-        mark.nodes = Default::default();
-        mark.closed = true;
-        mark.points = vec![xy(a), xy(b)].into();
-        return mark;
-    }
-    let k = radius * 0.5522848;
-    let points = [
-        Pos2::new(r.left() + radius, r.top()),
-        Pos2::new(r.right() - radius, r.top()),
-        Pos2::new(r.right(), r.top() + radius),
-        Pos2::new(r.right(), r.bottom() - radius),
-        Pos2::new(r.right() - radius, r.bottom()),
-        Pos2::new(r.left() + radius, r.bottom()),
-        Pos2::new(r.left(), r.bottom() - radius),
-        Pos2::new(r.left(), r.top() + radius),
-    ];
-    let mut nodes: Vec<_> = points.into_iter().map(|p| Node::corner(xy(p))).collect();
-    for (i, j, da, db) in [
-        (1, 2, egui::vec2(k, 0.), egui::vec2(0., -k)),
-        (3, 4, egui::vec2(0., k), egui::vec2(k, 0.)),
-        (5, 6, egui::vec2(-k, 0.), egui::vec2(0., k)),
-        (7, 0, egui::vec2(0., -k), egui::vec2(-k, 0.)),
-    ] {
-        nodes[i].out_handle = xy(pos(nodes[i].position) + da);
-        nodes[j].in_handle = xy(pos(nodes[j].position) + db);
-    }
-    mark.nodes = nodes.into();
-    mark.points = Default::default();
-    mark.rectangle = false;
-    mark.closed = true;
-    mark
+    crate::rectangle::create(a, b, [radius; 4], style)
 }
 pub fn airbrush(center: &Mark, opacity: f32, hardness: f32, sketch: bool) -> Vec<Mark> {
     let points = crate::vector::flatten(center, 0.4);
@@ -282,13 +247,11 @@ pub fn airbrush(center: &Mark, opacity: f32, hardness: f32, sketch: bool) -> Vec
 }
 impl Editor {
     pub fn drawing_options(&mut self, ui: &mut egui::Ui) {
+        if self.tool == Tool::Ellipse {
+            self.oval_creation_ui(ui);
+        }
         if self.tool == Tool::Rectangle {
-            crate::design::category(ui, "GEOMETRÍA");
-            ui.add(
-                egui::Slider::new(&mut self.drawing.radius, 0. ..=500.)
-                    .text(crate::i18n::tr("Radio de esquina"))
-                    .suffix(crate::i18n::tr(" px")),
-            );
+            self.rectangle_creation_ui(ui);
         }
         if matches!(
             self.tool,

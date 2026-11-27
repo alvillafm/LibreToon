@@ -272,8 +272,11 @@ pub fn draw(
     selected: bool,
     cache: Option<&mut RenderCache>,
 ) -> bool {
-    let thick_primitive =
-        mark.stroke && mark.width > 20. && (mark.rectangle || mark.closed && mark.nodes.is_empty());
+    let thick_primitive = mark.stroke
+        && mark.width > 20.
+        && (mark.rectangle
+            || mark.style.rounded_rectangle.is_some()
+            || mark.closed && mark.nodes.is_empty());
     draw_prepared(
         p,
         mark,

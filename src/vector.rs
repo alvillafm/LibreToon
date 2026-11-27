@@ -531,12 +531,21 @@ pub fn split_rect(mark: &Mark, rect: Rect) -> (Vec<Mark>, Vec<Mark>) {
 }
 pub fn transform(mark: &Mark, mut f: impl FnMut(Pos2) -> Pos2) -> Mark {
     let mut out = mark.clone();
+    if let Some(boundary) = out.style.fill_boundary.as_mut() {
+        boundary.transform(&mut f);
+    }
     if let Some(basis) = out.style.texture_basis.as_mut() {
         *basis = basis.map(|p| xy(f(pos(p))));
     }
     for g in out.style.gradients_mut() {
         g.start = xy(f(pos(g.start)));
         g.end = xy(f(pos(g.end)));
+    }
+    if let Some(primitive) = out.style.oval.as_mut() {
+        primitive.frame = primitive.frame.map(|p| xy(f(pos(p))));
+    }
+    if let Some(primitive) = out.style.rounded_rectangle.as_mut() {
+        primitive.frame = primitive.frame.map(|p| xy(f(pos(p))));
     }
     if let Some(text) = out.style.text.as_mut() {
         let m = text.matrix;

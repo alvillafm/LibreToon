@@ -328,7 +328,10 @@ impl Editor {
                 self.mannequin_properties(ui);
                 return;
             }
+            self.shape_mask_properties(ui);
             self.drawing_options(ui);
+            self.fill_outline_link_ui(ui);
+            if matches!(self.tool,Tool::Select|Tool::Transform|Tool::Object|Tool::Lasso|Tool::PolygonSelect|Tool::Wand) {self.rectangle_properties_ui(ui); self.oval_properties_ui(ui);}
             self.tool_options_ui(ui);
             self.node_properties(ui);
             self.order_properties_ui(ui);
@@ -495,7 +498,7 @@ impl Editor {
                     crate::i18n::tr("Link fill to outline"),
                 )
                 .on_hover_text(crate::i18n::tr(
-                    "Fill a closed curve directly so the color follows its nodes.",
+                    "Keep the fill attached to its outline, including regions enclosed by several strokes.",
                 ));
                 ui.small(crate::i18n::tr(
                     "Shift + click to recalculate an existing fill",

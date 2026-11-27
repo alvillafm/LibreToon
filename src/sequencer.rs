@@ -395,7 +395,15 @@ impl Editor {
         match action {
             1 => {
                 let count = self.doc.layers[layer].frames.len();
+                let mask = self.doc.layers[layer].options.mask_id;
                 self.doc.layers.remove(layer);
+                if let Some(id) = mask {
+                    for target in &mut self.doc.layers {
+                        if target.options.masked_by == Some(id) {
+                            target.options.masked_by = None;
+                        }
+                    }
+                }
                 if self.doc.layers.is_empty() {
                     let mut blank = crate::fresh_document().layers[0].clone();
                     blank.frames = vec![Default::default(); count].into();
@@ -1292,6 +1300,12 @@ impl Editor {
                                     !self.doc.layers[self.layer].options.clip;
                                 self.recover();
                             }
+                            let mask_button=button(ui,Icon::ShapeMask,"","Shape mask",false,self.can_add_shape_mask());
+                            egui::Popup::menu(&mask_button).show(|ui| {
+                                for (ellipse,icon,label) in [(false,Icon::Rectangle,"Rectangle mask"),(true,Icon::Ellipse,"Ellipse mask")] {
+                                    if button(ui,icon,label,"",false,self.can_add_shape_mask()).clicked() { self.add_shape_mask(ellipse);ui.close(); }
+                                }
+                            });
                             if button(ui,Icon::Depth,"","Profundidad de capas",self.depth.open,true).clicked() { self.depth.open = !self.depth.open; }
                             if button(ui, Icon::Layers, "", "Layer objects", self.studio.layer_objects_open, true).clicked() {
                                 self.studio.layer_objects_open = !self.studio.layer_objects_open;
@@ -1829,7 +1843,7 @@ impl Editor {
                                             self.renaming_layer = None;
                                         }
                                     } else {
-                                        let masked = self.doc.layers[l].options.clip || self.doc.layers[l].options.masked_by.is_some();
+                                        let masked = self.doc.layers[l].options.clip || self.doc.layers[l].options.masked_by.is_some() || self.doc.layers[l].options.mask_id.is_some();
                                         let special = self.doc.layers[l].options.animation_track || crate::post::is_adjustment(&self.doc.layers[l]);
                                         use crate::studio::LayerColor;
                                         let color = self.studio.prefs.layer_color(if self.doc.layers[l].options.animation_track {
@@ -1875,7 +1889,7 @@ impl Editor {
                                             draw(&painter,Rect::from_center_size(name_rect.right_center()-Vec2::new(8.,0.),Vec2::splat(16.)),icon,if self.doc.layers[l].options.light.is_some() { Color32::GOLD } else { color });
                                         }
                                         if masked {
-                                            draw(&painter, Rect::from_center_size(name_rect.right_center() - Vec2::new(8., 0.), Vec2::splat(15.)), Icon::Mask, crate::themes::accent());
+                                            draw(&painter, Rect::from_center_size(name_rect.right_center() - Vec2::new(8., 0.), Vec2::splat(15.)), if self.doc.layers[l].options.mask_id.is_some() { Icon::ShapeMask } else { Icon::Mask }, if self.doc.layers[l].options.mask_id.is_some() { Color32::from_rgb(42,202,168) } else { crate::themes::accent() });
                                         }
                                         let modifiers = ui.input(|i| i.modifiers);
                                         let toggle = modifiers.command || modifiers.ctrl;

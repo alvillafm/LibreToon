@@ -53,6 +53,7 @@ mod inspector;
 mod interaction_ux_tests;
 mod library;
 mod light;
+mod linked_fill;
 mod lip;
 mod loading;
 mod mannequin;
@@ -64,6 +65,7 @@ mod native_archive;
 mod native_project;
 mod node_edit;
 mod ordering;
+mod oval;
 mod paint;
 mod palette;
 mod picking;
@@ -72,8 +74,10 @@ mod preset_file;
 mod pressure;
 mod project_save;
 mod property_edit;
+mod quick_copy;
 mod raster;
 mod recovery;
+mod rectangle;
 mod reftool;
 mod render_profile;
 mod rig;
@@ -82,9 +86,11 @@ mod rig_tests;
 mod rig_ui;
 mod scenes;
 mod sequencer;
+mod shape_mask;
 mod shared;
 mod shortcuts;
 mod spatial;
+mod startup;
 mod storage;
 mod studio;
 #[cfg(test)]
@@ -316,6 +322,7 @@ impl Editor {
             record.revision = record.revision.wrapping_add(1);
         }
         self.sync_text_styles();
+        self.sync_linked_fills();
         self.sync_exposures();
         self.recovery_writer
             .submit(self.recovery.clone(), self.project_document());
@@ -567,10 +574,11 @@ fn main() -> eframe::Result {
     if let Some(result) = update_install::helper_entry() {
         return result;
     }
-    eframe::run_native(
+    let result = eframe::run_native(
         "LibreToon",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
+            wgpu_options: startup::gpu_configuration(),
             #[cfg(windows)]
             event_loop_builder: Some(Box::new(tablet::windows_event_loop)),
             #[cfg(target_os = "linux")]
@@ -583,7 +591,11 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(Editor::new(cc)))),
-    )
+    );
+    if let Err(error) = &result {
+        startup::report_error(error);
+    }
+    result
 }
 
 #[cfg(test)]

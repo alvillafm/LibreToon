@@ -38,6 +38,7 @@ struct Remap {
     palette: HashMap<u64, u64>,
     clips: HashMap<u64, u64>,
     tracks: HashMap<u64, u64>,
+    boundaries: HashMap<u64, u64>,
     bones: HashMap<u64, u64>,
     pins: HashMap<u64, u64>,
     folders: HashMap<u64, u64>,
@@ -139,6 +140,7 @@ impl Remap {
     fn mark(&mut self, mark: &Mark) -> Mark {
         let mut out = mark.clone();
         out.style.track = mapped(&mut self.tracks, out.style.track);
+        crate::linked_fill::remap_ids(&mut out, &mut |id| mapped(&mut self.boundaries, id));
         out.style.palette_fill = out
             .style
             .palette_fill

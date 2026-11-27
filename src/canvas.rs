@@ -149,7 +149,16 @@ enum Operation {
     Rotate,
     Pivot,
 }
+struct CopyHistory {
+    partial: crate::quick_copy::Fragments,
+    doc: crate::Document,
+    undo: Vec<crate::Document>,
+    redo: Vec<crate::Document>,
+    selection: Vec<(usize, usize)>,
+}
 struct TransformDrag {
+    copy: bool,
+    copy_history: Option<Box<CopyHistory>>,
     operation: Operation,
     start: Pos2,
     pivot: Pos2,
@@ -727,7 +736,11 @@ impl Editor {
                     .iter()
                     .enumerate()
                     .rev()
-                    .filter(|(_, l)| l.visible && !l.options.locked)
+                    .filter(|(index, l)| {
+                        l.visible
+                            && !l.options.locked
+                            && (l.options.mask_id.is_none() || *index == self.layer)
+                    })
                     .find_map(|(l, layer)| {
                         let local = self.camera_depth_view(base, l).world(screen);
                         crate::animation::marks(layer, self.frame)
@@ -837,7 +850,11 @@ impl Editor {
                     .iter()
                     .enumerate()
                     .rev()
-                    .filter(|(_, l)| l.visible && !l.options.locked)
+                    .filter(|(index, l)| {
+                        l.visible
+                            && !l.options.locked
+                            && (l.options.mask_id.is_none() || *index == self.layer)
+                    })
                     .find_map(|(l, layer)| {
                         crate::animation::marks(layer, self.frame)
                             .iter()
@@ -1043,8 +1060,18 @@ impl Editor {
                 }
             }
             if let Some(Drag::Transform(d)) = canceled {
-                for ((l, m), original) in d.originals {
-                    self.doc.layers[l].frames[self.frame][m] = original;
+                if let Some(history) = d.copy_history {
+                    self.doc = history.doc;
+                    self.undo = history.undo;
+                    self.redo = history.redo;
+                    state.selected = history.selection;
+                    state.partial = history.partial;
+                    self.exposure_sync.clear();
+                    self.recover();
+                } else {
+                    for ((l, m), original) in d.originals {
+                        self.doc.layers[l].frames[self.frame][m] = original;
+                    }
                 }
                 state.pivot = Some(d.pivot);
                 state.orientation = d.bounds.angle;
@@ -1068,13 +1095,11 @@ impl Editor {
             {
                 state.selected.clear();
                 state.partial.clear();
-                for (l, layer) in self
-                    .doc
-                    .layers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| l.visible && !l.options.locked)
-                {
+                for (l, layer) in self.doc.layers.iter().enumerate().filter(|(index, l)| {
+                    l.visible
+                        && !l.options.locked
+                        && (l.options.mask_id.is_none() || *index == self.layer)
+                }) {
                     for (m, mark) in layer.frames[self.frame].iter().enumerate() {
                         if !mark.style.raster_tile {
                             state.selected.push((l, m));
@@ -1400,13 +1425,17 @@ impl Editor {
                 let mut toggle_on_click = None;
                 if op.is_none() {
                     let mut found = None;
-                    'layers: for (l, layer) in self
-                        .doc
-                        .layers
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .filter(|(_, l)| l.visible && !l.options.locked)
+                    'layers: for (l, layer) in
+                        self.doc
+                            .layers
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .filter(|(index, l)| {
+                                l.visible
+                                    && !l.options.locked
+                                    && (l.options.mask_id.is_none() || *index == self.layer)
+                            })
                     {
                         for (m, mark) in crate::animation::marks(layer, self.frame)
                             .iter()
@@ -1512,6 +1541,10 @@ impl Editor {
                         })
                         .collect();
                     state.drag = Some(Drag::Transform(TransformDrag {
+                        copy: alt
+                            && matches!(operation, Operation::Move)
+                            && matches!(tool, Tool::Select | Tool::Object | Tool::Transform),
+                        copy_history: None,
                         operation,
                         start: world,
                         pivot,
@@ -1813,7 +1846,13 @@ impl Editor {
                                 }
                             }
                             *m = if *tool == Tool::Rectangle {
-                                crate::drawing::rounded_rectangle(a, b, self.drawing.radius, m)
+                                if let Some(radii) = self.drawing.corner_radii {
+                                    crate::rectangle::create(a, b, radii, m)
+                                } else {
+                                    crate::drawing::rounded_rectangle(a, b, self.drawing.radius, m)
+                                }
+                            } else if *tool == Tool::Ellipse {
+                                crate::oval::create(a, b, self.drawing.oval, m)
                             } else {
                                 crate::editing::shape(
                                     *tool,
@@ -1992,7 +2031,11 @@ impl Editor {
                                 .layers
                                 .iter()
                                 .enumerate()
-                                .filter(|(_, l)| l.visible && !l.options.locked)
+                                .filter(|(index, l)| {
+                                    l.visible
+                                        && !l.options.locked
+                                        && (l.options.mask_id.is_none() || *index == self.layer)
+                                })
                                 .flat_map(|(l, layer)| {
                                     layer.frames[self.frame].iter().enumerate().filter_map(
                                         move |(m, mark)| {
@@ -2015,11 +2058,27 @@ impl Editor {
                 Some(Drag::Transform(d)) => {
                     if d.last_input != Some((world, shift, alt))
                         && (d.changed || world.distance(d.start) * view.scale > 2.)
+                        && (!d.copy || d.changed || self.can_quick_copy(&state.selected))
                     {
                         d.last_input = Some((world, shift, alt));
                         if !d.changed && !matches!(d.operation, Operation::Pivot) {
+                            if d.copy {
+                                d.copy_history = Some(Box::new(CopyHistory {
+                                    partial: state.partial.clone(),
+                                    doc: self.doc.clone(),
+                                    undo: self.undo.clone(),
+                                    redo: self.redo.clone(),
+                                    selection: state.selected.clone(),
+                                }));
+                            }
                             self.checkpoint();
-                            if !state.partial.is_empty() {
+                            if d.copy {
+                                self.materialize_motion(&state.selected);
+                                d.originals =
+                                    self.quick_copy_selection(&state.selected, &state.partial);
+                                state.selected = d.originals.iter().map(|(id, _)| *id).collect();
+                                state.partial.clear();
+                            } else if !state.partial.is_empty() {
                                 let mut selection = Canvas {
                                     selected: std::mem::take(&mut state.selected),
                                     partial: std::mem::take(&mut state.partial),
@@ -2666,6 +2725,7 @@ impl Editor {
         {
             self.paint_snap_feedback(&painter, area, view);
         }
+        self.shape_mask_overlay(&painter, view);
         self.stage_mask(&painter, area, stage_view);
         self.paint_preview_progress(&painter, area);
         if over
@@ -3378,7 +3438,11 @@ impl Editor {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, l)| l.visible && !l.options.locked)
+            .filter(|(index, l)| {
+                l.visible
+                    && !l.options.locked
+                    && (l.options.mask_id.is_none() || *index == self.layer)
+            })
         {
             for (m, mark) in crate::animation::marks(layer, self.frame)
                 .iter()
@@ -3412,13 +3476,9 @@ impl Editor {
     fn select_node_rect(&self, state: &mut Canvas, rect: Rect, add: bool, view: View) {
         let mut nodes = if add { state.node_ids() } else { Vec::new() };
         let restrict = !state.selected.is_empty();
-        for (l, layer) in self
-            .doc
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.visible && !l.options.locked)
-        {
+        for (l, layer) in self.doc.layers.iter().enumerate().filter(|(index, l)| {
+            l.visible && !l.options.locked && (l.options.mask_id.is_none() || *index == self.layer)
+        }) {
             for (m, mark) in crate::animation::marks(layer, self.frame)
                 .iter()
                 .enumerate()
@@ -3487,7 +3547,11 @@ impl Editor {
         mark.stroke
             && mark.fill.is_some()
             && (mark.closed || mark.rectangle)
-            && (mark.style.linked_outline_fill || self.edits_rigged_eye(layer))
+            && (mark.style.linked_outline_fill
+                || mark.style.primitive
+                || mark.style.rounded_rectangle.is_some()
+                || mark.style.oval.is_some()
+                || self.edits_rigged_eye(layer))
     }
 
     pub(crate) fn separate_component(
@@ -4013,7 +4077,11 @@ impl Editor {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, l)| l.visible && !l.options.locked)
+            .filter(|(index, l)| {
+                l.visible
+                    && !l.options.locked
+                    && (l.options.mask_id.is_none() || *index == self.layer)
+            })
         {
             for (m, mark) in layer.frames[self.frame]
                 .iter()
@@ -4129,6 +4197,7 @@ impl Editor {
                 color,
                 replaced,
                 linked,
+                live_link,
                 ..
             } => {
                 let link = (!gradient_on)
@@ -4142,14 +4211,19 @@ impl Editor {
                 mark.style.gradient = fit_gradient(mark);
                 mark.style.shade = 0;
                 mark.style.light = 0;
+                let shifted = index - replaced.iter().filter(|&&other| other < index).count();
                 for index in replaced.into_iter().rev() {
                     marks.remove(index);
+                }
+                if let Some((seed, gap)) = live_link {
+                    crate::linked_fill::attach(marks, shifted..shifted + 1, seed, gap);
                 }
             }
             BucketEdit::Replace {
                 shapes,
                 replaced,
                 outline,
+                live_link,
                 ..
             } => {
                 let mut shapes = shapes;
@@ -4175,7 +4249,11 @@ impl Editor {
                 for index in replaced.into_iter().rev() {
                     marks.remove(index);
                 }
+                let count = shapes.len();
                 marks.splice(0..0, shapes);
+                if let Some((seed, gap)) = live_link {
+                    crate::linked_fill::attach(marks, 0..count, seed, gap);
+                }
             }
         }
     }
@@ -4542,12 +4620,14 @@ enum BucketEdit {
         color: [u8; 4],
         replaced: Vec<usize>,
         linked: bool,
+        live_link: Option<([f32; 2], u8)>,
     },
     Replace {
         shapes: Vec<Mark>,
         replaced: Vec<usize>,
         outline: Option<usize>,
         bridges: Vec<[Pos2; 2]>,
+        live_link: Option<([f32; 2], u8)>,
     },
 }
 
@@ -4586,7 +4666,23 @@ fn bucket_edit(
     outline_mode: OutlineFill,
     preview: bool,
 ) -> Result<BucketEdit, String> {
-    if outline_mode != OutlineFill::Off {
+    if outline_mode != OutlineFill::Off
+        && marks.iter().any(|mark| {
+            mark.stroke
+                && !mark.style.guide
+                && !mark.style.raster_tile
+                && mark.style.instance.is_none()
+                && mark.style.text.is_none()
+                && mark.style.media_image.is_none()
+                && (mark.closed || mark.rectangle)
+                && crate::vector::control_bounds(mark).contains(world)
+                && {
+                    let mut m = mark.clone();
+                    m.fill = Some(color);
+                    crate::vector::contains_fill(&m, world)
+                }
+        })
+    {
         let Some(index) = marks.iter().rposition(|mark| {
             if !mark.stroke
                 || (!mark.closed && !mark.rectangle)
@@ -4624,6 +4720,7 @@ fn bucket_edit(
                 continue;
             }
             if eye_fill
+                || (fill.bucket && crate::vector::contains_fill(fill, world))
                 || (fill.closed == outline.closed
                     && fill.rectangle == outline.rectangle
                     && fill.points == outline.points
@@ -4646,6 +4743,7 @@ fn bucket_edit(
             color,
             replaced,
             linked: true,
+            live_link: None,
         });
     }
     let existing = marks.iter().rposition(|mark| {
@@ -4666,6 +4764,8 @@ fn bucket_edit(
             color,
             replaced: Vec::new(),
             linked: false,
+            live_link: (outline_mode != OutlineFill::Off)
+                .then_some(([world.x, world.y], gap as u8)),
         });
     }
     let fill = |marks: &[Mark]| {
@@ -4700,6 +4800,7 @@ fn bucket_edit(
         replaced,
         outline,
         bridges,
+        live_link: (outline_mode != OutlineFill::Off).then_some(([world.x, world.y], gap as u8)),
     })
 }
 
@@ -4929,6 +5030,283 @@ mod styling_gesture_tests {
             assert!(crate::vector::contains_fill(mark, Pos2::new(200., 220.)));
             e.history(false);
             assert!(e.doc.layers[0].frames[0][0].fill.is_none());
+        });
+    }
+
+    fn alt_tick(ctx: &egui::Context, e: &mut Editor, mut events: Vec<egui::Event>) {
+        events.insert(0, egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.))),
+                events,
+                ..Default::default()
+            },
+            |ui| e.canvas_ui(ui),
+        );
+        output.textures_delta.clear();
+    }
+    fn alt_button(p: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::ALT,
+        }
+    }
+    #[test]
+    fn alt_drag_duplicates_once_preserves_original_and_uses_one_undo() {
+        run(|ctx, e| {
+            let mark = crate::rectangle::create(
+                Pos2::new(100., 100.),
+                Pos2::new(400., 300.),
+                [20.; 4],
+                &Mark {
+                    fill: Some([255, 0, 0, 255]),
+                    ..Default::default()
+                },
+            );
+            e.doc.layers[0].frames[0] = vec![mark.clone()].into();
+            e.tool = Tool::Select;
+            e.canvas.selected = vec![(0, 0)];
+            let count = e.undo.len();
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let a = view.screen(Pos2::new(230., 170.));
+            let b = a + Vec2::new(45., 20.);
+            let c = b + Vec2::new(20., 0.);
+            alt_tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(a), alt_button(a, true)],
+            );
+            alt_tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            alt_tick(ctx, e, vec![egui::Event::PointerMoved(c)]);
+            alt_tick(ctx, e, vec![alt_button(c, false)]);
+            let marks = &e.doc.layers[0].frames[0];
+            assert_eq!(marks.len(), 2);
+            assert_eq!(marks[0].nodes, mark.nodes);
+            assert_ne!(marks[1].nodes, mark.nodes);
+            assert_ne!(marks[1].style.track, marks[0].style.track);
+            assert_eq!(e.canvas.selected, vec![(0, 1)]);
+            assert_eq!(e.undo.len(), count + 1);
+            e.history(false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            e.history(true);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+        });
+    }
+    #[test]
+    fn alt_click_does_not_duplicate_and_escape_cancels_copy_with_history() {
+        run(|ctx, e| {
+            let mark = crate::rectangle::create(
+                Pos2::new(100., 100.),
+                Pos2::new(400., 300.),
+                [20.; 4],
+                &Mark {
+                    fill: Some([255, 0, 0, 255]),
+                    ..Default::default()
+                },
+            );
+            e.doc.layers[0].frames[0] = vec![mark.clone()].into();
+            e.tool = Tool::Select;
+            e.canvas.selected = vec![(0, 0)];
+            let count = e.undo.len();
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let a = view.screen(Pos2::new(230., 170.));
+            let b = a + Vec2::new(45., 20.);
+            alt_tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(a), alt_button(a, true)],
+            );
+            alt_tick(ctx, e, vec![alt_button(a, false)]);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            assert_eq!(e.undo.len(), count);
+            alt_tick(
+                ctx,
+                e,
+                vec![egui::Event::PointerMoved(a), alt_button(a, true)],
+            );
+            alt_tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            alt_tick(
+                ctx,
+                e,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::ALT,
+                }],
+            );
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+            assert_eq!(e.undo.len(), count);
+            assert_eq!(e.canvas.selected, vec![(0, 0)]);
+            assert_eq!(e.doc.layers[0].frames[0][0].nodes, mark.nodes);
+        });
+    }
+
+    #[test]
+    fn dragging_a_filled_rectangle_does_not_peel_its_fill_off() {
+        run(|ctx, e| {
+            let mark = crate::rectangle::create(
+                Pos2::new(100., 100.),
+                Pos2::new(400., 300.),
+                [40.; 4],
+                &Mark {
+                    fill: Some([200, 100, 50, 255]),
+                    ..Default::default()
+                },
+            );
+            e.doc.layers[0].frames[0] = vec![mark.clone()].into();
+            e.tool = Tool::Select;
+            let view = e
+                .canvas
+                .view(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 700.)));
+            let a = view.screen(Pos2::new(250., 200.));
+            let b = a + Vec2::new(35., 20.);
+            tick(ctx, e, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            tick(ctx, e, vec![egui::Event::PointerMoved(b)]);
+            tick(ctx, e, vec![button(b, false)]);
+            let marks = &e.doc.layers[0].frames[0];
+            assert_eq!(marks.len(), 1);
+            assert!(marks[0].stroke && marks[0].fill.is_some());
+            assert_ne!(marks[0].nodes, mark.nodes);
+            assert!(marks[0].style.linked_outline_fill);
+        });
+    }
+
+    #[test]
+    fn bucket_can_relink_an_existing_flattened_fill_to_a_closed_curve() {
+        run(|_ctx, e| {
+            let outline = crate::rectangle::create(
+                Pos2::new(100., 100.),
+                Pos2::new(400., 300.),
+                [40.; 4],
+                &Mark::default(),
+            );
+            e.doc.layers[0].frames[0] = vec![outline].into();
+            e.fill_enabled = true;
+            let mut state = Canvas::default();
+            e.feature.bucket_link_outline = false;
+            e.bucket_at(&mut state, Pos2::new(250., 200.), false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            e.feature.bucket_link_outline = true;
+            e.bucket_at(&mut state, Pos2::new(250., 200.), false);
+            let marks = &e.doc.layers[0].frames[0];
+            assert_eq!(marks.len(), 1);
+            assert!(
+                marks[0].fill.is_some() && marks[0].stroke && marks[0].style.linked_outline_fill
+            );
+        });
+    }
+
+    #[test]
+    fn rectangle_selection_keeps_fill_and_relink_snaps_existing_separate_fill() {
+        run(|_ctx, e| {
+            let original = crate::rectangle::create(
+                Pos2::new(100., 100.),
+                Pos2::new(400., 300.),
+                [40.; 4],
+                &Mark {
+                    fill: Some([200, 100, 50, 255]),
+                    ..Default::default()
+                },
+            );
+            assert!(original.style.linked_outline_fill);
+            e.doc.layers[0].frames[0] = vec![original.clone()].into();
+            let mut state = Canvas::default();
+            e.separate_component(&mut state, (0, 0), true);
+            assert_eq!(
+                e.doc.layers[0].frames[0].len(),
+                1,
+                "selecting a primitive must not split it"
+            );
+            // Explicit separation remains available, then the user can relink.
+            e.canvas.selected = vec![(0, 0)];
+            e.separate_fill_stroke();
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            let fill =
+                crate::vector::transform(&e.doc.layers[0].frames[0][0], |p| p + Vec2::new(30., 0.));
+            e.doc.layers[0].frames[0][0] = fill;
+            e.canvas.selected = vec![(0, 0), (0, 1)];
+            let count = e.undo.len();
+            e.relink_selected_fill_outline();
+            assert_eq!(e.undo.len(), count + 1);
+            let marks = &e.doc.layers[0].frames[0];
+            assert_eq!(marks.len(), 1);
+            assert!(marks[0].stroke && marks[0].style.linked_outline_fill);
+            assert_eq!(marks[0].fill, original.fill);
+            assert_eq!(marks[0].nodes, original.nodes);
+            assert_eq!(e.canvas.selected, vec![(0, 0)]);
+            // A direct outline-node edit now changes the shared fill boundary.
+            e.doc.layers[0].frames[0][0].nodes[0].position[0] += 20.;
+            assert!(e.doc.layers[0].frames[0][0].fill.is_some());
+            e.history(false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 2);
+            e.history(true);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 1);
+        });
+    }
+
+    #[test]
+    fn linked_bucket_tracks_separate_strokes_with_one_undo_and_held_exposure() {
+        run(|_ctx, e| {
+            let corners = [[100., 100.], [300., 100.], [300., 300.], [100., 300.]];
+            let marks: crate::shared::SharedVec<Mark> = (0..4)
+                .map(|i| Mark {
+                    points: vec![corners[i], corners[(i + 1) % 4]].into(),
+                    width: 2.,
+                    ..Default::default()
+                })
+                .collect();
+            e.doc.layers[0].frames[0] = marks;
+            e.doc.layers[0].options.keys = vec![false; e.doc.layers[0].frames.len()].into();
+            e.doc.layers[0].options.keys[0] = true;
+            e.feature.bucket_link_outline = true;
+            e.fill_enabled = true;
+            e.fill_color = Color32::RED;
+            let mut state = Canvas::default();
+            e.bucket_at(&mut state, Pos2::new(200., 200.), false);
+            assert_eq!(e.doc.layers[0].frames[0].len(), 5);
+            assert!(e.doc.layers[0].frames[0][0].style.fill_boundary.is_some());
+            // Repainting an existing bucket fill can link it too.
+            e.doc.layers[0].frames[0][0].style.fill_boundary = None;
+            e.bucket_at(&mut state, Pos2::new(200., 200.), false);
+            assert!(e.doc.layers[0].frames[0][0].style.fill_boundary.is_some());
+            let count = e.undo.len();
+            e.checkpoint();
+            for m in e.doc.layers[0].frames[0].iter_mut().skip(1) {
+                for p in &mut m.points {
+                    if p[0] == 300. {
+                        p[0] = 400.;
+                    }
+                }
+            }
+            e.recover();
+            assert_eq!(e.undo.len(), count + 1);
+            assert!(crate::vector::contains_fill(
+                &e.doc.layers[0].frames[0][0],
+                Pos2::new(380., 200.)
+            ));
+            assert!(crate::vector::contains_fill(
+                &e.doc.layers[0].frames[1][0],
+                Pos2::new(380., 200.)
+            ));
+            e.history(false);
+            assert!(!crate::vector::contains_fill(
+                &e.doc.layers[0].frames[0][0],
+                Pos2::new(380., 200.)
+            ));
+            e.history(true);
+            assert!(crate::vector::contains_fill(
+                &e.doc.layers[0].frames[0][0],
+                Pos2::new(380., 200.)
+            ));
         });
     }
 

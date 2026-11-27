@@ -4,7 +4,11 @@ use super::*;
 fn viewport_uses_shared_device_callbacks_without_readback_and_recovers() {
     use crate::gpu_lens::block_on;
     use eframe::{egui_wgpu, wgpu};
-    let instance = wgpu::Instance::default();
+    let setup = crate::startup::gpu_configuration().wgpu_setup;
+    let egui_wgpu::WgpuSetup::CreateNew(setup) = setup else {
+        panic!("native GPU setup")
+    };
+    let instance = wgpu::Instance::new(setup.instance_descriptor);
     let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = block_on(adapter.request_device(&Default::default())).unwrap();
     eprintln!("integration GPU: {:?}", adapter.get_info());

@@ -75,6 +75,7 @@ pub enum Icon {
     Lock,
     Folder,
     Mask,
+    ShapeMask,
     Last,
     Symbol,
     Library,
@@ -585,6 +586,16 @@ pub fn draw(p: &egui::Painter, r: Rect, icon: Icon, c: Color32) {
                 (1., 3.),
                 (1., 5.),
             ]);
+        }
+        Icon::ShapeMask => {
+            p.circle_stroke(pt(10., 10.), (pt(16., 10.) - pt(10., 10.)).length(), s);
+            for (x, y) in [(3., 3.), (17., 3.), (17., 17.), (3., 17.)] {
+                p.circle_filled(pt(x, y), (pt(1.5, 0.) - pt(0., 0.)).length(), c);
+            }
+            line((3., 3.), (17., 3.));
+            line((17., 3.), (17., 17.));
+            line((17., 17.), (3., 17.));
+            line((3., 17.), (3., 3.));
         }
         Icon::Mask => {
             rect(1., 3., 13., 13.);

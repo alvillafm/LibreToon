@@ -1,6 +1,6 @@
 # Matriz de capacidades y compatibilidad
 
-Estado del árbol de trabajo: 24 de noviembre de 2026. La versión del manifiesto es **1.0.0**; esta auditoría no constituye una nueva versión publicada. El estado de los trabajos restantes está en [AUDIT_IMPLEMENTATION.md](AUDIT_IMPLEMENTATION.md).
+Estado del árbol de trabajo: 26 de noviembre de 2026. La versión del manifiesto es **1.0.1**; esta auditoría no constituye una nueva versión publicada. El estado de los trabajos restantes está en [AUDIT_IMPLEMENTATION.md](AUDIT_IMPLEMENTATION.md).
 
 ## Archivos y recursos
 

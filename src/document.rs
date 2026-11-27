@@ -204,6 +204,12 @@ impl Document {
                     .style
                     .symbol_pivot
                     .is_some_and(|pivot| pivot.iter().any(|v| !v.is_finite() || v.abs() > 1e7))
+                    || mark
+                        .style
+                        .fill_boundary
+                        .as_ref()
+                        .is_some_and(|link| !link.valid())
+                    || mark.style.oval.as_ref().is_some_and(|oval| !oval.valid())
                     || !mark.width.is_finite()
                     || mark.width <= 0.0
                     || mark.width > 100.0

@@ -324,7 +324,8 @@ impl Editor {
         self.finish_pending_pen();
         self.checkpoint();
         let layer = &mut self.doc.layers[batch.layer];
-        for (range, cel) in changes {
+        for (range, mut cel) in changes {
+            crate::linked_fill::refresh(&mut cel);
             for frame in range {
                 layer.frames[frame] = cel.clone();
             }

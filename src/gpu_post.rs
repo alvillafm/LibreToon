@@ -70,6 +70,7 @@ impl GpuPost {
     }
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Option<Self> {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let shader_source = include_str!("gpu_post.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Resident post-processing"),
@@ -83,7 +84,9 @@ impl GpuPost {
             compilation_options: Default::default(),
             cache: None,
         });
-        if let Some(error) = block_on(scope.pop()) {
+        let internal_error = block_on(internal.pop());
+        let validation_error = block_on(scope.pop());
+        if let Some(error) = internal_error.or(validation_error) {
             eprintln!("Post GPU validation: {error}");
             return None;
         }

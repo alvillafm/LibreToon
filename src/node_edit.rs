@@ -872,7 +872,7 @@ impl Editor {
         self.canvas.set_node_ids(Vec::new());
         self.recover();
     }
-    fn separate_fill_stroke(&mut self) {
+    pub(crate) fn separate_fill_stroke(&mut self) {
         let selected = self.canvas.selected.clone();
         let mut changes = selected
             .iter()

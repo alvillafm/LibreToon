@@ -90,13 +90,14 @@ fn main(@builtin(global_invocation_id) p: vec3<u32>) {
         }
         case 8u: {
             let angle=b*0.017453292519943295;let direction=vec2<f32>(cos(angle),sin(angle));
-            var shifted=rgb;
-            for(var channel=0u;channel<3u;channel++) {
-                let s=sample_at(vec2<i32>(p.xy)+round_signed(direction*(f(7u)*(f32(channel)-1.0))));
-                var v=0.0;if s.w>0.0 {v=s[channel]/s.w;}
-                shifted[channel]=rgb[channel]+(v-rgb[channel])*clamp(c,0.0,1.0);
-            }
-            out=shifted;
+            let red=sample_at(vec2<i32>(p.xy)+round_signed(direction*(-f(7u))));
+            let green=sample_at(vec2<i32>(p.xy));
+            let blue=sample_at(vec2<i32>(p.xy)+round_signed(direction*f(7u)));
+            var r=0.0;var g=0.0;var z=0.0;
+            if red.w>0.0 {r=red.x/red.w;}
+            if green.w>0.0 {g=green.y/green.w;}
+            if blue.w>0.0 {z=blue.z/blue.w;}
+            out=rgb+(vec3<f32>(r,g,z)-rgb)*clamp(c,0.0,1.0);
         }
         default: {}
     }

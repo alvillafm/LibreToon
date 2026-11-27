@@ -665,6 +665,7 @@ impl Editor {
             Tool::Select | Tool::Object => &[
                 ("Shift + click", "Add or remove from selection"),
                 ("Shift + drag", "Move along one axis"),
+                ("Alt + drag", "Duplicate and move"),
                 ("Double-click a stroke", "Select connected strokes"),
                 ("Double-click a symbol", "Edit symbol"),
                 ("{cmd} + C / X / V", "Copy / Cut / Paste"),
@@ -697,6 +698,7 @@ impl Editor {
             ],
             Tool::Zoom => &[("Alt + click", "Reverse zoom direction")],
             Tool::Transform => &[
+                ("Alt + drag object", "Duplicate and move"),
                 ("Shift + drag object", "Move along one axis"),
                 ("Shift + drag corner", "Keep proportions"),
                 ("Shift + drag rotation handle", "Snap rotation to 15°"),
@@ -896,6 +898,12 @@ impl Editor {
             }
             pasted.style.track = track;
             pasted_marks.push(pasted);
+        }
+        let mut boundary_ids = std::collections::HashMap::new();
+        for mark in &mut pasted_marks {
+            crate::linked_fill::remap_ids(mark, &mut |id| {
+                *boundary_ids.entry(id).or_insert_with(crate::features::id)
+            });
         }
         let frame = &mut self.doc.layers[self.layer].frames[self.frame];
         let start = frame.len();

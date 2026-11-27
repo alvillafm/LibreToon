@@ -129,6 +129,10 @@ pub struct Instance {
 #[serde(default)]
 pub struct MarkStyle {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rounded_rectangle: Option<Box<crate::rectangle::Primitive>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) oval: Option<Box<crate::oval::Primitive>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) palette_fill: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) palette_stroke: Option<u64>,
@@ -136,6 +140,10 @@ pub struct MarkStyle {
     pub primitive: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) linked_outline_fill: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fill_boundary: Option<Box<crate::linked_fill::Boundary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) boundary_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_pivot: Option<[f32; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +267,10 @@ pub struct LayerOptions {
     pub clip: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask_id: Option<u64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mask_inverted: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) mask_disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub masked_by: Option<u64>,
     pub folder: Option<u64>,
@@ -291,6 +303,8 @@ impl Default for LayerOptions {
             opacity: 1.,
             clip: false,
             mask_id: None,
+            mask_inverted: false,
+            mask_disabled: false,
             masked_by: None,
             folder: None,
             keys: Default::default(),
@@ -805,6 +819,9 @@ fn resolve_internal(
                     .layers
                     .iter()
                     .find(|layer| layer.options.mask_id == Some(id))?;
+                if source.options.mask_disabled {
+                    return None;
+                }
                 let mut marks = Vec::new();
                 if crate::folder_groups::layer_active(doc, source, frame) {
                     let rig_frame = crate::folder_groups::rig_frame(doc, source, frame);
@@ -847,6 +864,11 @@ fn resolve_internal(
         } else {
             None
         };
+        let inverted = layer.options.masked_by.is_some_and(|id| {
+            doc.layers
+                .iter()
+                .any(|source| source.options.mask_id == Some(id) && source.options.mask_inverted)
+        });
         let first_output = output.len();
         let marks = crate::animation::marks(layer, frame.min(layer.frames.len() - 1));
         let mut arranged = Vec::new();
@@ -882,9 +904,10 @@ fn resolve_internal(
                     .wrapping_add(((l as u64 + 1) << 32) | (m as u64 + 1)),
             );
             for original in expanded {
-                let parts = mask
-                    .as_ref()
-                    .map_or_else(|| vec![original.clone()], |mask| clip_to(&original, mask));
+                let parts = mask.as_ref().map_or_else(
+                    || vec![original.clone()],
+                    |mask| crate::shape_mask::clip(&original, mask, inverted),
+                );
                 for mut part in parts {
                     let alpha = layer.options.opacity.clamp(0., 1.);
                     part.color[3] = (part.color[3] as f32 * alpha).round() as u8;
@@ -1171,6 +1194,13 @@ pub fn validate(doc: &Document) -> Result<(), String> {
             .filter(|f| checked.insert(f.identity()))
             .flatten()
         {
+            if m.style
+                .rounded_rectangle
+                .as_ref()
+                .is_some_and(|p| !p.valid())
+            {
+                return Err("Invalid rectangle primitive".into());
+            }
             if m.style.gradient.as_ref().is_some_and(|g| !g.valid())
                 || m.style.stroke_gradient.as_ref().is_some_and(|g| !g.valid())
             {
@@ -1379,6 +1409,11 @@ fn validate_resources(doc: &Document) -> Result<(), String> {
                         }))
                         .chain(mark.holes.iter().flat_map(|h| h.iter().flatten()))
                         .any(|v| !v.is_finite() || v.abs() > 1e7)
+                    || mark
+                        .style
+                        .rounded_rectangle
+                        .as_ref()
+                        .is_some_and(|p| !p.valid())
                     || mark.style.gradient.as_ref().is_some_and(|g| !g.valid())
                     || mark
                         .style
